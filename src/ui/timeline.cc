@@ -49,6 +49,7 @@ struct menu_facts {
   bool pinned = false;  // pinned in its chat: the menu offers Unpin
   bool pinnable = false;  // in a chat where pins are kept: a Matrix room
   bool deletable = false;  // one may take it away: one's own, or another's with the power to
+  bool view_removed = false;  // removed, and its content may be viewed back: a moderator's menu offers it
   bool reaction_events = false;  // reacted to, the reactions being events
   std::size_t reaction_count = 0;  // how many reactions it has, of anyone
   std::string link;  // a link to it, where it has one
@@ -257,6 +258,9 @@ template <class Actions>
       const auto redaction = chat->needs.events.find("m.room.redaction");
       const std::int64_t send = redaction != chat->needs.events.end() ? redaction->second : chat->needs.events_default;
       facts.deletable = level >= send && (one.outgoing || level >= chat->needs.redact);
+      // Its removed content viewed back (MSC2815): removed, and one's level
+      // at least the redact level, as the server also asks.
+      facts.view_removed = one.said.redacted && may_view_redacted(*chat, chat->id.account.address);
     }
     facts.reaction_events = !one.said.reaction_events.empty();
     for (const auto& [key, who] : one.said.reactions)

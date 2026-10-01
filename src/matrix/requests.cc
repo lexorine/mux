@@ -909,6 +909,70 @@ void account<Sink>::fetch_quoted(std::string room, std::string target) {
   });
 }
 
+// MSC2815: a removed event fetched back with its content, as a room's
+// moderator may ask. Unstable, the MSC not being in a released spec:
+// fi.mau.msc2815.include_unredacted_content. Loom types the endpoint
+// without the parameter, so it is made from loom's, asked with it.
+struct get_unredacted_event {
+  std::string room_id;
+  std::string event_id;
+  using response = loom::ev::timeline_event;
+  loom::request to_send() const {
+    loom::request asked = loom::cs::get_one_room_event{.room_id = room_id, .event_id = event_id}.to_send();
+    loom::detail::query(asked.target, "fi.mau.msc2815.include_unredacted_content", "true");
+    return asked;
+  }
+};
+
+template <class Sink>
+void account<Sink>::fetch_unredacted(std::string room, std::string event) {
+  loop_->spawn([this, room = std::move(room), event = std::move(event)] {
+    if (!api_)
+      return;
+    const conversation_id in{id_, room};
+    auto got = perform(*api_, get_unredacted_event{.room_id = room, .event_id = event});
+    if (!got) {
+      const failure& failed = got.error();
+      const std::string code = failed.server ? failed.server->errcode : std::string();
+      // The MSC's and Synapse's errors, unstable-prefixed while the MSC is
+      // not in a released spec; anything else as the server said it.
+      if (code == "M_FORBIDDEN")
+        sink_(change::refused{id_, std::format("Only the room's moderators may view the removed message {}", event)});
+      else if (code == "FI.MAU.MSC2815_UNREDACTED_CONTENT_DELETED" || code == "M_UNREDACTED_CONTENT_DELETED")
+        sink_(change::refused{id_, std::format("The server already erased the removed message {}", event)});
+      else if (code == "FI.MAU.MSC2815_UNREDACTED_CONTENT_NOT_RECEIVED" || code == "M_UNREDACTED_CONTENT_NOT_RECEIVED")
+        sink_(change::refused{id_, std::format("The server never received the removed message {} unredacted", event)});
+      else if (code == "M_NOT_FOUND")
+        sink_(change::refused{id_, std::format("The server has no {} to show", event)});
+      else
+        sink_(change::refused{id_, std::format("The removed message was not shown: {}", failed.said())});
+      return;
+    }
+    const loom::ev::timeline_event& one = *got;
+    const auto at = std::chrono::sys_time<std::chrono::milliseconds>(std::chrono::milliseconds(one.origin_server_ts));
+    // A message's content, as the server kept it: shown where the message
+    // was. Anything else -- a state event, a sticker -- as its JSON, as
+    // View Source shows an event. Nothing kept: said, as the server may
+    // not implement the MSC, or may erase removed content at once.
+    splice::visit(splice::overloaded{[&](const loom::ev::m_room_message_content_t& content) {
+                                       if (content.body.empty() && !content.formatted_body && !content.url) {
+                                         sink_(change::refused{
+                                             id_, std::format("The server kept nothing of {}: it may not show removed content, or may erase it at once",
+                                                              event)});
+                                         return;
+                                       }
+                                       sink_(change::message_unredacted{
+                                           in, event, one.sender, at,
+                                           body_of(content.body, content.format, content.formatted_body)});
+                                     },
+                                     [&](const auto&) {
+                                       sink_(change::devtools_text{"Removed content of " + event,
+                                                                  knot::to_pretty_json_string(one)});
+                                     }},
+                  one.content.data());
+  });
+}
+
 template <class Sink>
 void account<Sink>::load_context(std::string room, std::string target) {
   loop_->spawn([this, room = std::move(room), target = std::move(target)] {

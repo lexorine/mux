@@ -48,6 +48,7 @@ template void account<mux::app::post_change>::sign_out_sessions(std::vector<std:
 template void account<mux::app::post_change>::create_group(std::string name);
 template void account<mux::app::post_change>::forward(std::string from, std::string event, std::string to);
 template void account<mux::app::post_change>::fetch_quoted(std::string room, std::string target);
+template void account<mux::app::post_change>::fetch_unredacted(std::string room, std::string event);
 template void account<mux::app::post_change>::load_context(std::string room, std::string target);
 template void account<mux::app::post_change>::load_newer(std::string room, std::string from);
 template void account<mux::app::post_change>::fetch_avatar(std::string source, std::string of);

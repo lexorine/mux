@@ -232,6 +232,8 @@ class account {
   void manage(std::string, room_action_t) {}
   // A quoted message is fetched by Matrix alone for now.
   void fetch_quoted(std::string, std::string) {}
+  // Viewing removed messages (MSC2815) is Matrix's.
+  void fetch_unredacted(std::string, std::string) {}
   // Pinning is Matrix's: nothing to do over XMPP.
   void pin(std::string, std::string, bool) {}
   // Chat states (XEP-0085) are not sent yet.

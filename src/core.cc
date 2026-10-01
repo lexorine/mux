@@ -311,6 +311,9 @@ struct message {
   std::optional<std::string> replies_to;
   bool edited = false;
   bool redacted = false;
+  // Removed, but its content fetched back by a moderator (MSC2815): what
+  // the server still kept of it, shown where the message was.
+  std::optional<body> unredacted;
   bool outgoing = false;
   // Not something said but something done -- someone joined, the room was
   // renamed, an event nothing here reads -- shown as a line of its own in
@@ -754,6 +757,18 @@ struct conversation {
   return nullptr;
 }
 
+// A member's power level, as the room's power levels say: their own, else
+// the default.
+[[nodiscard]] inline std::int64_t power_of(const conversation& chat, std::string_view user) {
+  const auto found = chat.powers.find(std::string(user));
+  return found != chat.powers.end() ? found->second : chat.power_default;
+}
+// Whether the user may view removed messages' content (MSC2815): their
+// level at least the redact level, as the server also asks.
+[[nodiscard]] inline bool may_view_redacted(const conversation& chat, std::string_view user) {
+  return power_of(chat, user) >= chat.needs.redact;
+}
+
 struct account {
   account_id id;
   connection_t state = connection::offline{};
@@ -1014,6 +1029,17 @@ struct message_redacted {
   std::string id;
 };
 
+// A removed message's content, fetched back by a moderator (MSC2815): what
+// the server still kept of it -- its sender and time with it, where the
+// message itself is no longer kept and is put back.
+struct message_unredacted {
+  conversation_id in;
+  std::string id;
+  std::string sender;
+  std::chrono::sys_time<std::chrono::milliseconds> at{};
+  mux::body now;
+};
+
 // A message sent from here, known by a local id until the server answered
 // with its own: from now on it is known by that one -- and where the echo
 // came first and is already kept under it, the local one goes.
@@ -1169,7 +1195,7 @@ struct history_position {
 using change_t = splice::variant<change::connection_changed, change::refused, change::account_removed, change::conversation_updated,
                               change::conversation_removed,
                               change::presence_changed, change::message_added, change::message_edited,
-                              change::message_redacted, change::message_acknowledged, change::delivery_changed, change::message_discarded, change::reaction_changed,
+                              change::message_redacted, change::message_unredacted, change::message_acknowledged, change::delivery_changed, change::message_discarded, change::reaction_changed,
                               change::typing_changed, change::history_position, change::members_changed,
                               change::session_given, change::avatar_loaded, change::receipts_changed,
                               change::window_opened, change::window_extended, change::media_progress,
@@ -1484,6 +1510,37 @@ class model {
       std::erase_if(answers, [&](const message& each) { return each.id == one.id; });
     if (where.latest && where.latest->id == one.id)
       where.latest.reset();
+  }
+  // A removed message's content fetched back (MSC2815): where the message
+  // is kept, it is shown again, still marked removed; where it is not --
+  // taken out where removed messages are not kept -- it is put back where
+  // its time puts it, as removed, with its content.
+  void on(const change::message_unredacted& one) {
+    conversation& where = of(one.in);
+    if (message* kept = message_in(where, one.id)) {
+      kept->unredacted = one.now;
+      return;
+    }
+    // And the copy fetched aside for the replies quoting it: what they quote
+    // is what the server kept of it.
+    if (const auto aside = where.quoted.find(one.id); aside != where.quoted.end()) {
+      aside->second.unredacted = one.now;
+      return;
+    }
+    message made{.in = one.in,
+                 .id = one.id,
+                 .sender = one.sender,
+                 .at = one.at,
+                 .body = {},
+                 .redacted = true,
+                 .unredacted = one.now};
+    made.outgoing = one.sender == where.id.account.address;
+    where.timeline.insert(std::ranges::upper_bound(where.timeline, made.at, {}, &message::at), std::move(made));
+    if (!where.detached) {
+      const message& back = where.timeline.back();
+      if (!where.latest || back.at >= where.latest->at)
+        where.latest = back;
+    }
   }
   void on(const change::threads_listed& one) { of(one.in).thread_roots = one.roots; }
   void on(const change::message_acknowledged& one) {

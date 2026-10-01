@@ -73,6 +73,10 @@ class account {
   void load_context(std::string room, std::string target);
   // A message a reply quotes, fetched on its own, beside the timeline.
   void fetch_quoted(std::string room, std::string target);
+  // A removed message's content, fetched back to show to a moderator
+  // (MSC2815): message_unredacted with what the server kept, or refused
+  // with why not.
+  void fetch_unredacted(std::string room, std::string event);
   // Something done to a room by one allowed to: its state set, or someone
   // let in or sent out.
   void manage(std::string room, room_action_t action);

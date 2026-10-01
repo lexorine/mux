@@ -239,6 +239,11 @@ struct network {
   void view_source(const mux::conversation_id& in, std::string event) {
     on_account_of(in, [room = in.id, event = std::move(event)](auto& account) { account.view_source(room, event); });
   }
+  // A removed message's content, fetched back to show to a moderator
+  // (MSC2815).
+  void view_removed(const mux::conversation_id& in, std::string event) {
+    on_account_of(in, [room = in.id, event = std::move(event)](auto& account) { account.fetch_unredacted(room, event); });
+  }
   void list_state(const mux::conversation_id& in) {
     on_account_of(in, [room = in.id](auto& account) { account.list_state(room); });
   }
