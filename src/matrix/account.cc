@@ -329,6 +329,9 @@ class account {
   // the program's thread through the loop, read by the sync.
   std::optional<std::string> followed_room_;
   std::map<std::string, reaction> reactions_;
+  // The read receipt last sent for each room: sending the same one again
+  // says nothing the server does not know.
+  std::map<std::string, std::string> last_read_;
   // A transaction id, unique across runs and not only within one. A server
   // remembers the ids it has seen per access token and answers a repeated
   // one with the event it made the first time, sending nothing: a counter

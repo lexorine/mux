@@ -60,10 +60,15 @@ void account<Sink>::stop() { stopping_ = true; }
 template <class Sink>
 void account<Sink>::mark_read(std::string room, std::string event) {
   loop_->spawn([this, room = std::move(room), event = std::move(event)] {
-    if (api_)
-      (void)perform(*api_, loom::cs::post_receipt{.room_id = room,
-                                                  .receipt_type = loom::cs::post_receipt::receipt_type_values::m_read{},
-                                                  .event_id = event});
+    if (!api_)
+      return;
+    // Sent already: the server knows how far the room is read.
+    if (const auto last = last_read_.find(room); last != last_read_.end() && last->second == event)
+      return;
+    last_read_.insert_or_assign(room, event);
+    (void)perform(*api_, loom::cs::post_receipt{.room_id = room,
+                                                .receipt_type = loom::cs::post_receipt::receipt_type_values::m_read{},
+                                                .event_id = event});
   });
 }
 
