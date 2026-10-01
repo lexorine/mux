@@ -1,0 +1,101 @@
+name: cachix
+
+# Builds mux as a Nix derivation and publishes it to the `mux` Cachix cache,
+# so a NixOS machine installs it without compiling Skia, FFmpeg or a
+# C++26-modules toolchain.
+#
+# Consumers add the cache with:
+#     cachix use mux
+# which writes `extra-substituters = https://mux.cachix.org` plus the
+# trusted public key. The cache is public and uses managed signing, so no
+# signing key is needed anywhere.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/workflows/cachix.yml"
+  pull_request:
+    paths:
+      - "flake.nix"
+      - "flake.lock"
+  workflow_dispatch:
+  schedule:
+    # 04:17 UTC daily, off the hour so it does not pile onto everyone
+    # else's cron. Upstream mux moves fast; a stale pin should not quietly
+    # keep serving an old build.
+    - cron: "17 4 * * *"
+
+concurrency:
+  group: cachix-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Cheap gate: proves the whole dependency graph still resolves (Skia,
+  # FFmpeg's eight codecs, SDL3) without spending an hour compiling. Runs
+  # on every PR, so a dependency break surfaces in minutes.
+  configure-check:
+    name: configure only
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Configure
+        run: nix build .#mux-configure --print-build-logs --no-link
+
+  build:
+    name: build and push
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # Skia + FFmpeg + an `import std` toolchain can outgrow the runner's
+      # ~14 GB of disk part-way through, and the failure then looks like an
+      # unrelated compiler error. Watch it, and free anything substitutable.
+      - name: Free substitutable paths first
+        run: |
+          nix store gc --no-delete 2>/dev/null || true
+          df -h /nix | tail -1
+
+      - name: Build
+        id: build
+        run: |
+          set -euo pipefail
+          nix build .#mux --print-build-logs --out-link ./result
+          echo "store path: $(nix path-info ./result)"
+          ls -la ./result/bin/
+          df -h /nix | tail -1
+
+      # Daemon mode (the default) pushes each store path as it is built, so
+      # an interrupted run still leaves a usable partial cache behind.
+      - name: Push to Cachix
+        uses: cachix/cachix-action@v17
+        with:
+          name: mux
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Summary
+        run: |
+          path="$(nix path-info ./result)"
+          {
+            echo "### mux built and pushed"
+            echo
+            echo "Store path: \`$path\`"
+            echo
+            echo "To use it from NixOS:"
+            echo '```console'
+            echo '$ cachix use mux'
+            echo '$ nix run nixpkgs#mux   # or whatever exposes it'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
