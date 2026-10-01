@@ -148,6 +148,8 @@ inline bool notify(std::string_view title, std::string_view text) {
   } const closing{fd};
   timeval wait{.tv_sec = 2, .tv_usec = 0};
   ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &wait, sizeof wait);
+  // The one cast a C API asks for: connect() takes every
+  // kind of address as a sockaddr.
   if (::connect(fd, reinterpret_cast<const sockaddr*>(&where), length) != 0)
     return false;
   const auto send_all = [&](std::string_view bytes) {
@@ -187,8 +189,20 @@ inline bool notify(std::string_view title, std::string_view text) {
   body.string("mux");     // app_name
   body.u32(0);            // replaces_id
   body.string("");        // app_icon
+  // The body may be read as markup (the spec's body-markup): what a message
+  // says is escaped, so that none of it is a tag -- an <a>, an <img> of a
+  // file (review 5).
+  const std::string escaped = text | std::views::transform([](char c) -> std::string {
+                                switch (c) {
+                                  case '&': return "&amp;";
+                                  case '<': return "&lt;";
+                                  case '>': return "&gt;";
+                                  default: return std::string(1, c);
+                                }
+                              }) |
+                              std::views::join | std::ranges::to<std::string>();
   body.string(title);     // summary
-  body.string(text);      // body
+  body.string(escaped);   // body
   body.array(4, [&] {     // actions: key, label
     body.string("default");
     body.string("Open");

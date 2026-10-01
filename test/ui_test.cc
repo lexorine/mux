@@ -88,7 +88,6 @@ struct stub {
   void open_file(std::string, std::string) {}
   void attach_files() {}
   void typing(bool) {}
-  void flip_account_typing() {}
   void settings_files() {}
   void flip_strip_metadata() {}
   void flip_show_deleted() {}
@@ -166,6 +165,8 @@ struct stub {
   void set_room_events(mux::choice_level_t, std::optional<bool>, std::optional<mux::config::room_event_kinds>) {}
   void set_receipts_shown(mux::choice_level_t, std::optional<bool>) {}
   void set_link_previews(mux::choice_level_t, std::optional<bool>) {}
+  void set_typing_sent(mux::choice_level_t, std::optional<bool>) {}
+  void set_previews_direct(mux::choice_level_t, std::optional<bool>) {}
   void set_jump_search(mux::choice_level_t, std::optional<std::int64_t>) {}
   void press_loader(std::string) {}
   void stop_jump() {}
@@ -533,7 +534,7 @@ TEST(Emoji, ThePanelHasRowsAndScrolls) {
   skiff::paint::defaultFont() = nullptr;
 }
 
-// A one-letter message in a group, as in the screenshot of #5378: its bubble
+// A one-letter message in a group, as in a screenshot: its bubble
 // as wide as its name and its letter ask, not its widest; each part's width
 // said where it is not.
 TEST(Timeline, AOneLetterMessageIsNarrow) {

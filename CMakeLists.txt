@@ -145,7 +145,7 @@ cme_find_package(loom COMPONENTS state cs-joining cs-leaving cs-login cs-message
 # built.
 add_library(mux_modules)
 target_sources(mux_modules PUBLIC FILE_SET CXX_MODULES BASE_DIRS src
-  FILES src/core.cc src/net.cc src/xmpp.cc src/http.cc src/matrix.cc src/media.cc
+  FILES src/core.cc src/net.cc src/xmpp.cc src/http.cc src/preview.cc src/matrix.cc src/media.cc
         src/matrix/base.cc src/matrix/names.cc src/matrix/account.cc src/matrix/requests.cc src/matrix/sync.cc
         src/matrix/events.cc src/matrix/media.cc
         src/logic/text.cc src/logic/search.cc src/logic/reading.cc src/logic/drafts.cc
@@ -190,11 +190,16 @@ option(MUX_ERASE_HANDLERS "Outside a release build, erase Asio completion handle
 target_compile_definitions(mux_modules PUBLIC
   $<$<AND:$<BOOL:${MUX_ERASE_HANDLERS}>,$<NOT:$<CONFIG:Release>>>:MUX_ERASED_HANDLERS>)
 
+# Text and bytes, each made of the other a byte at a time: below everything.
+add_library(mux_bytes)
+target_sources(mux_bytes PUBLIC FILE_SET CXX_MODULES BASE_DIRS src FILES src/bytes.cc)
+target_compile_features(mux_bytes PUBLIC cxx_std_26)
+target_compile_options(mux_bytes PUBLIC ${mux_std_flags})
 add_library(mux_config)
 target_sources(mux_config PUBLIC FILE_SET CXX_MODULES BASE_DIRS src FILES src/config.cc)
 target_compile_features(mux_config PUBLIC cxx_std_26)
 target_compile_options(mux_config PUBLIC ${mux_std_flags})
-target_link_libraries(mux_config PUBLIC knot splice)
+target_link_libraries(mux_config PUBLIC knot splice mux_bytes)
 target_link_libraries(mux_modules PUBLIC mux_config splice)
 foreach(name IN ITEMS core net xmpp http matrix media logic)
   add_library(mux_${name} ALIAS mux_modules)
@@ -204,7 +209,7 @@ if(MUX_UI)
   # skiff and skiff-widgets say the rest of what they are in their own trees.
   cme_declare_port(NAME skiff PROVIDES skiff
     GITHUB_REPOSITORY j4niwzis/skiff
-    GIT_TAG 4dda84c2f5bde1c1495e2ea4d01b86206cf2c67b)
+    GIT_TAG 0531469ad26b78ff839e9660c9bfc6e9448b8b64)
   cme_declare_port(NAME skiff-widgets PROVIDES skiff-widgets skiff_widgets
     GITHUB_REPOSITORY j4niwzis/skiff-widgets
     GIT_TAG 99bf5557a3713aa414cd14ee550c5dbb7bc75cf4)

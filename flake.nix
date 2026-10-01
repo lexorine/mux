@@ -14,7 +14,7 @@
     splice = { url = "github:j4niwzis/splice/f2c25443061ba5353720eccd0a9438793c2ea053"; flake = false; };
     tern = { url = "github:j4niwzis/tern/de984ff791a937fff637f44a8d32e506cad18dbc"; flake = false; };
     boost-pfr = { url = "github:boostorg/pfr/401385c240027423acbb1eb6dea2abe0043db5aa"; flake = false; };
-    skiff = { url = "github:j4niwzis/skiff/4dda84c2f5bde1c1495e2ea4d01b86206cf2c67b"; flake = false; };
+    skiff = { url = "github:j4niwzis/skiff/0531469ad26b78ff839e9660c9bfc6e9448b8b64"; flake = false; };
     skiff-widgets = { url = "github:j4niwzis/skiff-widgets/99bf5557a3713aa414cd14ee550c5dbb7bc75cf4"; flake = false; };
 
     # Assets mux #embed s. CMake checks for these before downloading, so
