@@ -6,6 +6,7 @@
 // sent and acknowledged; a later sync; stopped.
 import std;
 import splice;
+import mux.config;
 import mux.core;
 import mux.net;
 import mux.matrix;
@@ -357,6 +358,202 @@ TEST(Matrix, ModeratorViewsRemovedContent) {
   // The erased one refused with why.
   ASSERT_EQ(seen.refused.size(), 1u);
   EXPECT_NE(seen.refused[0].find("erased"), std::string::npos) << seen.refused[0];
+}
+
+// What the dedup test hears from the account: one burst of reads and typing
+// on the first room, each asked twice over, where the client used to ask
+// twice.
+struct dedup_recorder;
+struct dedup_sink {
+  dedup_recorder* to = nullptr;
+  void operator()(mux::change_t one) const;
+};
+
+struct dedup_recorder {
+  mux::net::loop* running = nullptr;
+  bool asked = false;
+  std::optional<mux::matrix::account<dedup_sink>> account;
+};
+
+void dedup_sink::operator()(mux::change_t one) const {
+  splice::visit(splice::overloaded{[&](const mux::change::connection_changed& changed) {
+                                if (splice::visit(splice::overloaded{[](const mux::connection::offline&) { return true; },
+                                                               [](const mux::connection::failed&) { return true; },
+                                                               [](const auto&) { return false; }},
+                                               changed.state))
+                                  to->running->stop();
+                              },
+                              [&](const mux::change::conversation_updated& made) {
+                                if (!to->asked) {
+                                  to->asked = true;
+                                  to->account->mark_read(made.id.id, "$m1");
+                                  to->account->mark_read(made.id.id, "$m1");
+                                  to->account->typing(made.id.id, true);
+                                  to->account->typing(made.id.id, true);
+                                  to->account->typing(made.id.id, false);
+                                }
+                              },
+                              [](const auto&) {}},
+              one);
+}
+
+// A receipt asked twice goes out once, and typing said twice goes out once
+// until it changes: the fake homeserver counts what it hears.
+TEST(Matrix, SendsEachReceiptAndTypingOnce) {
+  const auto certificate = mux::test::self_signed();
+  mux::net::loop running;
+  auto server_tls = mux::net::server_tls(certificate.certificate_pem, certificate.key_pem);
+  auto client_tls = mux::net::client_tls();
+  mux::net::trust(client_tls, certificate.certificate_pem);
+  mux::net::listener listening(running);
+
+  std::vector<request> heard;
+  dedup_recorder seen{.running = &running};
+  int syncs = 0, receipts = 0, typings = 0;
+  running.spawn([&] {
+    for (;;) {
+      auto socket = listening.accept();
+      auto wire = std::make_shared<mux::net::stream>(running, server_tls, std::move(socket));
+      running.spawn([&, wire] {
+        if (!wire->accept_tls())
+          return;
+        std::string pending;
+        for (auto it = wire->input().begin(); it != std::default_sentinel; ++it) {
+          pending += *it;
+          while (auto one = take(pending)) {
+            heard.push_back(*one);
+            if (one->target.find("/receipt/") != std::string::npos)
+              ++receipts;
+            else if (one->target.find("/typing/") != std::string::npos)
+              ++typings;
+            std::string body = "{}";
+            if (one->target.starts_with("/_matrix/client/v3/login")) {
+              body = login;
+            } else if (one->target.starts_with("/_matrix/client/v3/sync")) {
+              ++syncs;
+              if (one->target.find("since=") == std::string::npos)
+                body = first_sync;
+              else
+                body = R"({"next_batch":"s)" + std::to_string(syncs) + R"("})";
+            }
+            wire->write(answer(body));
+            wire->flush();
+            if (receipts >= 1 && typings >= 2 && syncs >= 2)
+              seen.account->stop();
+            else if (syncs >= 25)
+              seen.account->stop();
+          }
+        }
+      });
+    }
+  });
+
+  mux::matrix::settings how{.user_id = "@dup:x.org",
+                            .password = "pw",
+                            .homeserver = "https://127.0.0.1:" + std::to_string(listening.port()),
+                            .sync_timeout = std::chrono::milliseconds(0)};
+  seen.account.emplace(running, client_tls, how, dedup_sink{&seen});
+  seen.account->start();
+  running.run();
+
+  int receipt_puts = 0, typing_puts = 0, typing_on = 0, typing_off = 0;
+  for (const auto& one : heard) {
+    if (one.target.find("/receipt/") != std::string::npos)
+      ++receipt_puts;
+    if (one.target.find("/typing/") != std::string::npos) {
+      ++typing_puts;
+      if (one.body.find("\"typing\":true") != std::string::npos)
+        ++typing_on;
+      if (one.body.find("\"typing\":false") != std::string::npos)
+        ++typing_off;
+    }
+  }
+  EXPECT_EQ(receipt_puts, 1);
+  EXPECT_EQ(typing_puts, 2);
+  EXPECT_EQ(typing_on, 1);
+  EXPECT_EQ(typing_off, 1);
+}
+
+// What lands on disk for a room with a long timeline: only its newest
+// events, the older ones left to page back to.
+TEST(Matrix, KeepsOnlyRecentTimelineOnDisk) {
+  std::string events;
+  for (int i = 0; i < 150; ++i) {
+    if (i != 0)
+      events += ",";
+    events += R"({"type":"m.room.message","event_id":"$e)" + std::to_string(i) + R"(","sender":"@b:x.org","origin_server_ts":)" +
+              std::to_string(100 + i) + R"(,"content":{"msgtype":"m.text","body":"many"}})";
+  }
+  const std::string big_sync =
+      R"({"next_batch":"s1","rooms":{"join":{"!r:x.org":{
+   "state":{"events":[
+    {"type":"m.room.create","state_key":"","event_id":"$c","sender":"@a:x.org","origin_server_ts":1,"content":{"room_version":"11"}},
+    {"type":"m.room.name","state_key":"","event_id":"$n","sender":"@a:x.org","origin_server_ts":2,"content":{"name":"Garden"}}]},
+   "timeline":{"limited":false,"prev_batch":"p0","events":[)" +
+      events + R"(]}}}}})";
+
+  const auto certificate = mux::test::self_signed();
+  mux::net::loop running;
+  auto server_tls = mux::net::server_tls(certificate.certificate_pem, certificate.key_pem);
+  auto client_tls = mux::net::client_tls();
+  mux::net::trust(client_tls, certificate.certificate_pem);
+  mux::net::listener listening(running);
+
+  std::vector<request> heard;
+  recorder seen{.running = &running};
+  int syncs = 0;
+  running.spawn([&] {
+    for (;;) {
+      auto socket = listening.accept();
+      auto wire = std::make_shared<mux::net::stream>(running, server_tls, std::move(socket));
+      running.spawn([&, wire] {
+        if (!wire->accept_tls())
+          return;
+        std::string pending;
+        for (auto it = wire->input().begin(); it != std::default_sentinel; ++it) {
+          pending += *it;
+          while (auto one = take(pending)) {
+            heard.push_back(*one);
+            std::string body = "{}";
+            if (one->target.starts_with("/_matrix/client/v3/login")) {
+              body = login;
+            } else if (one->target.starts_with("/_matrix/client/v3/sync")) {
+              ++syncs;
+              if (one->target.find("since=") == std::string::npos)
+                body = big_sync;
+              else {
+                body = R"({"next_batch":"s)" + std::to_string(syncs) + R"("})";
+                if (syncs >= 3)
+                  seen.account->stop();
+              }
+            } else if (one->target.find("/send/m.room.message/") != std::string::npos) {
+              body = R"({"event_id":"$sent"})";
+            }
+            wire->write(answer(body));
+            wire->flush();
+          }
+        }
+      });
+    }
+  });
+
+  mux::matrix::settings how{.user_id = "@cap:x.org",
+                            .password = "pw",
+                            .homeserver = "https://127.0.0.1:" + std::to_string(listening.port()),
+                            .sync_timeout = std::chrono::milliseconds(0)};
+  seen.account.emplace(running, client_tls, how, sink{&seen});
+  seen.account->start();
+  running.run();
+
+  const std::filesystem::path kept =
+      mux::config::state_path(mux::config::file_name_of("@cap:x.org") + ".sync.json");
+  std::ifstream file(kept, std::ios::binary);
+  ASSERT_TRUE(static_cast<bool>(file));
+  const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+  EXPECT_NE(text.find("\"$e149\""), std::string::npos);
+  EXPECT_NE(text.find("\"$e50\""), std::string::npos);
+  EXPECT_EQ(text.find("\"$e49\""), std::string::npos);
+  EXPECT_EQ(text.find("\"$e0\""), std::string::npos);
 }
 
 }  // namespace
