@@ -332,6 +332,9 @@ class account {
   // The read receipt last sent for each room: sending the same one again
   // says nothing the server does not know.
   std::map<std::string, std::string> last_read_;
+  // Typing last said in each room, and when: within the server's timeout a
+  // repeat says nothing new.
+  std::map<std::string, std::pair<bool, std::chrono::steady_clock::time_point>> typing_last_;
   // A transaction id, unique across runs and not only within one. A server
   // remembers the ids it has seen per access token and answers a repeated
   // one with the event it made the first time, sending nothing: a counter
