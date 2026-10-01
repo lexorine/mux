@@ -186,6 +186,7 @@ struct stub {
   void open_manage() {}
   void menu_forward() {}
   void menu_view_source() {}
+  void menu_view_removed() {}
   void explore_state() {}
   void open_send_custom() {}
   void close_devtools() {}
