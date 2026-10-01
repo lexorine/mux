@@ -115,6 +115,9 @@
         # Skia's own system deps: its third_party/externals is empty in a
         # cme build, so every codec and font library comes from nixpkgs.
         zlib libpng libjpeg_turbo libwebp freetype
+        # Skia's GL backend, which skiff includes unconditionally:
+        #   src/skia.cc:14:10: fatal error: 'GL/gl.h' file not found
+        libglvnd
         # Windowing headers SDL3 opens windows on.
         libx11 libxext libxkbcommon wayland wayland-protocols
       ];
