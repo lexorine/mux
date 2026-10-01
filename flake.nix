@@ -88,6 +88,12 @@
       #    named again by hand.
       # 5. -lc++/-lc++abi must be named at link; -L alone leaves the std
       #    module's symbols unresolved.
+      # Every include dir is named explicitly, because -nostdinc++ also
+      # suppresses the -isystem entries the nix cc-wrapper would otherwise
+      # append from NIX_CFLAGS_COMPILE. That is not a theoretical concern:
+      # skiff's failing compile line carried exactly these six and no GL
+      # header path at all, so `libglvnd` in nativeBuildInputs bought
+      # nothing while -nostdinc++ was in force.
       cxxFlags = lib.concatStringsSep " " [
         "-nostdinc++"
         "-isystem ${pkgs.libcxx.dev}/include/c++/v1"
@@ -95,6 +101,23 @@
         "-isystem ${pkgs.glibc.dev}/include"
         "-isystem ${pkgs.boost.dev}/include"
         "-isystem ${pkgs.openssl.dev}/include"
+        "-isystem ${pkgs.libglvnd.dev}/include"
+        "-isystem ${pkgs.zlib.dev}/include"
+        "-isystem ${pkgs.libpng.dev}/include"
+        "-isystem ${pkgs.libjpeg_turbo.dev}/include"
+        "-isystem ${pkgs.libwebp}/include"
+        "-isystem ${pkgs.freetype.dev}/include"
+        "-isystem ${pkgs.harfbuzz.dev}/include"
+        "-isystem ${pkgs.expat.dev}/include"
+        "-isystem ${pkgs.libx11.dev}/include"
+        "-isystem ${pkgs.libxext.dev}/include"
+        "-isystem ${pkgs.libxkbcommon.dev}/include"
+        "-isystem ${pkgs.libxrandr.dev}/include"
+        "-isystem ${pkgs.wayland.dev}/include"
+        "-isystem ${pkgs.wayland-protocols}/share/wayland-protocols"
+        "-isystem ${pkgs.vulkan-headers}/include"
+        "-isystem ${pkgs.sdl3.dev}/include"
+        "-isystem ${pkgs.ffmpeg.dev}/include"
       ];
 
       ldFlags = lib.concatStringsSep " " [
@@ -117,7 +140,7 @@
         zlib libpng libjpeg_turbo libwebp freetype
         # Skia's GL backend, which skiff includes unconditionally:
         #   src/skia.cc:14:10: fatal error: 'GL/gl.h' file not found
-        libglvnd
+        libglvnd.dev
         # Windowing headers SDL3 opens windows on.
         libx11 libxext libxkbcommon wayland wayland-protocols
       ];
