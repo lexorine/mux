@@ -45,6 +45,16 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+            # The build needs network at CONFIGURE time, not because the
+            # result is unpinned but because cmake-everywhere fetches a few
+            # things itself: boostorg/pfr goes through CPM/FetchContent
+            # rather than through cme's -D<PORT>_SOURCE_DIR, so it still
+            # git-clones, and Skia is fetched as a pinned archive by gn.
+            # Both are pinned by commit/digest, so the resulting store path
+            # is the same one a fully hermetic build would produce --
+            # which is what makes it safe to cache. TODO: vendor the last
+            # few fetches and turn this back off.
+            sandbox = false
       - name: Configure
         run: nix build .#mux-configure --print-build-logs --no-link
 
@@ -59,6 +69,16 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+            # The build needs network at CONFIGURE time, not because the
+            # result is unpinned but because cmake-everywhere fetches a few
+            # things itself: boostorg/pfr goes through CPM/FetchContent
+            # rather than through cme's -D<PORT>_SOURCE_DIR, so it still
+            # git-clones, and Skia is fetched as a pinned archive by gn.
+            # Both are pinned by commit/digest, so the resulting store path
+            # is the same one a fully hermetic build would produce --
+            # which is what makes it safe to cache. TODO: vendor the last
+            # few fetches and turn this back off.
+            sandbox = false
 
       # Skia + FFmpeg + an `import std` toolchain can outgrow the runner's
       # ~14 GB of disk part-way through, and the failure then looks like an
