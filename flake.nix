@@ -72,6 +72,17 @@
       portFlags = lib.concatStringsSep " "
         (lib.mapAttrsToList (n: v: "-D${n}_SOURCE_DIR=${v}") portSrcs);
 
+      # boost-pfr is the one dependency that -Dboost-pfr_SOURCE_DIR does not
+      # catch: mux asks for it as pfr[modules] inside
+      # cme_find_package(Boost COMPONENTS ...) rather than declaring a port,
+      # so cme hands it straight to CPM/FetchContent and the git clone still
+      # runs. The log shows the FetchContent layout
+      # (build/_deps/boost-pfr-subbuild/...-populate-gitclone.cmake), and
+      # FetchContent's own override is FETCHCONTENT_SOURCE_DIR_<UPPERCASED
+      # NAME>, which for `boost-pfr` keeps the hyphen.
+      boostPfrOverride =
+        "-DFETCHCONTENT_SOURCE_DIR_BOOST-PFR=${boost-pfr}";
+
       # 3. Fortify off: nixpkgs hardening sets _FORTIFY_SOURCE, and glibc's
       #    __fortify_function has internal linkage, which a module cannot
       #    export. The cc-wrapper appends hardening AFTER user flags, so
@@ -119,6 +130,7 @@
         MUX_LDFLAGS = ldFlags;
         MUX_CME_ARCHIVE = "${cmeArchive}";
         MUX_PORTS = portFlags;
+        MUX_BOOST_PFR = boostPfrOverride;
         MUX_CLDR_EN = "${cldr-en}";
         MUX_CLDR_RU = "${cldr-ru}";
       };
@@ -150,6 +162,7 @@
           -DCMAKE_EXE_LINKER_FLAGS="$MUX_LDFLAGS" \
           -DCME_ARCHIVE="$MUX_CME_ARCHIVE" \
           $MUX_PORTS \
+          $MUX_BOOST_PFR \
           -DMUX_UI=$MUX_UI \
           -DMUX_TESTS=OFF
         runHook postConfigure
@@ -171,7 +184,7 @@
         doCheck = false;
 
         inherit (env) MUX_STDLIB_JSON MUX_CXXFLAGS MUX_LDFLAGS MUX_CME_ARCHIVE
-                MUX_PORTS MUX_CLDR_EN MUX_CLDR_RU;
+                MUX_PORTS MUX_CLDR_EN MUX_CLDR_RU MUX_BOOST_PFR;
         MUX_UI = ui;
         inherit install;
 
@@ -213,7 +226,7 @@
         hardeningDisable = [ "fortify" ];
         dontBuild = true;
         inherit (env) MUX_STDLIB_JSON MUX_CXXFLAGS MUX_LDFLAGS MUX_CME_ARCHIVE
-                MUX_PORTS MUX_CLDR_EN MUX_CLDR_RU;
+                MUX_PORTS MUX_CLDR_EN MUX_CLDR_RU MUX_BOOST_PFR;
         MUX_UI = "ON";
         configurePhase = configPhase;
         installPhase = ''
