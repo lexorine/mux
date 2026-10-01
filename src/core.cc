@@ -313,7 +313,7 @@ struct message {
   bool redacted = false;
   // Removed, but its content fetched back by a moderator (MSC2815): what
   // the server still kept of it, shown where the message was.
-  std::optional<body> unredacted;
+  std::optional<mux::body> unredacted;
   bool outgoing = false;
   // Not something said but something done -- someone joined, the room was
   // renamed, an event nothing here reads -- shown as a line of its own in
