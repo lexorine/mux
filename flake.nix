@@ -232,9 +232,15 @@
                 MUX_PORTS MUX_CLDR_EN MUX_CLDR_RU MUX_BOOST_PFR caCerts;
         MUX_UI = "ON";
         configurePhase = configPhase;
+        # Copy the configure tree out dereferencing symlinks rather than
+        # verbatim: cme leaves absolute symlinks into the build directory
+        # (cme-include/.../skia -> $PWD/build/_deps/skia-src/include), and
+        # Nix's noBrokenSymlinks check rejects a store output containing
+        # one. Resolving them also makes the probe output self-contained.
         installPhase = ''
           runHook preInstall
-          cp -r build $out
+          mkdir -p $out/tree
+          cp -rL build/. $out/tree/
           runHook postInstall
         '';
       };
