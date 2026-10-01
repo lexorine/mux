@@ -271,7 +271,7 @@ void account<Sink>::event(const conversation_id& in, const loom::ev::timeline_ev
     sink_(change::message_added{std::move(made), where});
   }, [&](const loom::ev::m_reaction_content_t& content) {
     if (content.m_relates_to && content.m_relates_to->event_id && content.m_relates_to->key) {
-      reactions_[one.event_id] = {*content.m_relates_to->event_id, *content.m_relates_to->key, one.sender};
+      reactions_[one.event_id] = {*content.m_relates_to->event_id, *content.m_relates_to->key, one.sender, in.id};
       const bool live =
           splice::visit(splice::overloaded{[](placement::at_end) { return true; }, [](const auto&) { return false; }}, where);
       sink_(change::reaction_changed{in, *content.m_relates_to->event_id, *content.m_relates_to->key, one.sender,

@@ -306,6 +306,7 @@ class account {
 
   struct reaction {
     std::string target, key, who;
+    std::string room;
   };
 
   net::loop* loop_;

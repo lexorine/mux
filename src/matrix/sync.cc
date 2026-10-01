@@ -526,8 +526,17 @@ void account<Sink>::tell(const loom::cs::sync::response& got) {
       sink_(std::move(made));
     }
   if (rooms.leave)
-    for (const auto& [room, part] : *rooms.leave)
+    for (const auto& [room, part] : *rooms.leave) {
+      // Nothing of a left room is kept: its reactions (to map redactions
+      // by), its fetched members, the receipt and typing last said in it,
+      // and where its history was paging back from.
+      std::erase_if(reactions_, [&](const auto& one) { return one.second.room == room; });
+      full_members_.erase(room);
+      last_read_.erase(room);
+      typing_last_.erase(room);
+      paged_.erase(room);
       sink_(change::conversation_removed{{id_, room}});
+    }
 }
 
 using power_levels_content = loom::ev::m_room_power_levels_content_t;
