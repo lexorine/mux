@@ -4,16 +4,11 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-    # Contains the upstream fix for the clang 23 std::format crash in
-    # show_space_bars (3acea405), which is why no local patch is needed.
+    # Carries upstream's fix for the clang 23 std::format crash in
+    # show_space_bars (3acea405), so no local patch is needed.
     mux = {
       url = "github:j4niwzis/mux/d89d2b87f650613d80c2c31d5b789df783565a21";
       flake = false;
-    };
-
-    cmake-everywhere = {
-      url = "https://github.com/j4niwzis/cmake-everywhere/releases/download/v0.2.24/cmake-everywhere-0.2.24.tar.gz";
-      flake = false; # pinned by narHash in flake.lock (Lix rejects sha256=)
     };
 
     # The dependency family, at the commits mux's own cme-lock.json records.
@@ -24,12 +19,11 @@
     splice = { url = "github:j4niwzis/splice/39bc67a00185f488c989d3c18b98e5995e4dc8dd"; flake = false; };
     tern = { url = "github:j4niwzis/tern/8144cacc26012dc1d349b75f6cf326f083c7a69b"; flake = false; };
     boost-pfr = { url = "github:boostorg/pfr/401385c240027423acbb1eb6dea2abe0043db5aa"; flake = false; };
-
-    # The GUI stack. skiff/skiff-widgets are at the pins mux uses now; the
-    # older 2c75c88 is what the failing CI runs were built against.
     skiff = { url = "github:j4niwzis/skiff/4dda84c2f5bde1c1495e2ea4d01b86206cf2c67b"; flake = false; };
     skiff-widgets = { url = "github:j4niwzis/skiff-widgets/99bf5557a3713aa414cd14ee550c5dbb7bc75cf4"; flake = false; };
 
+    # Assets mux #embed s. CMake checks for these before downloading, so
+    # pre-creating them keeps configure off the network.
     cldr-en = {
       url = "https://raw.githubusercontent.com/unicode-org/cldr/90e46ed15ee4716196d3299f669eff6259ec1dca/common/annotations/en.xml";
       flake = false;
@@ -40,20 +34,35 @@
     };
   };
 
-  outputs = { self, nixpkgs, mux, cmake-everywhere, alef, chevron, knot,
-              loom, splice, tern, boost-pfr, skiff, skiff-widgets,
-              cldr-en, cldr-ru, ... }:
+  outputs = { self, nixpkgs, mux, alef, chevron, knot, loom, splice, tern,
+              boost-pfr, skiff, skiff-widgets, cldr-en, cldr-ru, ... }:
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
       lib = pkgs.lib;
 
-      cme = cmake-everywhere;
-      cmeVersion = "v0.2.24";
+      # cmake-everywhere itself, as a FILE in the store rather than an
+      # unpacked directory.
+      #
+      # get_cme.cmake's own words: "A build with no network cannot download
+      # this ... Such a build declares the archive among its own sources --
+      # by the same URL and the same digest -- and says where it put it."
+      # That is -DCME_ARCHIVE, and it re-checks the digest itself, so this
+      # hash is verified twice: once by Nix, once by cme.
+      #
+      # This replaces an earlier -DCME_SOURCE_DIR, which needed the archive
+      # copied and chmod'd into the source tree; that made patchPhase run for
+      # minutes and then die with SIGSEGV, on both prtapc and a GitHub
+      # runner. Nothing writes to the read-only source tree any more.
+      cmeArchive = pkgs.fetchurl {
+        url = "https://github.com/j4niwzis/cmake-everywhere/releases/download/v0.2.24/cmake-everywhere-0.2.24.tar.gz";
+        # Same digest get_cme.cmake has compiled in for v0.2.24.
+        hash = "sha256-0FNcXeY9Z4MwU7V5ZEvu86eUKwSCFKBk5PnOPD1/1Mw=";
+      };
 
-      # cme's documented offline path: "A checkout somebody else made, named
-      # by whoever knows where it is. This is what a build with no network is
-      # given." Each port reads ${PORT}_SOURCE_DIR.
+      # cme's documented offline mechanism, in its own words: "A checkout
+      # somebody else made, named by whoever knows where it is. This is what
+      # a build with no network is given." Each port reads ${PORT}_SOURCE_DIR.
       portSrcs = {
         alef = alef; chevron = chevron; knot = knot; loom = loom;
         splice = splice; tern = tern; boost-pfr = boost-pfr;
@@ -63,14 +72,16 @@
       portFlags = lib.concatStringsSep " "
         (lib.mapAttrsToList (n: v: "-D${n}_SOURCE_DIR=${v}") portSrcs);
 
-      # 3. fortify off: glibc's __fortify_function has internal linkage and a
-      #    module cannot export it. The cc-wrapper appends hardening AFTER
-      #    user flags, so -U_FORTIFY_SOURCE cannot undo it.
+      # 3. Fortify off: nixpkgs hardening sets _FORTIFY_SOURCE, and glibc's
+      #    __fortify_function has internal linkage, which a module cannot
+      #    export. The cc-wrapper appends hardening AFTER user flags, so
+      #    -U_FORTIFY_SOURCE cannot undo it.
       # 4. -nostdinc++ drops libstdc++ AND every other C++ include dir, so
-      #    glibc (pthread.h, which libc++'s <__thread/support/pthread.h>
-      #    needs), boost and openssl are named again by hand.
-      # 5. -lc++/-lc++abi must be named; -L alone leaves the std module's
-      #    symbols unresolved at link.
+      #    glibc's C headers (pthread.h, which libc++'s
+      #    <__thread/support/pthread.h> needs), boost's and openssl's are
+      #    named again by hand.
+      # 5. -lc++/-lc++abi must be named at link; -L alone leaves the std
+      #    module's symbols unresolved.
       cxxFlags = lib.concatStringsSep " " [
         "-nostdinc++"
         "-isystem ${pkgs.libcxx.dev}/include/c++/v1"
@@ -89,38 +100,46 @@
         "-lc++abi"
       ];
 
-      # Shared by both the real build and the configure-only probe.
+      buildInputsList = with pkgs; [
+        clang cmake ninja gn pkg-config which git perl python3
+        boost openssl
+        # The GUI stack. SDL3 and FFmpeg are REQUIRED by mux's CMakeLists,
+        # and cme feature-probes FFmpeg's components.
+        sdl3 ffmpeg opusfile libvorbis vulkan-headers expat harfbuzz
+        # Skia's own system deps: its third_party/externals is empty in a
+        # cme build, so every codec and font library comes from nixpkgs.
+        zlib libpng libjpeg_turbo libwebp freetype
+        # Windowing headers SDL3 opens windows on.
+        libx11 libxext libxkbcommon wayland wayland-protocols
+      ];
+
       env = {
         MUX_STDLIB_JSON = "${pkgs.libcxx}/lib/libc++.modules.json";
         MUX_CXXFLAGS = cxxFlags;
         MUX_LDFLAGS = ldFlags;
-        MUX_CME_SRC = "${cme}";
-        MUX_CME_VERSION = cmeVersion;
+        MUX_CME_ARCHIVE = "${cmeArchive}";
         MUX_PORTS = portFlags;
-        MUX_UI = "ON";
+        MUX_CLDR_EN = "${cldr-en}";
+        MUX_CLDR_RU = "${cldr-ru}";
       };
 
-      # Pre-create what CMake would otherwise download at configure time.
-      patchPhase = ''
-        runHook prePatch
-        # The unpacked source tree is read-only (it comes from a flake
-        # input), so anything written into it needs this first.
-        chmod -R u+w .
-        cp -r "$MUX_CME_SRC" cme-unpacked
-        chmod -R u+w cme-unpacked
-        printf '%s\n' "$MUX_CME_VERSION" > cme-unpacked/.cme-revision
-        mkdir -p cldr
-        cp ${cldr-en} cldr/en.xml
-        cp ${cldr-ru} cldr/ru.xml
-        runHook postPatch
-      '';
-
-      # 1. CMake defaults CXX to `c++`, which in a nix stdenv is gcc, and gcc
-      #    rejects `import std` ("Only `libstdc++` is supported").
-      # 2. libc++'s module metadata is not in clang's resource dir.
+      # Everything happens in the build directory, which is writable. The
+      # source tree is read-only (it comes from a flake input) and is never
+      # touched: no chmod -R, no cp into it.
       configPhase = ''
         runHook preConfigure
         export hardeningEnable=$hardeningDisable
+
+        # emoji_keywords.cc #embed s these. CMake checks for them before
+        # downloading and re-verifies its own sha256 of what it finds.
+        mkdir -p build/cldr
+        cp "$MUX_CLDR_EN" build/cldr/en.xml
+        cp "$MUX_CLDR_RU" build/cldr/ru.xml
+
+        # 1. CMake defaults CXX to `c++`, which in a nix stdenv is gcc, and
+        #    gcc rejects `import std`. Both compilers are named explicitly.
+        # 2. libc++'s module metadata is not in clang's resource dir, so it
+        #    is pointed at explicitly.
         cmake -S . -B build -G Ninja \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_C_COMPILER=clang \
@@ -129,7 +148,7 @@
           -DCMAKE_CXX_STDLIB_MODULES_JSON="$MUX_STDLIB_JSON" \
           -DCMAKE_CXX_FLAGS="$MUX_CXXFLAGS" \
           -DCMAKE_EXE_LINKER_FLAGS="$MUX_LDFLAGS" \
-          -DCME_SOURCE_DIR="$PWD/cme-unpacked" \
+          -DCME_ARCHIVE="$MUX_CME_ARCHIVE" \
           $MUX_PORTS \
           -DMUX_UI=$MUX_UI \
           -DMUX_TESTS=OFF
@@ -139,21 +158,11 @@
       mkMux = { name, ui, install }: pkgs.stdenv.mkDerivation {
         inherit name;
         pname = name;
-        version = "0.1-${mux.rev or "unknown"}";
+        version = "0.1";
 
         src = mux;
-        # No patches: d89d2b8 already carries the std::format workaround.
 
-        nativeBuildInputs = with pkgs; [
-          clang cmake ninja gn pkg-config which git perl python3
-          boost openssl
-          # GUI side. SDL3 and FFmpeg are REQUIRED by mux's CMakeLists, and
-          # cme feature-probes each of FFmpeg's components by linking.
-          sdl3 ffmpeg opusfile libvorbis vulkan-headers expat
-          # Windowing headers SDL3 opens windows on.
-          libx11 libxext libxkbcommon wayland wayland-protocols
-        ];
-
+        nativeBuildInputs = buildInputsList;
         buildInputs = [ pkgs.libcxx ];
 
         hardeningDisable = [ "fortify" ];
@@ -161,12 +170,11 @@
         enableParallelBuilding = true;
         doCheck = false;
 
-        inherit (env) MUX_STDLIB_JSON MUX_CXXFLAGS MUX_LDFLAGS
-                MUX_CME_SRC MUX_CME_VERSION MUX_PORTS;
+        inherit (env) MUX_STDLIB_JSON MUX_CXXFLAGS MUX_LDFLAGS MUX_CME_ARCHIVE
+                MUX_PORTS MUX_CLDR_EN MUX_CLDR_RU;
         MUX_UI = ui;
         inherit install;
 
-        postPatch = patchPhase;
         configurePhase = configPhase;
 
         buildPhase = ''
@@ -192,44 +200,35 @@
     in
     let
       muxPkg = mkMux { name = "mux"; ui = "ON"; install = "build/mux"; };
+      cliPkg = mkMux { name = "mux-cli"; ui = "OFF"; install = "build/mux-cli"; };
+
+      # Configure-only probe: resolves the whole dependency graph -- Skia,
+      # FFmpeg's codecs, SDL3 -- without spending an hour compiling.
+      probePkg = pkgs.stdenv.mkDerivation {
+        pname = "mux-configure";
+        version = "0.1";
+        src = mux;
+        nativeBuildInputs = buildInputsList;
+        buildInputs = [ pkgs.libcxx ];
+        hardeningDisable = [ "fortify" ];
+        dontBuild = true;
+        inherit (env) MUX_STDLIB_JSON MUX_CXXFLAGS MUX_LDFLAGS MUX_CME_ARCHIVE
+                MUX_PORTS MUX_CLDR_EN MUX_CLDR_RU;
+        MUX_UI = "ON";
+        configurePhase = configPhase;
+        installPhase = ''
+          runHook preInstall
+          cp -r build $out
+          runHook postInstall
+        '';
+      };
     in
     {
-      packages.${system} =
-        let
-          cliPkg = mkMux { name = "mux-cli"; ui = "OFF"; install = "build/mux-cli"; };
-
-          # Configure-only probe: proves the whole dependency graph
-          # resolves -- Skia, FFmpeg's eight codecs, SDL3 -- without
-          # spending an hour compiling. `nix build .#mux-configure`.
-          probePkg = pkgs.stdenv.mkDerivation {
-            pname = "mux-configure";
-            version = "0.1";
-            src = mux;
-            nativeBuildInputs = with pkgs; [
-              clang cmake ninja gn pkg-config which git perl python3
-              boost openssl sdl3 ffmpeg opusfile libvorbis
-              vulkan-headers expat
-              libx11 libxext libxkbcommon wayland wayland-protocols
-            ];
-            buildInputs = [ pkgs.libcxx ];
-            hardeningDisable = [ "fortify" ];
-            dontBuild = true;
-            inherit (env) MUX_STDLIB_JSON MUX_CXXFLAGS MUX_LDFLAGS
-                    MUX_CME_SRC MUX_CME_VERSION MUX_PORTS MUX_UI;
-            postPatch = patchPhase;
-            configurePhase = configPhase;
-            installPhase = ''
-              runHook preInstall
-              cp -r build $out
-              runHook postInstall
-            '';
-          };
-        in
-        {
-          mux = muxPkg;
-          mux-cli = cliPkg;
-          default = muxPkg;
-          mux-configure = probePkg;
-        };
+      packages.${system} = {
+        mux = muxPkg;
+        mux-cli = cliPkg;
+        default = muxPkg;
+        mux-configure = probePkg;
+      };
     };
 }
