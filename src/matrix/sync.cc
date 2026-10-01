@@ -214,6 +214,10 @@ void account<Sink>::run() {
   // Where the last run left the sync: its rooms at once, and the sync goes
   // on from there rather than asking for every room again.
   this->load_kept();
+  // The sliding sync's place kept with the sync: going on from it, rather
+  // than listing every room from the start. Refused, it begins again.
+  if (sliding_ && state_.since)
+    sliding_pos_ = state_.since;
   auto saved_at = std::chrono::steady_clock::now();
 
   std::chrono::seconds backoff(1);
