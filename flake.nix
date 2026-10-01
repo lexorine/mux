@@ -6,11 +6,6 @@
 
     # Carries upstream's fix for the clang 23 std::format crash in
     # show_space_bars (3acea405), so no local patch is needed.
-    mux = {
-      url = "github:j4niwzis/mux/d89d2b87f650613d80c2c31d5b789df783565a21";
-      flake = false;
-    };
-
     # The dependency family, at the commits mux's own cme-lock.json records.
     alef = { url = "github:j4niwzis/alef/902f701a1277335b228ca7252af9b6bf940468ac"; flake = false; };
     chevron = { url = "github:j4niwzis/chevron/29e716ec45db10407960cbe40294c18a270289c0"; flake = false; };
@@ -34,7 +29,7 @@
     };
   };
 
-  outputs = { self, nixpkgs, mux, alef, chevron, knot, loom, splice, tern,
+  outputs = { self, nixpkgs, alef, chevron, knot, loom, splice, tern,
               boost-pfr, skiff, skiff-widgets, cldr-en, cldr-ru, ... }:
     let
       system = "x86_64-linux";
@@ -69,19 +64,19 @@
         skiff = skiff; skiff-widgets = skiff-widgets;
       };
 
+      # CPM checks CPM_${NAME}_SOURCE before any FetchContent involvement
+      # and, when it is set, recurses with SOURCE_DIR only -- dropping
+      # GITHUB_REPOSITORY/GIT_TAG, so nothing is left to download. That is
+      # the override that works.
+      #
+      # -D<PORT>_SOURCE_DIR was tried first and does NOT: it feeds a
+      # cme_declare_port field that nothing here sets.
       portFlags = lib.concatStringsSep " "
-        (lib.mapAttrsToList (n: v: "-D${n}_SOURCE_DIR=${v}") portSrcs);
+        (lib.mapAttrsToList (n: v: "-DCPM_${n}_SOURCE=${v}") portSrcs);
 
-      # boost-pfr is the one dependency that -Dboost-pfr_SOURCE_DIR does not
-      # catch: mux asks for it as pfr[modules] inside
-      # cme_find_package(Boost COMPONENTS ...) rather than declaring a port,
-      # so cme hands it straight to CPM/FetchContent and the git clone still
-      # runs. The log shows the FetchContent layout
-      # (build/_deps/boost-pfr-subbuild/...-populate-gitclone.cmake), and
-      # FetchContent's own override is FETCHCONTENT_SOURCE_DIR_<UPPERCASED
-      # NAME>, which for `boost-pfr` keeps the hyphen.
-      boostPfrOverride =
-        "-DFETCHCONTENT_SOURCE_DIR_BOOST-PFR=${boost-pfr}";
+      # boost-pfr's port name is `boost-pfr` with the hyphen; `boost_pfr` is
+      # only the find_package spelling. So: CPM_boost-pfr_SOURCE.
+      boostPfrOverride = "-DCPM_boost-pfr_SOURCE=${boost-pfr}";
 
       # 3. Fortify off: nixpkgs hardening sets _FORTIFY_SOURCE, and glibc's
       #    __fortify_function has internal linkage, which a module cannot
@@ -133,6 +128,7 @@
         MUX_BOOST_PFR = boostPfrOverride;
         MUX_CLDR_EN = "${cldr-en}";
         MUX_CLDR_RU = "${cldr-ru}";
+        caCerts = "${pkgs.cacert}";
       };
 
       # Everything happens in the build directory, which is writable. The
@@ -141,6 +137,13 @@
       configPhase = ''
         runHook preConfigure
         export hardeningEnable=$hardeningDisable
+
+        # Skia is still fetched, as a pinned archive whose digest cme checks.
+        # Nix's git and curl carry their own CA store and do not trust the
+        # runner's, so without this they fail with "unable to get local
+        # issuer certificate".
+        export NIX_SSL_CERT_FILE="''${caCerts}/etc/ssl/certs/ca-bundle.crt"
+        export SSL_CERT_FILE="''${caCerts}/etc/ssl/certs/ca-bundle.crt"
 
         # emoji_keywords.cc #embed s these. CMake checks for them before
         # downloading and re-verifies its own sha256 of what it finds.
@@ -173,7 +176,7 @@
         pname = name;
         version = "0.1";
 
-        src = mux;
+        src = lib.cleanSourceWith { src = ./.; name = "mux-source"; };
 
         nativeBuildInputs = buildInputsList;
         buildInputs = [ pkgs.libcxx ];
@@ -184,7 +187,7 @@
         doCheck = false;
 
         inherit (env) MUX_STDLIB_JSON MUX_CXXFLAGS MUX_LDFLAGS MUX_CME_ARCHIVE
-                MUX_PORTS MUX_CLDR_EN MUX_CLDR_RU MUX_BOOST_PFR;
+                MUX_PORTS MUX_CLDR_EN MUX_CLDR_RU MUX_BOOST_PFR caCerts;
         MUX_UI = ui;
         inherit install;
 
@@ -220,13 +223,13 @@
       probePkg = pkgs.stdenv.mkDerivation {
         pname = "mux-configure";
         version = "0.1";
-        src = mux;
+        src = lib.cleanSourceWith { src = ./.; name = "mux-source"; };
         nativeBuildInputs = buildInputsList;
         buildInputs = [ pkgs.libcxx ];
         hardeningDisable = [ "fortify" ];
         dontBuild = true;
         inherit (env) MUX_STDLIB_JSON MUX_CXXFLAGS MUX_LDFLAGS MUX_CME_ARCHIVE
-                MUX_PORTS MUX_CLDR_EN MUX_CLDR_RU MUX_BOOST_PFR;
+                MUX_PORTS MUX_CLDR_EN MUX_CLDR_RU MUX_BOOST_PFR caCerts;
         MUX_UI = "ON";
         configurePhase = configPhase;
         installPhase = ''
