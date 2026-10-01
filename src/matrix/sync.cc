@@ -351,6 +351,11 @@ void account<Sink>::save_kept() const {
   using joined_t = response::rooms_t::joined_room_t;
   response out;
   out.next_batch = *state_.since;
+  // Only the newest events of each room are kept: the timeline since the
+  // last gap grows without bound in a long run, and was written out whole
+  // every half minute. The prev_batch from before the dropped events still
+  // pages back over them on demand.
+  static constexpr std::size_t kKeptTimeline = 100;
   std::map<std::string, joined_t> join;
   for (const auto& [room, kept] : state_.joined) {
     joined_t one;
@@ -358,7 +363,10 @@ void account<Sink>::save_kept() const {
     for (const auto& [key, event] : kept.state.events)
       state_events.push_back(event);
     one.state = joined_t::state_t{.events = std::move(state_events)};
-    one.timeline = joined_t::timeline_t{.limited = true, .prev_batch = kept.prev_batch, .events = kept.timeline};
+    std::vector<loom::ev::timeline_event> timeline = kept.timeline;
+    if (timeline.size() > kKeptTimeline)
+      timeline.erase(timeline.begin(), timeline.end() - static_cast<std::ptrdiff_t>(kKeptTimeline));
+    one.timeline = joined_t::timeline_t{.limited = true, .prev_batch = kept.prev_batch, .events = std::move(timeline)};
     one.summary = joined_t::room_summary_t{.m_heroes = kept.summary.heroes,
                                            .m_joined_member_count = kept.summary.joined_members,
                                            .m_invited_member_count = kept.summary.invited_members};
