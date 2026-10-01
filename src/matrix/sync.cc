@@ -390,12 +390,16 @@ void account<Sink>::save_kept() const {
   {
     std::ofstream file(fresh, std::ios::binary | std::ios::trunc);
     file << knot::to_json_string(out);
+    file.close();
     if (!file) {
       log(id_, "the sync could not be kept in {}", where.string());
+      std::filesystem::remove(fresh, failed);
       return;
     }
   }
   std::filesystem::rename(fresh, where, failed);
+  if (failed)
+    log(id_, "the sync could not be kept in {}: {}", where.string(), failed.message());
 }
 
 template <class Sink>
