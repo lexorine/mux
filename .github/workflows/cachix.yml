@@ -10,16 +10,13 @@ name: cachix
 # trusted public key. The cache is public and uses managed signing, so no
 # signing key is needed anywhere.
 on:
+  # No `paths:` filter here on purpose. An earlier version listed only the
+  # flake and this workflow, which meant a commit fixing src/ -- which is
+  # where every failure so far has been -- triggered no build at all and
+  # the fix looked untested. A source change must run the build.
   push:
-    branches: [main]
-    paths:
-      - "flake.nix"
-      - "flake.lock"
-      - ".github/workflows/cachix.yml"
+    branches: [main, 'integrate/**']
   pull_request:
-    paths:
-      - "flake.nix"
-      - "flake.lock"
   workflow_dispatch:
   schedule:
     # 04:17 UTC daily, off the hour so it does not pile onto everyone
@@ -27,6 +24,10 @@ on:
     # keep serving an old build.
     - cron: "17 4 * * *"
 
+# One build per branch at a time, but a push to one branch never cancels
+# another's: github.ref is in the group, so main and integrate/cleanup are
+# independent, and a second push to the same branch supersedes its own
+# earlier run.
 concurrency:
   group: cachix-${{ github.ref }}
   cancel-in-progress: true
