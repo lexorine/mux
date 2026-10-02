@@ -100,19 +100,6 @@ jobs:
         run: |
           set -euo pipefail
           nix build .#mux --print-build-logs --out-link ./result
-          # Every path in the closure, so the cache can serve the binary and
-          # everything it needs to run.
-          #
-          # SPACE separated, not newline: the action splits pathsToPush with
-          # args.split(" "), so newlines would arrive as one malformed path
-          # and the push would silently do nothing again. printf '%s ' into
-          # a single-line output, then trim.
-          {
-            echo 'paths<<OUT_EOF'
-            nix path-info --recursive ./result | tr '\n' ' '
-            echo ''
-            echo 'OUT_EOF'
-          } >> "$GITHUB_OUTPUT"
           echo "store path: $(nix path-info ./result)"
           echo "closure: $(nix path-info --recursive ./result | wc -l) paths"
           ls -la ./result/bin/
