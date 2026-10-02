@@ -2607,6 +2607,9 @@ struct info_panel : nodes::Stack {
   member_rows& members = content.parts.members;
   // The group's view, to come back to from a member's page.
   view group_view;
+  // What the upper part was last made from: said again, and the panel laid
+  // out, only where it changes.
+  std::optional<view> rendered;
 
   static constexpr float kWidth = 340.0f;
 
@@ -2700,8 +2703,14 @@ struct info_panel : nodes::Stack {
         shown.status = group_view.status;
       }
     }
-    upper.show(shown, [this](const view& v) { return head(actions, this, v); });
     const bool list = shown.group && !shown.of_person;
+    // Made again only where what it says or what it holds has changed: the
+    // panel laid out, and the part over the members painted, at every
+    // change in the model otherwise -- for a Memo that rebuilds nothing.
+    if (rendered && *rendered == shown)
+      return;
+    rendered = shown;
+    upper.show(shown, [this](const view& v) { return head(actions, this, v); });
     band_2.setVisible(list);
     members_header.setVisible(list);
     members.setVisible(list);
