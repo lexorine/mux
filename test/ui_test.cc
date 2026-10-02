@@ -823,4 +823,31 @@ TEST(ChatList, RowsAreKeptUntilWhatTheySayChanges) {
   skiff::paint::defaultFont() = nullptr;
 }
 
+// "↓"'s badge: what came while the reader was above them, said between
+// events -- and gone once it has been read, however its count was put down.
+TEST(Composer, TheUnseenBadgeGoesWhenItsCountIsPutDown) {
+  skia::SkFont font;
+  skiff::paint::defaultFont() = &font;
+  stub program;
+  scene::Scene<mux::ui::window<stub>> window{std::in_place, &program};
+  const mux::account_id alice{mux::protocol::matrix{}, "@alice:example.com"};
+  const mux::conversation_id room{alice, "!room:example.com"};
+  mux::model model;
+  model.apply(mux::change_t{mux::change::connection_changed{alice, mux::connection::online{}}});
+  model.apply(mux::change_t{mux::change::conversation_updated{.id = room, .name = "Unread"}});
+  auto& screen = window.root().main();
+  screen.chosen = room;
+  screen.show(model);
+  auto& jump = screen.chat.area.parts.jump;
+  jump.set_unseen(4);
+  EXPECT_TRUE(jump.parts.badge.visible());
+  EXPECT_EQ(jump.parts.badge.parts.count.text(), "4");
+  // As the tick does when the view is back at the newest: the screen's own
+  // count put down first, then what the button says of it.
+  screen.unseen = 0;
+  jump.set_unseen(0);
+  EXPECT_FALSE(jump.parts.badge.visible()) << "the badge stayed up over nothing";
+  skiff::paint::defaultFont() = nullptr;
+}
+
 }  // namespace
