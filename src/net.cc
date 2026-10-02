@@ -467,12 +467,39 @@ struct http {};
 }  // namespace proxy_kind
 using proxy_kind_t = splice::variant<proxy_kind::socks5, proxy_kind::http>;
 
+// Who a domain's SRV records are asked of, through a proxy: the system's
+// nameserver (where the proxy can reach it), none at all, or one chosen --
+// whoever is asked learns which domain is looked up.
+namespace srv_lookup {
+struct system {};
+struct none {};
+struct server {
+  asio::ip::address address;
+};
+}  // namespace srv_lookup
+using srv_lookup_t = splice::variant<srv_lookup::system, srv_lookup::none, srv_lookup::server>;
+// As a profile says it, read once: unset the system's; "off" none; else a
+// nameserver's address -- and none where it is not one, rather than the
+// system's, which the user had chosen not to ask.
+[[nodiscard]] inline srv_lookup_t srv_lookup_of(const std::optional<std::string>& said) {
+  if (!said)
+    return srv_lookup::system{};
+  if (*said == "off")
+    return srv_lookup::none{};
+  error_code bad;
+  const auto address = asio::ip::make_address(*said, bad);
+  if (bad)
+    return srv_lookup::none{};
+  return srv_lookup::server{address};
+}
+
 struct proxy {
   proxy_kind_t kind = proxy_kind::socks5{};
   std::string host;
   std::uint16_t port = 1080;
   std::optional<std::string> username;
   std::optional<std::string> password;
+  srv_lookup_t srv = srv_lookup::system{};
 };
 
 namespace detail {
@@ -597,6 +624,34 @@ inline void http_connect(loop& owner, tcp::socket& socket, const proxy& via, std
 
 }  // namespace detail
 
+// Whether a host may be asked for what a message names (a link's preview)
+// from this machine: not this machine itself, nor its own network. A link
+// is anyone's to write, and fetching it here would GET whatever it names
+// there -- a router's page, a printer's -- from the user's machine. A name
+// that resolves to such an address is not caught here.
+[[nodiscard]] inline bool public_host(std::string_view host) {
+  const std::string lower = host | std::views::transform([](char c) {
+                              return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                            }) |
+                            std::ranges::to<std::string>();
+  if (lower == "localhost" || lower.ends_with(".localhost") || lower.ends_with(".local") ||
+      lower.ends_with(".internal") || lower.ends_with(".lan") || (!lower.contains('.') && !lower.contains(':')))
+    return false;
+  error_code bad;
+  const auto address = asio::ip::make_address(lower, bad);
+  if (bad)
+    return true;  // a name
+  if (address.is_loopback() || address.is_unspecified() || address.is_multicast())
+    return false;
+  if (address.is_v6()) {
+    const auto v6 = address.to_v6();
+    return !(v6.is_link_local() || v6.is_site_local() || (v6.to_bytes()[0] & 0xfe) == 0xfc || v6.is_v4_mapped());
+  }
+  const auto b = address.to_v4().to_bytes();
+  return !(b[0] == 10 || b[0] == 127 || b[0] == 0 || (b[0] == 172 && (b[1] & 0xf0) == 16) ||
+           (b[0] == 192 && b[1] == 168) || (b[0] == 169 && b[1] == 254) || (b[0] == 100 && (b[1] & 0xc0) == 64));
+}
+
 // A connection to host:port, through a proxy where one is given.
 inline tcp::socket connect(loop& owner, const std::optional<proxy>& via, std::string_view host, std::uint16_t port) {
   if (!via)
@@ -709,8 +764,18 @@ inline std::vector<tern::srv::target> xmpp_targets(loop& owner, const std::optio
   if (!via)
     return xmpp_targets(owner, domain);
   std::vector<tern::srv::target> found;
-  const auto server = nameserver();
-  if (!local_only(server)) {
+  // Whom to ask: the system's nameserver, where one the proxy can reach;
+  // the one chosen; or none.
+  const std::optional<asio::ip::address> asked = splice::visit(
+      splice::overloaded{[](srv_lookup::system) -> std::optional<asio::ip::address> {
+                           const auto server = nameserver();
+                           return local_only(server) ? std::nullopt : std::optional(server);
+                         },
+                         [](srv_lookup::none) -> std::optional<asio::ip::address> { return std::nullopt; },
+                         [](const srv_lookup::server& chosen) -> std::optional<asio::ip::address> { return chosen.address; }},
+      via->srv);
+  if (asked) {
+    const auto& server = *asked;
     try {
       tcp::socket socket = connect(owner, via, server.to_string(), 53);
       std::random_device entropy;

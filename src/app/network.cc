@@ -99,7 +99,8 @@ struct network {
                            .host = kept->host,
                            .port = static_cast<std::uint16_t>(kept->port),
                            .username = kept->username,
-                           .password = kept->password};
+                           .password = kept->password,
+                           .srv = mux::net::srv_lookup_of(kept->srv_resolver)};
   }
 
   void start_one(const mux::config::xmpp_account& saved, std::optional<mux::net::proxy> via) {
@@ -659,14 +660,6 @@ struct network {
   }
   // An avatar's picture, fetched by the account it is of, for `key`.
   void fetch_avatar(const mux::account_id& of, std::string source, std::string key) {
-    loop.post([this, of, source = std::move(source), key = std::move(key)] {
-        loop.spawn([this, via = this->via_of(of), source, key] {
-          if (auto bytes = mux::preview::fetch_picture(loop, tls, via, source))
-            box->push(mux::change_t{mux::change::avatar_loaded{mux::media_use::avatar{key}, source, std::move(*bytes)}});
-        });
-      });
-      return;
-    }
     loop.post([this, of, source = std::move(source), key = std::move(key)] {
       for (auto& one : accounts)
         splice::visit(
