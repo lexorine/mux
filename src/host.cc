@@ -51,8 +51,15 @@ inline std::uint32_t wake_event() {
   return registered;
 }
 
-// Callable from any thread.
+// Callable from any thread. One wake event is enough for a burst: the
+// window takes every queued change when it handles one, so a change that
+// finds a wake already queued does not queue a second -- and one that
+// finds none (the last event already taken, or the push refused because
+// the queue is not up yet) pushes again, so a wake is never coalesced
+// away for good.
 inline void wake() {
+  if (SDL_HasEvent(wake_event()))
+    return;
   SDL_Event event{};
   event.type = wake_event();
   SDL_PushEvent(&event);

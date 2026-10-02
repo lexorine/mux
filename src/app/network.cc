@@ -658,7 +658,11 @@ struct network {
             one.account);
     });
   }
-  // An avatar's picture, fetched by the account it is of, for `key`.
+  // An avatar's picture, fetched by the account it is of, for `key`: only
+  // as its protocol keeps it (an mxc://), never by an https address --
+  // which would tell a site who reads mux. A preview's picture read from a
+  // site is fetched from there only through fetch_preview_picture, above,
+  // and only in a chat that fetches previews from sites.
   void fetch_avatar(const mux::account_id& of, std::string source, std::string key) {
     loop.post([this, of, source = std::move(source), key = std::move(key)] {
       for (auto& one : accounts)
