@@ -144,4 +144,90 @@ TEST(Config, ProxiesAndTheirAccountsAreKept) {
   EXPECT_EQ(got->xmpp.front().proxy, "tor");
 }
 
+// A name as a file's: the readable head, '-' and eight hex digits of
+// FNV-1a over the name. The pairs the '_' naming folded together, and the
+// '@'-against-'_' and '.'-against-'@' pairs feared since, all land apart.
+TEST(Config, FileNamesTellNamesApart) {
+  using mux::config::file_name_of;
+  EXPECT_NE(file_name_of("a@b.com"), file_name_of("a_b.com"));
+  EXPECT_NE(file_name_of("!a:b"), file_name_of("!a_b"));
+  EXPECT_NE(file_name_of("a@b.com"), file_name_of("a.b@com"));
+  EXPECT_EQ(file_name_of("a@b.com"), "a@b.com-897fff79");
+  EXPECT_EQ(file_name_of("a_b.com"), "a_b.com-169baa76");
+  EXPECT_EQ(file_name_of("!a:b"), "%21a%3Ab-8aed294f");
+  EXPECT_EQ(file_name_of("!a_b"), "%21a_b-9090b4ee");
+  EXPECT_EQ(file_name_of("alice@example.com"), "alice@example.com-94a4b546");
+  EXPECT_EQ(file_name_of("@bob:example.org"), "@bob%3Aexample.org-9b1e88ea");
+}
+
+TEST(Config, FileNamesStayFiles) {
+  using mux::config::file_name_of;
+  // No traversal, no separator, no hidden file, nothing empty or bare:
+  // every name is one path component, never starting with '.'.
+  for (const char* name :
+       {"", ".", "..", "/", "../x", "a/b", "a\\b", "CON", "NUL", "-rf", ".hidden", "a_b.com", "a@b.com"}) {
+    const std::string file = file_name_of(name);
+    EXPECT_FALSE(file.empty()) << name;
+    EXPECT_NE(file.front(), '.') << name;
+    EXPECT_EQ(file.find('/'), std::string::npos) << name;
+    EXPECT_EQ(file.find('\\'), std::string::npos) << name;
+    EXPECT_EQ(fs::path(file).filename().string(), file) << name;
+  }
+  EXPECT_EQ(file_name_of(""), "%-811c9dc5");
+  EXPECT_EQ(file_name_of("."), "%2E-2b0c98f1");
+  EXPECT_EQ(file_name_of(".."), "%2E.-a3d4a70d");
+  EXPECT_EQ(file_name_of("CON"), "CON-3367e86b");
+}
+
+TEST(Config, FileNamesDifferCaseBlindToo) {
+  // A file system that ignores case folds both names; the hashes still tell
+  // apart what only case told apart.
+  const std::string upper = mux::config::file_name_of("A@b.com");
+  const std::string lower = mux::config::file_name_of("a@b.com");
+  EXPECT_EQ(upper, "A@b.com-459e9ed9");
+  EXPECT_NE(upper, lower);
+  auto folded = [](std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); });
+    return s;
+  };
+  EXPECT_NE(folded(upper), folded(lower));
+}
+
+TEST(Config, LongFileNamesFitAndTellApart) {
+  // Heads cut to 119 bytes with the hash whole: every name fits a file's
+  // name with what callers add, and names sharing a head still land apart.
+  const std::string first(300, 'a');
+  const std::string second = std::string(299, 'a') + 'b';
+  const std::string one = mux::config::file_name_of(first);
+  const std::string two = mux::config::file_name_of(second);
+  EXPECT_LE(one.size(), 128u);
+  EXPECT_LE(two.size(), 128u);
+  EXPECT_NE(one, two);
+  EXPECT_TRUE(one.ends_with(mux::config::file_hash_of(first)));
+  // Cut on whole %XX triplets only: every '%' in the head starts one.
+  const std::string cut = mux::config::file_name_of(std::string(400, ':'));
+  EXPECT_LE(cut.size(), 128u);
+  const std::string head = cut.substr(0, cut.rfind('-'));
+  for (std::size_t at = head.find('%'); at != std::string::npos; at = head.find('%', at + 1)) {
+    ASSERT_LT(at + 2, head.size());
+    EXPECT_TRUE(std::isxdigit(static_cast<unsigned char>(head[at + 1])) != 0);
+    EXPECT_TRUE(std::isxdigit(static_cast<unsigned char>(head[at + 2])) != 0);
+  }
+}
+
+TEST(Config, KeptFilesMoveToTheirNewName) {
+  scratch here;
+  const fs::path now = here.dir / "a@b.com-897fff79.sync.json";
+  const fs::path old = here.dir / "a@b.com.sync.json";
+  fs::create_directories(now.parent_path());
+  { std::ofstream(old) << "kept"; }
+  EXPECT_EQ(mux::config::moved_from(now, old), now);
+  EXPECT_TRUE(fs::exists(now));
+  EXPECT_FALSE(fs::exists(old));
+  // Asked again, nothing moves and nothing is lost.
+  EXPECT_EQ(mux::config::moved_from(now, old), now);
+  EXPECT_TRUE(fs::exists(now));
+}
+
 }  // namespace
