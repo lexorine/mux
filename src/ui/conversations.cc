@@ -2469,10 +2469,22 @@ struct conversations_screen : nodes::Stack {
           one = &forum_shown.insert_or_assign(one->id, std::move(made)).first->second;
         }
     // Invites first, as Element lists them; then by their newest.
-    std::ranges::sort(chats, std::ranges::greater{}, [&](const conversation* one) {
+    // The key worked out once for each chat: the comparator asked for it at
+    // every comparison -- a lookup of the chat's own event filters, and a
+    // walk back through its messages to the newest they show, which for a
+    // chat whose end is hidden events runs the whole way. That was O(n log
+    // n) lookups and walks of a list of every chat the account has, at
+    // every change in the model.
+    using newest_at = std::chrono::sys_time<std::chrono::milliseconds>;
+    using sort_key = std::pair<bool, newest_at>;
+    std::vector<std::pair<sort_key, const conversation*>> ranked;
+    ranked.reserve(chats.size());
+    for (const conversation* one : chats) {
       const message* last = newest(*one, events_of(one));
-      return std::pair{one->invite.has_value(), last ? last->at : std::chrono::sys_time<std::chrono::milliseconds>{}};
-    });
+      ranked.emplace_back(sort_key{one->invite.has_value(), last ? last->at : newest_at{}}, one);
+    }
+    std::ranges::sort(ranked, std::ranges::greater{}, &std::pair<sort_key, const conversation*>::first);
+    chats = ranked | std::views::values | std::ranges::to<std::vector>();
     // The rows, as a function of the chats: those whose chat shows the same
     // are kept as they are.
     // The chat open -- or, where Alt+Up or Alt+Down went to a forum, that.

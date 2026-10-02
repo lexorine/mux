@@ -799,6 +799,8 @@ TEST(ChatList, RowsAreKeptUntilWhatTheySayChanges) {
   ASSERT_EQ(rows.size(), 2u);
   ASSERT_NE(at("!a:example.com"), rows.end());
   ASSERT_NE(at("!b:example.com"), rows.end());
+  // Ordered by what was last said in them: Beta's message is the newer.
+  ASSERT_EQ(rows.front().id.id, "!b:example.com");
   const auto alpha_shown = at("!a:example.com")->fState.fId;
   const auto beta_shown = at("!b:example.com")->fState.fId;
 
