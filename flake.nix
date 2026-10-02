@@ -12,7 +12,7 @@
     knot = { url = "github:j4niwzis/knot/035e53fdee8875614e350331a914256495b9bb22"; flake = false; };
     loom = { url = "github:j4niwzis/loom/823bded41602b99d1f1eee1b2bb8bb847618672f"; flake = false; };
     splice = { url = "github:j4niwzis/splice/f2c25443061ba5353720eccd0a9438793c2ea053"; flake = false; };
-    tern = { url = "github:j4niwzis/tern/de984ff791a937fff637f44a8d32e506cad18dbc"; flake = false; };
+    tern = { url = "github:j4niwzis/tern/e2fc820634033a2c79aa7f3bf1cfd977036cedaa"; flake = false; };
     boost-pfr = { url = "github:boostorg/pfr/401385c240027423acbb1eb6dea2abe0043db5aa"; flake = false; };
     skiff = { url = "github:j4niwzis/skiff/0531469ad26b78ff839e9660c9bfc6e9448b8b64"; flake = false; };
     skiff-widgets = { url = "github:j4niwzis/skiff-widgets/99bf5557a3713aa414cd14ee550c5dbb7bc75cf4"; flake = false; };
