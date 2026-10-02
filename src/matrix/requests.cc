@@ -60,10 +60,15 @@ void account<Sink>::stop() { stopping_ = true; }
 template <class Sink>
 void account<Sink>::mark_read(std::string room, std::string event) {
   loop_->spawn([this, room = std::move(room), event = std::move(event)] {
-    if (api_)
-      (void)perform(*api_, loom::cs::post_receipt{.room_id = room,
-                                                  .receipt_type = loom::cs::post_receipt::receipt_type_values::m_read{},
-                                                  .event_id = event});
+    if (!api_)
+      return;
+    // Sent already: the server knows how far the room is read.
+    if (const auto last = last_read_.find(room); last != last_read_.end() && last->second == event)
+      return;
+    last_read_.insert_or_assign(room, event);
+    (void)perform(*api_, loom::cs::post_receipt{.room_id = room,
+                                                .receipt_type = loom::cs::post_receipt::receipt_type_values::m_read{},
+                                                .event_id = event});
   });
 }
 
@@ -1356,12 +1361,21 @@ void account<Sink>::send_in_thread(std::string room, std::string body, std::stri
 template <class Sink>
 void account<Sink>::typing(std::string room, bool on) {
   loop_->spawn([this, room = std::move(room), on] {
-    if (api_)
-      (void)perform(*api_, loom::cs::set_typing{.user_id = id_.address,
-                                                .room_id = room,
-                                                .body = {.typing = on,
-                                                         .timeout = on ? std::optional<std::int64_t>(30000)
-                                                                       : std::nullopt}});
+    if (!api_)
+      return;
+    // Said already, and still the server's news: typing lasts thirty
+    // seconds there, so saying the same again within twenty only repeats
+    // it; after that the server is told again, to keep it alive.
+    const auto now = std::chrono::steady_clock::now();
+    if (const auto last = typing_last_.find(room);
+        last != typing_last_.end() && last->second.first == on && now - last->second.second < std::chrono::seconds(20))
+      return;
+    typing_last_.insert_or_assign(room, std::make_pair(on, now));
+    (void)perform(*api_, loom::cs::set_typing{.user_id = id_.address,
+                                              .room_id = room,
+                                              .body = {.typing = on,
+                                                       .timeout = on ? std::optional<std::int64_t>(30000)
+                                                                     : std::nullopt}});
   });
 }
 
