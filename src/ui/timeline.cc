@@ -422,21 +422,36 @@ struct timeline_area : scene::Node {
           readers[all[*at].id].push_back(user);
       }
     }
-    const auto readers_of = [&](std::size_t i) {
+    // The readers of a row, where they are: a pointer into what was just
+    // worked out, rather than a vector copied for each row to be compared
+    // and thrown away at every change in the model.
+    const auto readers_of = [&](std::size_t i) -> const std::vector<std::string>* {
       const auto found = readers.find(all[i].id);
-      return found == readers.end() ? std::vector<std::string>{} : found->second;
+      return found == readers.end() ? nullptr : &found->second;
+    };
+    const auto keeps_readers = [&](const message_bubble& row, std::size_t i) {
+      const auto who = readers_of(i);
+      return who ? row.readers_shown == *who : row.readers_shown.empty();
     };
     const auto first_of_run = [&](std::size_t i) { return !same(i, neighbour(i, false)); };
     const auto last_of_run = [&](std::size_t i) { return !same(i, neighbour(i, true)); };
     // What the message a bubble replies to says now, where it is held: a
     // bubble quoting it is made again as it changes -- edited, deleted --
     // not left quoting what it said once.
-    const auto quote_body = [&](std::size_t i) -> std::optional<decltype(message::body)> {
+    const auto held_at = [&](std::size_t i) -> const message* {
       if (!all[i].replies_to)
-        return std::nullopt;
-      if (const message* said = held_message(one, *all[i].replies_to))
-        return said->body;
-      return std::nullopt;
+        return nullptr;
+      return held_message(one, *all[i].replies_to);
+    };
+    const auto quote_body_of = [](const message* said) -> std::optional<decltype(message::body)> {
+      return said ? std::optional<decltype(message::body)>(said->body) : std::nullopt;
+    };
+    const auto quote_body = [&](std::size_t i) { return quote_body_of(held_at(i)); };
+    // Whether the message's link has a preview now: as the bubble was made
+    // to say -- the link's own kept where it is, rather than the text walked
+    // again for each row at each change in the model.
+    const auto preview_now = [&](const message_bubble& row) {
+      return how.previews && !row.preview_link.empty() && now.previews.contains(row.preview_link);
     };
     // The bubbles, as a function of the messages: those that show the same
     // are kept -- with a selection in them -- and only the new are made.
@@ -449,22 +464,36 @@ struct timeline_area : scene::Node {
               made.quote_said = quote_body(i);
               if (how.unread_from && all[i].id == *how.unread_from)
                 made.mark_unread_start();
-              made.show_readers(one, readers_of(i));
+              if (const auto who = readers_of(i))
+                made.show_readers(one, *who);
               rooms_wanted.insert(made.rooms_unknown.begin(), made.rooms_unknown.end());
               if (arrives(i))
                 made.appear();
               return made;
             },
             [&](const message_bubble& row, std::size_t i) {
-              const bool quote_known = !all[i].replies_to || one.quoted.contains(*all[i].replies_to) ||
-                                       std::ranges::find(all, *all[i].replies_to, &message::id) != all.end();
-              const auto link = first_link_of(all[i]);
-              const bool preview_known = link && now.previews.contains(*link);
-              return row.said == all[i] && row.quote_said == quote_body(i) && row.first == first_of_run(i) &&
-                     row.last == last_of_run(i) &&
-                     row.quote_known == quote_known && row.events_shown == shows(all[i]) && row.unread_start == (how.unread_from && all[i].id == *how.unread_from) &&
-                     row.preview_known == preview_known && row.readers_shown == readers_of(i) &&
-                     row.previews_shown == how.previews && !row.rooms_came();
+              // What the bubble holds is what it drew: a room event's line
+              // has its sender's name put over it, made from the message.
+              // Held against that, or every room event's line in the chat
+              // was made again at every change in the model.
+              if (!(all[i].service ? row.said == with_actor(one, all[i]) : row.said == all[i]))
+                return false;
+              if (row.first != first_of_run(i) || row.last != last_of_run(i) ||
+                  row.events_shown != shows(all[i]) || row.previews_shown != how.previews ||
+                  row.unread_start != (how.unread_from && all[i].id == *how.unread_from) || row.rooms_came())
+                return false;
+              // Whether what its quote answers is there to quote, and what
+              // it says: one lookup of it for both, where each had a scan of
+              // every message in the chat of its own. As the bubble was made
+              // to say -- in the thread as well, which the scan of the
+              // timeline alone did not find, and such a bubble was made
+              // again at every change in the model forever.
+              const message* answered = held_at(i);
+              if (row.quote_known != (!all[i].replies_to || answered != nullptr))
+                return false;
+              if (row.quote_said != quote_body_of(answered))
+                return false;
+              return row.preview_known == preview_now(row) && keeps_readers(row, i);
             }))
       // Laid out again; painted where rows came, went or moved -- a hidden
       // one coming moves nothing, and paints nothing.
