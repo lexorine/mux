@@ -100,14 +100,6 @@ jobs:
         run: |
           set -euo pipefail
           nix build .#mux --print-build-logs --out-link ./result
-          # Every path in the closure, so the cache can serve the binary and
-          # everything it needs to run. --print-out-paths on the already-built
-          # output, plus nix-store --query --requisites for its dependencies.
-          {
-            echo "paths<<EOF"
-            nix path-info --recursive ./result
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
           echo "store path: $(nix path-info ./result)"
           echo "closure: $(nix path-info --recursive ./result | wc -l) paths"
           ls -la ./result/bin/
@@ -125,14 +117,24 @@ jobs:
       #
       # fixes/next builds to prove a change compiles and must not publish:
       # only the branches meant to be consumed push to the cache.
+      # Push the way the Cachix docs say to: build, then pipe the
+      # result into `cachix push`. The action only installs Nix and
+      # configures the cache; the push itself is a plain CLI call with
+      # visible output, not a daemon whose timing can silently no-op.
+      #
+      # fixes/next builds to prove a change compiles and must not publish:
+      # only the branches meant to be consumed push to the cache.
       - name: Push to Cachix
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/integrate/')
-        uses: cachix/cachix-action@v17
-        with:
-          name: mux
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          useDaemon: false
-          pathsToPush: ${{ steps.build.outputs.paths }}
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          CACHIX_SIGNING_KEY: ${{ secrets.CACHIX_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          nix path-info --recursive ./result > /tmp/closure.txt
+          echo "closure: $(wc -l < /tmp/closure.txt) paths"
+          # shellcheck disable=SC2046
+          cachix push mux $(tr '\n' ' ' < /tmp/closure.txt)
 
       - name: Summary
         run: |
