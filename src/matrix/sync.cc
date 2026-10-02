@@ -214,6 +214,10 @@ void account<Sink>::run() {
   // Where the last run left the sync: its rooms at once, and the sync goes
   // on from there rather than asking for every room again.
   this->load_kept();
+  // The sliding sync's place kept with the sync: going on from it, rather
+  // than listing every room from the start. Refused, it begins again.
+  if (sliding_ && state_.since)
+    sliding_pos_ = state_.since;
   auto saved_at = std::chrono::steady_clock::now();
 
   std::chrono::seconds backoff(1);
@@ -351,6 +355,11 @@ void account<Sink>::save_kept() const {
   using joined_t = response::rooms_t::joined_room_t;
   response out;
   out.next_batch = *state_.since;
+  // Only the newest events of each room are kept: the timeline since the
+  // last gap grows without bound in a long run, and was written out whole
+  // every half minute. The prev_batch from before the dropped events still
+  // pages back over them on demand.
+  static constexpr std::size_t kKeptTimeline = 100;
   std::map<std::string, joined_t> join;
   for (const auto& [room, kept] : state_.joined) {
     joined_t one;
@@ -358,7 +367,10 @@ void account<Sink>::save_kept() const {
     for (const auto& [key, event] : kept.state.events)
       state_events.push_back(event);
     one.state = joined_t::state_t{.events = std::move(state_events)};
-    one.timeline = joined_t::timeline_t{.limited = true, .prev_batch = kept.prev_batch, .events = kept.timeline};
+    std::vector<loom::ev::timeline_event> timeline = kept.timeline;
+    if (timeline.size() > kKeptTimeline)
+      timeline.erase(timeline.begin(), timeline.end() - static_cast<std::ptrdiff_t>(kKeptTimeline));
+    one.timeline = joined_t::timeline_t{.limited = true, .prev_batch = kept.prev_batch, .events = std::move(timeline)};
     one.summary = joined_t::room_summary_t{.m_heroes = kept.summary.heroes,
                                            .m_joined_member_count = kept.summary.joined_members,
                                            .m_invited_member_count = kept.summary.invited_members};
@@ -382,12 +394,16 @@ void account<Sink>::save_kept() const {
   {
     std::ofstream file(fresh, std::ios::binary | std::ios::trunc);
     file << knot::to_json_string(out);
+    file.close();
     if (!file) {
       log(id_, "the sync could not be kept in {}", where.string());
+      std::filesystem::remove(fresh, failed);
       return;
     }
   }
   std::filesystem::rename(fresh, where, failed);
+  if (failed)
+    log(id_, "the sync could not be kept in {}: {}", where.string(), failed.message());
 }
 
 template <class Sink>
@@ -514,8 +530,17 @@ void account<Sink>::tell(const loom::cs::sync::response& got) {
       sink_(std::move(made));
     }
   if (rooms.leave)
-    for (const auto& [room, part] : *rooms.leave)
+    for (const auto& [room, part] : *rooms.leave) {
+      // Nothing of a left room is kept: its reactions (to map redactions
+      // by), its fetched members, the receipt and typing last said in it,
+      // and where its history was paging back from.
+      std::erase_if(reactions_, [&](const auto& one) { return one.second.room == room; });
+      full_members_.erase(room);
+      last_read_.erase(room);
+      typing_last_.erase(room);
+      paged_.erase(room);
       sink_(change::conversation_removed{{id_, room}});
+    }
 }
 
 using power_levels_content = loom::ev::m_room_power_levels_content_t;
