@@ -15,7 +15,7 @@ on:
   # where every failure so far has been -- triggered no build at all and
   # the fix looked untested. A source change must run the build.
   push:
-    branches: [main, 'integrate/**']
+    branches: [main, 'integrate/**', 'fixes/**']
   pull_request:
   workflow_dispatch:
   schedule:
@@ -24,13 +24,19 @@ on:
     # keep serving an old build.
     - cron: "17 4 * * *"
 
-# One build per branch at a time, but a push to one branch never cancels
-# another's: github.ref is in the group, so main and integrate/cleanup are
-# independent, and a second push to the same branch supersedes its own
-# earlier run.
+# One build per branch at a time, and a push to one branch never cancels
+# another's: github.ref is in the group, so main, integrate/cleanup and
+# fixes/next are three independent groups.
+#
+# cancel-in-progress is FALSE on purpose. A build takes about twenty
+# minutes and almost all of it is Skia and FFmpeg, which do not depend on
+# mux's own sources at all -- only the last ~30 steps do. Cancelling
+# because a one-line fix landed throws away that entire shared prefix to
+# redo it on a fresh runner. Queueing wastes only the superseded run's
+# own tail.
 concurrency:
   group: cachix-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   # Cheap gate: proves the whole dependency graph still resolves (Skia,
@@ -100,7 +106,11 @@ jobs:
 
       # Daemon mode (the default) pushes each store path as it is built, so
       # an interrupted run still leaves a usable partial cache behind.
+      #
+      # fixes/next builds to prove a change compiles and must not publish:
+      # only the branches meant to be consumed push to the cache.
       - name: Push to Cachix
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/integrate/')
         uses: cachix/cachix-action@v17
         with:
           name: mux
