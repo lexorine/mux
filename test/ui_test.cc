@@ -850,4 +850,19 @@ TEST(Composer, TheUnseenBadgeGoesWhenItsCountIsPutDown) {
   skiff::paint::defaultFont() = nullptr;
 }
 
+// What a dialog lists that no chat holds: its picture asked for once each,
+// and the list held to a number -- the program walks all of it at every
+// change in the model, and it was added to by every search a dialog made.
+TEST(ListedAvatars, AreSaidOnceEachAndHeldToANumber) {
+  mux::ui::listed_avatars().clear();
+  mux::ui::note_listed_avatar("!room:example.com", "mxc://example.com/one");
+  mux::ui::note_listed_avatar("!room:example.com", "mxc://example.com/again");
+  ASSERT_EQ(mux::ui::listed_avatars().size(), 1u) << "the same room was listed again";
+  EXPECT_EQ(mux::ui::listed_avatars().front().second, "mxc://example.com/one");
+  for (int i = 0; i < static_cast<int>(mux::ui::kListedAvatars) + 10; ++i)
+    mux::ui::note_listed_avatar(std::format("!{}:example.com", i), "mxc://example.com/x");
+  EXPECT_LE(mux::ui::listed_avatars().size(), mux::ui::kListedAvatars) << "the list goes on for ever";
+  mux::ui::listed_avatars().clear();
+}
+
 }  // namespace

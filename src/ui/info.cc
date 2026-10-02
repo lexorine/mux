@@ -960,7 +960,7 @@ struct start_chat_box : nodes::Stack {
     found = people;
     for (const found_person& one : people)
       if (one.avatar && !one.avatar->empty())
-        listed_avatars().emplace_back(one.id, *one.avatar);
+        note_listed_avatar(one.id, *one.avatar);
     this->show_rows();
   }
   void show_rows() {
@@ -2389,7 +2389,7 @@ struct explore_box : nodes::Stack {
     // Their pictures, asked for as a chat's are.
     for (const directory_room& one : rooms)
       if (one.avatar && !one.avatar->empty())
-        listed_avatars().emplace_back(one.id, *one.avatar);
+        note_listed_avatar(one.id, *one.avatar);
     parts.status.setText(space ? (rooms.empty() ? std::string("Nothing in this space, or its server would not say.")
                                                 : std::format("{} rooms and spaces in this space", rooms.size()))
                                : rooms.empty() ? std::string("No rooms found.")
