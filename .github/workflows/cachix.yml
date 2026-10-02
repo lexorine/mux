@@ -134,7 +134,7 @@ jobs:
           nix path-info --recursive ./result > /tmp/closure.txt
           echo "closure: $(wc -l < /tmp/closure.txt) paths"
           # shellcheck disable=SC2046
-          cachix push mux $(tr '\n' ' ' < /tmp/closure.txt)
+          nix shell nixpkgs#cachix -c cachix push mux $(tr '\n' ' ' < /tmp/closure.txt)
 
       - name: Summary
         run: |
