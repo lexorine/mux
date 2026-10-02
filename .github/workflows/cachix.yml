@@ -11,7 +11,7 @@ name: cachix
 # signing key is needed anywhere.
 on:
   push:
-    branches: [main]
+    branches: [main, 'integrate/**']
     paths:
       - "flake.nix"
       - "flake.lock"
@@ -27,6 +27,10 @@ on:
     # keep serving an old build.
     - cron: "17 4 * * *"
 
+# One build per branch at a time, but a push to one branch never cancels
+# another's: github.ref is in the group, so main and integrate/cleanup are
+# independent, and a second push to the same branch supersedes its own
+# earlier run.
 concurrency:
   group: cachix-${{ github.ref }}
   cancel-in-progress: true
