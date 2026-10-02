@@ -1199,18 +1199,17 @@ std::expected<void, std::string> save(const std::filesystem::path& where, const 
   }
   fs::path temporary = where;
   temporary += ".new";
-  {
-    std::ofstream made(temporary, std::ios::binary | std::ios::trunc);
-    if (!made)
-      return std::unexpected(std::format("cannot write {}", temporary.string()));
-  }
-  fs::permissions(temporary, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace, failed);
-  if (failed)
-    return std::unexpected(std::format("cannot make {} private: {}", temporary.string(), failed.message()));
+  // Opened once: made, made its owner's alone before the passwords go into
+  // it, and written -- not made and then opened to write into again.
   std::string text;
   knot::write(text, accounts);
   {
     std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+    if (!out)
+      return std::unexpected(std::format("cannot write {}", temporary.string()));
+    fs::permissions(temporary, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace, failed);
+    if (failed)
+      return std::unexpected(std::format("cannot make {} private: {}", temporary.string(), failed.message()));
     out << text << '\n';
     out.flush();
     if (!out)
