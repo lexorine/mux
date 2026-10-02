@@ -882,15 +882,21 @@ consteval auto json_schema(knot::type<file>) { return knot::schema<file>(); }
 [[nodiscard]] inline std::optional<bool>& read_receipts_in(account_t& one) {
   return splice::visit([](auto& each) -> std::optional<bool>& { return each.read_receipts; }, one);
 }
-// An account's colour: its own choice, else one of the eight its address
-// picks -- the same every time, and accounts apart mostly apart.
-[[nodiscard]] inline accent_t default_colour_of(std::string_view address) {
+// FNV-1a over a text's bytes: stable across runs, platforms and builds --
+// std::hash is none of those -- so a file's name can carry it, and an
+// account's colour can be picked by it.
+[[nodiscard]] inline std::uint32_t fnv1a_of(std::string_view text) {
   std::uint32_t hash = 2166136261u;
-  for (const char c : address) {
+  for (const char c : text) {
     hash ^= static_cast<unsigned char>(c);
     hash *= 16777619u;
   }
-  switch (hash % 8) {
+  return hash;
+}
+// An account's colour: its own choice, else one of the eight its address
+// picks -- the same every time, and accounts apart mostly apart.
+[[nodiscard]] inline accent_t default_colour_of(std::string_view address) {
+  switch (fnv1a_of(address) % 8) {
     case 0: return accent::blue{};
     case 1: return accent::green{};
     case 2: return accent::pink{};
@@ -1110,12 +1116,14 @@ std::filesystem::path state_path(std::string_view name) {
   return std::filesystem::path(std::format("mux-{}", name));
 }
 
-// A name -- an address, a room's id, a media source -- as a file's: kept as
-// it is where it is plain (letters, digits, '@', '-', '_', and '.' but not
-// first), every other byte as %XX -- '%' too, and a leading '.', so no "."
-// or ".." and nothing hidden. One name to one file: before, every other
-// character became '_', and "!a:b" and "!a_b" shared one.
-[[nodiscard]] inline std::string file_name_of(std::string_view name) {
+// A name -- an address, a room's id, a media source -- escaped as a file's
+// head: kept as it is where it is plain (letters, digits, '@', '-', '_',
+// and '.' but not first), every other byte as %XX -- '%' too, and a leading
+// '.', so no "." or ".." and nothing hidden. One head to one name, but not
+// to one file everywhere: heads cut to fit, and file systems that ignore
+// case, still fold some together. Before all this, every other character
+// became '_', and "!a:b" and "!a_b" shared one.
+[[nodiscard]] inline std::string unhashed_file_name_of(std::string_view name) {
   const auto as_file = [name](std::size_t at) {
     const auto c = static_cast<unsigned char>(name[at]);
     const bool plain = std::isalnum(c) != 0 || c == '@' || c == '-' || c == '_' || (c == '.' && at > 0);
@@ -1125,6 +1133,29 @@ std::filesystem::path state_path(std::string_view name) {
   std::string out = std::views::iota(std::size_t{0}, name.size()) | std::views::transform(as_file) | std::views::join |
                     std::ranges::to<std::string>();
   return out.empty() ? std::string("%") : out;
+}
+// A name's fingerprint: eight lowercase hex digits of FNV-1a over it --
+// what tells names apart where their readable head cannot (a head cut to
+// fit, a file system that ignores case).
+[[nodiscard]] inline std::string file_hash_of(std::string_view name) {
+  return std::format("{:08x}", fnv1a_of(name));
+}
+// A name as a file's: its head above, then '-' and its hash. The head keeps
+// files readable; the hash keeps distinct names distinct where the head
+// cannot: heads cut to fit a file's name, and file systems that ignore case
+// ('A@b.c' and 'a@b.c' share a file on those; their hashes do not).
+[[nodiscard]] inline std::string file_name_of(std::string_view name) {
+  // The head cut to fit a file's name with the hash and what callers add
+  // ('.sync.json' and the like): whole %XX triplets only, so it stays
+  // readable; the hash stays whole, so telling apart survives the cut.
+  constexpr std::size_t max_head = 119;  // '-' and eight hex digits land on 128
+  std::string head = unhashed_file_name_of(name);
+  if (head.size() > max_head) {
+    head.erase(max_head);
+    if (const auto cut = head.find_last_of('%'); cut != std::string::npos && cut + 3 > head.size())
+      head.erase(cut);
+  }
+  return head + '-' + file_hash_of(name);
 }
 // The name as files were named before: to find what was kept under it.
 [[nodiscard]] inline std::string old_file_name_of(std::string_view name) {
