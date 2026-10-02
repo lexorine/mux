@@ -625,4 +625,246 @@ TEST(Timeline, APicturePressedIsOpened) {
   skiff::paint::defaultFont() = nullptr;
 }
 
+// The bubbles are kept while they still say the same: a reply to an answer
+// only its thread holds, and a room event's line, were made again at every
+// change in the model -- each made anew, laid out and drawn again, for
+// nothing.
+TEST(Timeline, BubblesAreKeptWhenNothingAboutThemChanged) {
+  skia::SkFont font;
+  skiff::paint::defaultFont() = &font;
+  stub program;
+  scene::Scene<mux::ui::window<stub>> window{std::in_place, &program};
+  const mux::account_id alice{mux::protocol::matrix{}, "@alice:example.com"};
+  const mux::conversation_id room{alice, "!room:example.com"};
+  mux::model model;
+  model.apply(mux::change_t{mux::change::connection_changed{alice, mux::connection::online{}}});
+  model.apply(mux::change_t{mux::change::conversation_updated{
+      .id = room, .kind = mux::conversation_kind::group{}, .name = "Threads"}});
+  const auto say = [&](const char* id, const char* words, bool service = false) {
+    mux::message one;
+    one.in = room;
+    one.id = id;
+    one.sender = "@alice:example.com";
+    one.service = service;
+    one.body.plain = words;
+    model.apply(mux::change_t{mux::change::message_added{.message = std::move(one)}});
+  };
+  say("$root", "The root of a thread.");
+  // An answer: with its thread's, never in the timeline itself.
+  mux::message answer;
+  answer.in = room;
+  answer.id = "$answer";
+  answer.sender = "@carol:example.com";
+  answer.body.plain = "What the thread answers.";
+  answer.thread = "$root";
+  model.apply(mux::change_t{mux::change::message_added{.message = std::move(answer)}});
+  // A reply to it, in the timeline: its quote is only in the thread.
+  mux::message reply;
+  reply.in = room;
+  reply.id = "$reply";
+  reply.sender = "@bob:example.com";
+  reply.body.plain = "Answering what is only in the thread.";
+  reply.replies_to = "$answer";
+  model.apply(mux::change_t{mux::change::message_added{.message = std::move(reply)}});
+  // And a room event's line, whose sender's name is put over it as it is
+  // drawn -- from the message, made anew from what the model still has.
+  say("$join", "alice joined the room", true);
+
+  auto& screen = window.root().main();
+  screen.chosen = room;
+  screen.show(model);
+  const skia::SkRect viewport = skia::SkRect::MakeWH(1100.0f, 720.0f);
+  for (int i = 0; i < 4; ++i) {
+    window.update(1000.0 + 16.0 * i);
+    window.layoutIfNeeded(viewport);
+    (void)window.finishFrame();
+  }
+  auto& bubbles = std::get<0>(std::get<0>(screen.timeline.fChildren).fChildren);
+  const auto at = [&](std::string_view id) {
+    return std::ranges::find_if(bubbles, [&](const mux::ui::message_bubble& row) { return id == row.message_id; });
+  };
+  ASSERT_EQ(bubbles.size(), 3u);
+  ASSERT_NE(at("$reply"), bubbles.end());
+  ASSERT_NE(at("$join"), bubbles.end());
+  const auto quoted = at("$reply")->id();
+  const auto line = at("$join")->id();
+
+  // The model brought up to date again, nothing in it changed: the bubbles
+  // the program would find again are the ones it already has.
+  screen.show(model);
+  ASSERT_EQ(bubbles.size(), 3u);
+  ASSERT_NE(at("$reply"), bubbles.end());
+  ASSERT_NE(at("$join"), bubbles.end());
+  EXPECT_EQ(at("$reply")->id(), quoted) << "the reply to a thread's answer was made again";
+  EXPECT_EQ(at("$join")->id(), line) << "the room event's line was made again";
+
+  // What a bubble quotes said now, though: made again, quoting it.
+  mux::message edited;
+  edited.in = room;
+  edited.id = "$answer";
+  edited.sender = "@carol:example.com";
+  edited.body.plain = "What the thread answers, said otherwise.";
+  edited.thread = "$root";
+  model.apply(mux::change_t{mux::change::message_edited{.in = room, .id = "$answer", .now = edited.body}));
+  screen.show(model);
+  ASSERT_NE(at("$reply"), bubbles.end());
+  EXPECT_NE(at("$reply")->id(), quoted) << "the reply kept quoting what its answer no longer says";
+  skiff::paint::defaultFont() = nullptr;
+}
+
+// Who has read what, shown on the message read up to: its bubble, and kept
+// over the changes in the model that say nothing of it.
+TEST(Timeline, ReadReceiptsAreShownAndTheirBubbleIsKept) {
+  skia::SkFont font;
+  skiff::paint::defaultFont() = &font;
+  stub program;
+  scene::Scene<mux::ui::window<stub>> window{std::in_place, &program};
+  const mux::account_id alice{mux::protocol::matrix{}, "@alice:example.com"};
+  const mux::conversation_id room{alice, "!room:example.com"};
+  mux::model model;
+  model.apply(mux::change_t{mux::change::connection_changed{alice, mux::connection::online{}}});
+  model.apply(mux::change_t{mux::change::conversation_updated{
+      .id = room, .kind = mux::conversation_kind::group{}, .name = "Receipts"}});
+  const auto start = std::chrono::sys_time<std::chrono::milliseconds>(std::chrono::milliseconds(1'700'000'000'000));
+  for (int i = 0; i < 3; ++i) {
+    mux::message one;
+    one.in = room;
+    one.id = i == 0 ? std::string("$a") : i == 1 ? std::string("$b") : std::string("$c");
+    one.sender = i == 0 ? "@alice:example.com" : "@bob:example.com";
+    one.outgoing = i == 0;
+    one.at = start + std::chrono::minutes(i);
+    one.body.plain = "Said.";
+    model.apply(mux::change_t{mux::change::message_added{.message = std::move(one)}});
+  }
+  // Bob has read up to $b; Carol's receipt points at an event this chat
+  // does not hold -- neither is said of any message it does not name.
+  model.apply(mux::change_t{mux::change::receipts_changed{
+      .in = room, .read_by = std::map<std::string, std::string>{{"@bob:example.com", "$b"},
+                                                                {"@carol:example.com", "$not here"}}}});
+  auto& screen = window.root().main();
+  screen.chosen = room;
+  screen.receipts_in.insert(room);
+  screen.show(model);
+  auto& bubbles = std::get<0>(std::get<0>(screen.timeline.fChildren).fChildren);
+  const auto at = [&](std::string_view id) {
+    return std::ranges::find_if(bubbles, [&](const mux::ui::message_bubble& row) { return id == row.message_id; });
+  };
+  ASSERT_EQ(bubbles.size(), 3u);
+  ASSERT_NE(at("$a"), bubbles.end());
+  ASSERT_NE(at("$b"), bubbles.end());
+  const auto read = at("$b")->id();
+  EXPECT_EQ(at("$b")->readers_shown, std::vector<std::string>{"@bob:example.com"});
+  EXPECT_TRUE(at("$a")->readers_shown.empty()) << "a receipt over $b was put on another message";
+
+  screen.show(model);
+  ASSERT_EQ(bubbles.size(), 3u);
+  ASSERT_NE(at("$b"), bubbles.end());
+  EXPECT_EQ(at("$b")->id(), read) << "the message read up to was made again over nothing";
+  EXPECT_EQ(at("$b")->readers_shown, std::vector<std::string>{"@bob:example.com"});
+  skiff::paint::defaultFont() = nullptr;
+}
+
+// The chat list's rows are kept while they still say the same -- compared
+// where they are -- and made again where what one of them says has changed.
+TEST(ChatList, RowsAreKeptUntilWhatTheySayChanges) {
+  skia::SkFont font;
+  skiff::paint::defaultFont() = &font;
+  stub program;
+  scene::Scene<mux::ui::window<stub>> window{std::in_place, &program};
+  const mux::account_id alice{mux::protocol::matrix{}, "@alice:example.com"};
+  const mux::conversation_id alpha{alice, "!a:example.com"};
+  const mux::conversation_id beta{alice, "!b:example.com"};
+  mux::model model;
+  model.apply(mux::change_t{mux::change::connection_changed{alice, mux::connection::online{}}});
+  model.apply(mux::change_t{mux::change::conversation_updated{.id = alpha, .name = "Alpha"}});
+  model.apply(mux::change_t{mux::change::conversation_updated{.id = beta, .name = "Beta"}});
+  const auto start = std::chrono::sys_time<std::chrono::milliseconds>(std::chrono::milliseconds(1'700'000'000'000));
+  const auto say = [&](const mux::conversation_id& in, const char* id, const char* words, int minutes) {
+    mux::message one;
+    one.in = in;
+    one.id = id;
+    one.sender = "@bob:example.com";
+    one.at = start + std::chrono::minutes(minutes);
+    one.body.plain = words;
+    model.apply(mux::change_t{mux::change::message_added{.message = std::move(one)}});
+  };
+  say(alpha, "$alpha", "Something said in Alpha.", 0);
+  say(beta, "$beta", "Something said in Beta.", 1);
+  auto& screen = window.root().main();
+  screen.show(model);
+  auto& rows = std::get<0>(std::get<0>(screen.list.fChildren).fChildren);
+  const auto at = [&](std::string_view id) {
+    return std::ranges::find_if(rows, [&](const mux::ui::conversation_row<stub>& row) { return id == row.id.id; });
+  };
+  ASSERT_EQ(rows.size(), 2u);
+  ASSERT_NE(at("!a:example.com"), rows.end());
+  ASSERT_NE(at("!b:example.com"), rows.end());
+  // Ordered by what was last said in them: Beta's message is the newer.
+  ASSERT_EQ(rows.front().id.id, "!b:example.com");
+  const auto alpha_shown = at("!a:example.com")->fState.fId;
+  const auto beta_shown = at("!b:example.com")->fState.fId;
+
+  // The model brought up to date, nothing in it changed: the rows the
+  // program would find again are the ones it already has.
+  screen.show(model);
+  ASSERT_EQ(rows.size(), 2u);
+  ASSERT_NE(at("!a:example.com"), rows.end());
+  ASSERT_NE(at("!b:example.com"), rows.end());
+  EXPECT_EQ(at("!a:example.com")->fState.fId, alpha_shown) << "a row was made again over nothing";
+  EXPECT_EQ(at("!b:example.com")->fState.fId, beta_shown) << "a row was made again over nothing";
+
+  // Something said in Beta: what its row shows of it is not what it showed,
+  // and it is made again. Alpha's row still says the same.
+  say(beta, "$beta2", "And more in Beta.", 2);
+  screen.show(model);
+  ASSERT_EQ(rows.size(), 2u);
+  ASSERT_NE(at("!a:example.com"), rows.end());
+  ASSERT_NE(at("!b:example.com"), rows.end());
+  EXPECT_EQ(at("!a:example.com")->fState.fId, alpha_shown) << "a row said something else and was kept";
+  EXPECT_NE(at("!b:example.com")->fState.fId, beta_shown) << "what the row says changed and it was kept anyway";
+  skiff::paint::defaultFont() = nullptr;
+}
+
+// "↓"'s badge: what came while the reader was above them, said between
+// events -- and gone once it has been read, however its count was put down.
+TEST(Composer, TheUnseenBadgeGoesWhenItsCountIsPutDown) {
+  skia::SkFont font;
+  skiff::paint::defaultFont() = &font;
+  stub program;
+  scene::Scene<mux::ui::window<stub>> window{std::in_place, &program};
+  const mux::account_id alice{mux::protocol::matrix{}, "@alice:example.com"};
+  const mux::conversation_id room{alice, "!room:example.com"};
+  mux::model model;
+  model.apply(mux::change_t{mux::change::connection_changed{alice, mux::connection::online{}}});
+  model.apply(mux::change_t{mux::change::conversation_updated{.id = room, .name = "Unread"}});
+  auto& screen = window.root().main();
+  screen.chosen = room;
+  screen.show(model);
+  auto& jump = screen.chat.area.parts.jump;
+  jump.set_unseen(4);
+  EXPECT_TRUE(jump.parts.badge.visible());
+  EXPECT_EQ(jump.parts.badge.parts.count.text(), "4");
+  // As the tick does when the view is back at the newest: the screen's own
+  // count put down first, then what the button says of it.
+  screen.unseen = 0;
+  jump.set_unseen(0);
+  EXPECT_FALSE(jump.parts.badge.visible()) << "the badge stayed up over nothing";
+  skiff::paint::defaultFont() = nullptr;
+}
+
+// What a dialog lists that no chat holds: its picture asked for once each,
+// and the list held to a number -- the program walks all of it at every
+// change in the model, and it was added to by every search a dialog made.
+TEST(ListedAvatars, AreSaidOnceEachAndHeldToANumber) {
+  mux::ui::listed_avatars().clear();
+  mux::ui::note_listed_avatar("!room:example.com", "mxc://example.com/one");
+  mux::ui::note_listed_avatar("!room:example.com", "mxc://example.com/again");
+  ASSERT_EQ(mux::ui::listed_avatars().size(), 1u) << "the same room was listed again";
+  EXPECT_EQ(mux::ui::listed_avatars().front().second, "mxc://example.com/one");
+  for (int i = 0; i < static_cast<int>(mux::ui::kListedAvatars) + 10; ++i)
+    mux::ui::note_listed_avatar(std::format("!{}:example.com", i), "mxc://example.com/x");
+  EXPECT_LE(mux::ui::listed_avatars().size(), mux::ui::kListedAvatars) << "the list goes on for ever";
+  mux::ui::listed_avatars().clear();
+}
+
 }  // namespace

@@ -55,8 +55,14 @@ export namespace mux::ui {
                     one.kind);
 }
 
+// What a chat is called: as what it holds, so that what it holds can be
+// compared with it without a copy made and thrown away -- the chats listed
+// are named at every change in the model.
+[[nodiscard]] inline std::string_view display_name_view(const conversation& one) {
+  return one.name.empty() ? std::string_view(one.id.id) : std::string_view(one.name);
+}
 [[nodiscard]] inline std::string display_name(const conversation& one) {
-  return one.name.empty() ? one.id.id : one.name;
+  return std::string(display_name_view(one));
 }
 
 // The name someone goes by in a conversation: as a member of it, or their

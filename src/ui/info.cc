@@ -960,7 +960,7 @@ struct start_chat_box : nodes::Stack {
     found = people;
     for (const found_person& one : people)
       if (one.avatar && !one.avatar->empty())
-        listed_avatars().emplace_back(one.id, *one.avatar);
+        note_listed_avatar(one.id, *one.avatar);
     this->show_rows();
   }
   void show_rows() {
@@ -2389,7 +2389,7 @@ struct explore_box : nodes::Stack {
     // Their pictures, asked for as a chat's are.
     for (const directory_room& one : rooms)
       if (one.avatar && !one.avatar->empty())
-        listed_avatars().emplace_back(one.id, *one.avatar);
+        note_listed_avatar(one.id, *one.avatar);
     parts.status.setText(space ? (rooms.empty() ? std::string("Nothing in this space, or its server would not say.")
                                                 : std::format("{} rooms and spaces in this space", rooms.size()))
                                : rooms.empty() ? std::string("No rooms found.")
@@ -2607,6 +2607,9 @@ struct info_panel : nodes::Stack {
   member_rows& members = content.parts.members;
   // The group's view, to come back to from a member's page.
   view group_view;
+  // What the upper part was last made from: said again, and the panel laid
+  // out, only where it changes.
+  std::optional<view> rendered;
 
   static constexpr float kWidth = 340.0f;
 
@@ -2700,8 +2703,14 @@ struct info_panel : nodes::Stack {
         shown.status = group_view.status;
       }
     }
-    upper.show(shown, [this](const view& v) { return head(actions, this, v); });
     const bool list = shown.group && !shown.of_person;
+    // Made again only where what it says or what it holds has changed: the
+    // panel laid out, and the part over the members painted, at every
+    // change in the model otherwise -- for a Memo that rebuilds nothing.
+    if (rendered && *rendered == shown)
+      return;
+    rendered = shown;
+    upper.show(shown, [this](const view& v) { return head(actions, this, v); });
     band_2.setVisible(list);
     members_header.setVisible(list);
     members.setVisible(list);

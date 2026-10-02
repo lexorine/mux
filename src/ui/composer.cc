@@ -757,10 +757,18 @@ struct jump_button : scene::Node {
                   .border = scene::Border{band_colour, 1.0f}});
     parts.chevron.apply({.fill = true});
   }
+  // How many came while the reader was above them. Said between events --
+  // at every change in the model -- and by the tick that notices the view
+  // is at the newest again; laid out and repainted only where what it says
+  // or where it stands has changed, not at each of those.
   void set_unseen(int count) {
+    const bool up = count > 0;
+    if (count == unseen && parts.badge.visible() == up)
+      return;
     unseen = count;
     parts.badge.parts.count.setText(std::to_string(count));
-    parts.badge.setVisible(count > 0);
+    if (parts.badge.visible() != up)
+      parts.badge.setVisible(up);
     this->invalidateLayout();
   }
   [[nodiscard]] bool acceptsInput() const { return true; }

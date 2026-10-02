@@ -171,6 +171,22 @@ inline std::vector<std::pair<std::string, std::string>>& listed_avatars() {
   static std::vector<std::pair<std::string, std::string>> listed;
   return listed;
 }
+// How many of them are kept. The program walks the whole list asking for
+// their pictures at every change in the model, so it is held to a number:
+// the list was added to by every search a dialog made, of the same rooms
+// again and again, and let nothing go.
+inline constexpr std::size_t kListedAvatars = 512;
+// One more of them: said once each, and the oldest gone as the newest come.
+// What is dropped has been asked for already -- the asking runs at every
+// change in the model, long before the list fills with another 512.
+inline void note_listed_avatar(std::string key, std::string source) {
+  auto& listed = listed_avatars();
+  if (std::ranges::any_of(listed, [&](const auto& one) { return one.first == key; }))
+    return;
+  listed.push_back({std::move(key), std::move(source)});
+  while (listed.size() > kListedAvatars)
+    listed.erase(listed.begin());
+}
 // The images of the pack being edited: fetched as avatars are, keyed by
 // their mxc://, while its dialog shows them.
 inline std::vector<std::string>& pack_pictures_shown() {
