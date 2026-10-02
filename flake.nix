@@ -210,7 +210,18 @@
         pname = name;
         version = "0.1";
 
-        src = lib.cleanSourceWith { src = ./.; name = "mux-source"; };
+        # .github/ is excluded deliberately. The source is the whole repo,
+        # so a workflow-only commit changed the hash and produced a different
+        # store path -- which is exactly what a binary cache must not do:
+        # three builds of identical sources landed on three paths, and only
+        # the last was ever substitutable.
+        src = lib.cleanSourceWith {
+          src = ./.;
+          name = "mux-source";
+          filter = path: type:
+            let base = baseNameOf (toString path);
+            in !(lib.hasPrefix "." base) || base == ".editorconfig";
+        };
 
         nativeBuildInputs = buildInputsList;
         buildInputs = [ pkgs.libcxx ];
@@ -257,7 +268,18 @@
       probePkg = pkgs.stdenv.mkDerivation {
         pname = "mux-configure";
         version = "0.1";
-        src = lib.cleanSourceWith { src = ./.; name = "mux-source"; };
+        # .github/ is excluded deliberately. The source is the whole repo,
+        # so a workflow-only commit changed the hash and produced a different
+        # store path -- which is exactly what a binary cache must not do:
+        # three builds of identical sources landed on three paths, and only
+        # the last was ever substitutable.
+        src = lib.cleanSourceWith {
+          src = ./.;
+          name = "mux-source";
+          filter = path: type:
+            let base = baseNameOf (toString path);
+            in !(lib.hasPrefix "." base) || base == ".editorconfig";
+        };
         nativeBuildInputs = buildInputsList;
         buildInputs = [ pkgs.libcxx ];
         hardeningDisable = [ "fortify" ];
