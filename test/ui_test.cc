@@ -764,4 +764,63 @@ TEST(Timeline, ReadReceiptsAreShownAndTheirBubbleIsKept) {
   skiff::paint::defaultFont() = nullptr;
 }
 
+// The chat list's rows are kept while they still say the same -- compared
+// where they are -- and made again where what one of them says has changed.
+TEST(ChatList, RowsAreKeptUntilWhatTheySayChanges) {
+  skia::SkFont font;
+  skiff::paint::defaultFont() = &font;
+  stub program;
+  scene::Scene<mux::ui::window<stub>> window{std::in_place, &program};
+  const mux::account_id alice{mux::protocol::matrix{}, "@alice:example.com"};
+  const mux::conversation_id alpha{alice, "!a:example.com"};
+  const mux::conversation_id beta{alice, "!b:example.com"};
+  mux::model model;
+  model.apply(mux::change_t{mux::change::connection_changed{alice, mux::connection::online{}}});
+  model.apply(mux::change_t{mux::change::conversation_updated{.id = alpha, .name = "Alpha"}});
+  model.apply(mux::change_t{mux::change::conversation_updated{.id = beta, .name = "Beta"}});
+  const auto start = std::chrono::sys_time<std::chrono::milliseconds>(std::chrono::milliseconds(1'700'000'000'000));
+  const auto say = [&](const mux::conversation_id& in, const char* id, const char* words, int minutes) {
+    mux::message one;
+    one.in = in;
+    one.id = id;
+    one.sender = "@bob:example.com";
+    one.at = start + std::chrono::minutes(minutes);
+    one.body.plain = words;
+    model.apply(mux::change_t{mux::change::message_added{.message = std::move(one)}});
+  };
+  say(alpha, "$alpha", "Something said in Alpha.", 0);
+  say(beta, "$beta", "Something said in Beta.", 1);
+  auto& screen = window.root().main();
+  screen.show(model);
+  auto& rows = std::get<0>(std::get<0>(screen.list.fChildren).fChildren);
+  const auto at = [&](std::string_view id) {
+    return std::ranges::find_if(rows, [&](const mux::ui::conversation_row<stub>& row) { return id == row.id.id; });
+  };
+  ASSERT_EQ(rows.size(), 2u);
+  ASSERT_NE(at("!a:example.com"), rows.end());
+  ASSERT_NE(at("!b:example.com"), rows.end());
+  const auto alpha_shown = at("!a:example.com")->fState.fId;
+  const auto beta_shown = at("!b:example.com")->fState.fId;
+
+  // The model brought up to date, nothing in it changed: the rows the
+  // program would find again are the ones it already has.
+  screen.show(model);
+  ASSERT_EQ(rows.size(), 2u);
+  ASSERT_NE(at("!a:example.com"), rows.end());
+  ASSERT_NE(at("!b:example.com"), rows.end());
+  EXPECT_EQ(at("!a:example.com")->fState.fId, alpha_shown) << "a row was made again over nothing";
+  EXPECT_EQ(at("!b:example.com")->fState.fId, beta_shown) << "a row was made again over nothing";
+
+  // Something said in Beta: what its row shows of it is not what it showed,
+  // and it is made again. Alpha's row still says the same.
+  say(beta, "$beta2", "And more in Beta.", 2);
+  screen.show(model);
+  ASSERT_EQ(rows.size(), 2u);
+  ASSERT_NE(at("!a:example.com"), rows.end());
+  ASSERT_NE(at("!b:example.com"), rows.end());
+  EXPECT_EQ(at("!a:example.com")->fState.fId, alpha_shown) << "a row said something else and was kept";
+  EXPECT_NE(at("!b:example.com")->fState.fId, beta_shown) << "what the row says changed and it was kept anyway";
+  skiff::paint::defaultFont() = nullptr;
+}
+
 }  // namespace

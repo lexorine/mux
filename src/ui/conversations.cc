@@ -1600,9 +1600,10 @@ struct conversations_screen : nodes::Stack {
   std::set<conversation_id> muted;
   // What is left written in each chat, as the program keeps it.
   std::map<conversation_id, std::string> drafts;
-  [[nodiscard]] std::string draft_of(const conversation_id& id) const {
+  [[nodiscard]] const std::string& draft_of(const conversation_id& id) const {
+    static const std::string nothing;
     const auto found = drafts.find(id);
-    return found == drafts.end() ? std::string() : found->second;
+    return found == drafts.end() ? nothing : found->second;
   }
   // Where the chosen chat pages back from, and where it was last asked to:
   // scrolled to its top, the older messages are asked for, once for each.
@@ -2498,8 +2499,8 @@ struct conversations_screen : nodes::Stack {
             [](const conversation_row<Actions>& row) { return row.id; },
             [&](const conversation* one) {
               if (const auto kept = rows_kept.find(one->id); kept != rows_kept.end()) {
-                const bool same = kept->second.shown == conversation_row<Actions>::view_of(*one, is_chosen(one), muted.contains(one->id),
-                                                                                           draft_of(one->id), events_of(one), strip_for(one));
+                const bool same = kept->second.shows_same_as(*one, is_chosen(one), muted.contains(one->id),
+                                                             draft_of(one->id), events_of(one), strip_for(one));
                 if (same) {
                   conversation_row<Actions> back = std::move(kept->second);
                   rows_kept.erase(kept);
@@ -2511,9 +2512,8 @@ struct conversations_screen : nodes::Stack {
                                                events_of(one), strip_for(one));
             },
             [&](const conversation_row<Actions>& row, const conversation* one) {
-              return row.shown ==
-                     conversation_row<Actions>::view_of(*one, is_chosen(one), muted.contains(one->id), draft_of(one->id),
-                                                        events_of(one), strip_for(one));
+              return row.shows_same_as(*one, is_chosen(one), muted.contains(one->id), draft_of(one->id),
+                                       events_of(one), strip_for(one));
             })) {
       list.invalidateLayout();
       // A chat come or gone -- or moved to another place: the whole list
