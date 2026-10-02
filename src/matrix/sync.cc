@@ -342,9 +342,19 @@ void account<Sink>::run() {
 
 template <class Sink>
 auto account<Sink>::kept_file() const -> std::filesystem::path {
-  // Named one to one by the account; kept under its name before, moved.
-  return config::moved_from(config::state_path(config::file_name_of(id_.address) + ".sync.json"),
-                            config::state_path(config::old_file_name_of(id_.address) + ".sync.json"));
+  // Three names: the %XX one, the _ one before it, and the hashed one now.
+  // Probed in order and chained, as app/store.cc does -- going straight from
+  // the newest to the oldest skipped the middle, so a sync kept by a build
+  // that had the %XX names was never found, and upgrading did a full
+  // re-sync and left that file behind.
+  const auto root = config::state_path("");
+  const auto was =
+      root / (config::unhashed_file_name_of(id_.address) + std::string(".sync.json"));
+  const auto before =
+      root / (config::old_file_name_of(id_.address) + std::string(".sync.json"));
+  config::moved_from(was, before);
+  return config::moved_from(
+      root / (config::file_name_of(id_.address) + std::string(".sync.json")), was);
 }
 
 template <class Sink>

@@ -705,7 +705,7 @@ TEST(Timeline, BubblesAreKeptWhenNothingAboutThemChanged) {
   edited.sender = "@carol:example.com";
   edited.body.plain = "What the thread answers, said otherwise.";
   edited.thread = "$root";
-  model.apply(mux::change_t{mux::change::message_edited{.in = room, .id = "$answer", .now = edited.body}));
+  model.apply(mux::change_t{mux::change::message_edited{.in = room, .id = "$answer", .now = edited.body}});
   screen.show(model);
   ASSERT_NE(at("$reply"), bubbles.end());
   EXPECT_NE(at("$reply")->id(), quoted) << "the reply kept quoting what its answer no longer says";
