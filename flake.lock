@@ -1,0 +1,215 @@
+{
+  "nodes": {
+    "alef": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1790879458,
+        "narHash": "sha256-Kec/bTEe9rTGuW+Peibr7nGmpvwFwgQxSFFhkWyLelI=",
+        "owner": "j4niwzis",
+        "repo": "alef",
+        "rev": "6dc139f9590dc0d3ac1cc0e9748e67d7a1485480",
+        "type": "github"
+      },
+      "original": {
+        "owner": "j4niwzis",
+        "repo": "alef",
+        "rev": "6dc139f9590dc0d3ac1cc0e9748e67d7a1485480",
+        "type": "github"
+      }
+    },
+    "boost-pfr": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1781086050,
+        "narHash": "sha256-W5nlCgMa86nJHEoiUF9cZ4DEfQGO/A9TP8KlKG/79os=",
+        "owner": "boostorg",
+        "repo": "pfr",
+        "rev": "401385c240027423acbb1eb6dea2abe0043db5aa",
+        "type": "github"
+      },
+      "original": {
+        "owner": "boostorg",
+        "repo": "pfr",
+        "rev": "401385c240027423acbb1eb6dea2abe0043db5aa",
+        "type": "github"
+      }
+    },
+    "chevron": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1790878901,
+        "narHash": "sha256-6Et9yleEAwwWeanyqZ2ATltZojBJMdgmTjZFiUEYVyY=",
+        "owner": "j4niwzis",
+        "repo": "chevron",
+        "rev": "3019faec6c81fbd677736811308967672e7b9911",
+        "type": "github"
+      },
+      "original": {
+        "owner": "j4niwzis",
+        "repo": "chevron",
+        "rev": "3019faec6c81fbd677736811308967672e7b9911",
+        "type": "github"
+      }
+    },
+    "cldr-en": {
+      "flake": false,
+      "locked": {
+        "narHash": "sha256-6D/vlSDz3XmMjnCqS/sfYtoO+Gnu/8+h8JQkQ5Rp2tA=",
+        "type": "file",
+        "url": "https://raw.githubusercontent.com/unicode-org/cldr/90e46ed15ee4716196d3299f669eff6259ec1dca/common/annotations/en.xml"
+      },
+      "original": {
+        "type": "file",
+        "url": "https://raw.githubusercontent.com/unicode-org/cldr/90e46ed15ee4716196d3299f669eff6259ec1dca/common/annotations/en.xml"
+      }
+    },
+    "cldr-ru": {
+      "flake": false,
+      "locked": {
+        "narHash": "sha256-VfTB/1mIUerEUXmP0CeZAxeGWrqiI88a2869Rv/dbYo=",
+        "type": "file",
+        "url": "https://raw.githubusercontent.com/unicode-org/cldr/90e46ed15ee4716196d3299f669eff6259ec1dca/common/annotations/ru.xml"
+      },
+      "original": {
+        "type": "file",
+        "url": "https://raw.githubusercontent.com/unicode-org/cldr/90e46ed15ee4716196d3299f669eff6259ec1dca/common/annotations/ru.xml"
+      }
+    },
+    "knot": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1790879452,
+        "narHash": "sha256-IZjwTi3VzvDGX2iDZV15iLE7tDYPqpWZgY6tlLkFpvw=",
+        "owner": "j4niwzis",
+        "repo": "knot",
+        "rev": "035e53fdee8875614e350331a914256495b9bb22",
+        "type": "github"
+      },
+      "original": {
+        "owner": "j4niwzis",
+        "repo": "knot",
+        "rev": "035e53fdee8875614e350331a914256495b9bb22",
+        "type": "github"
+      }
+    },
+    "loom": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1790883449,
+        "narHash": "sha256-Wl68i3hdCDhioH688F2efJYAMNEBpiIgXW4kstPKQAs=",
+        "owner": "j4niwzis",
+        "repo": "loom",
+        "rev": "823bded41602b99d1f1eee1b2bb8bb847618672f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "j4niwzis",
+        "repo": "loom",
+        "rev": "823bded41602b99d1f1eee1b2bb8bb847618672f",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1790822859,
+        "narHash": "sha256-69xHQhAeMAD2wDXO7T2pcOZIF9Sga2W+JkmY2a11Ops=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "c59305bab2065cfecc4944690d9eedbb56f3a9fa",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "alef": "alef",
+        "boost-pfr": "boost-pfr",
+        "chevron": "chevron",
+        "cldr-en": "cldr-en",
+        "cldr-ru": "cldr-ru",
+        "knot": "knot",
+        "loom": "loom",
+        "nixpkgs": "nixpkgs",
+        "skiff": "skiff",
+        "skiff-widgets": "skiff-widgets",
+        "splice": "splice",
+        "tern": "tern"
+      }
+    },
+    "skiff": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1790897536,
+        "narHash": "sha256-KZmuL37zd9ZhfviNc9auF8bt8L5LKvvH/FrcdvDXOxc=",
+        "owner": "j4niwzis",
+        "repo": "skiff",
+        "rev": "0531469ad26b78ff839e9660c9bfc6e9448b8b64",
+        "type": "github"
+      },
+      "original": {
+        "owner": "j4niwzis",
+        "repo": "skiff",
+        "rev": "0531469ad26b78ff839e9660c9bfc6e9448b8b64",
+        "type": "github"
+      }
+    },
+    "skiff-widgets": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1790890975,
+        "narHash": "sha256-usQF9R1PdCISqsrH/I6jr1bPFWYoVJ8qQSEtc1pK6E4=",
+        "owner": "j4niwzis",
+        "repo": "skiff-widgets",
+        "rev": "99bf5557a3713aa414cd14ee550c5dbb7bc75cf4",
+        "type": "github"
+      },
+      "original": {
+        "owner": "j4niwzis",
+        "repo": "skiff-widgets",
+        "rev": "99bf5557a3713aa414cd14ee550c5dbb7bc75cf4",
+        "type": "github"
+      }
+    },
+    "splice": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1790878895,
+        "narHash": "sha256-hN5YWC6HetbFJY6qNkRfT10/POWiRHlzP062NWUNfm0=",
+        "owner": "j4niwzis",
+        "repo": "splice",
+        "rev": "f2c25443061ba5353720eccd0a9438793c2ea053",
+        "type": "github"
+      },
+      "original": {
+        "owner": "j4niwzis",
+        "repo": "splice",
+        "rev": "f2c25443061ba5353720eccd0a9438793c2ea053",
+        "type": "github"
+      }
+    },
+    "tern": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1790898625,
+        "narHash": "sha256-lnbFWDMmNNaoRNHkL7nxzzrEApXUBJEf2jES2qN71ac=",
+        "owner": "j4niwzis",
+        "repo": "tern",
+        "rev": "e2fc820634033a2c79aa7f3bf1cfd977036cedaa",
+        "type": "github"
+      },
+      "original": {
+        "owner": "j4niwzis",
+        "repo": "tern",
+        "rev": "e2fc820634033a2c79aa7f3bf1cfd977036cedaa",
+        "type": "github"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
