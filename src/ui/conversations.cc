@@ -68,18 +68,22 @@ struct space_icon : nodes::Stack {
   std::string name;
   std::string key;  // its picture's
   float diameter = 0.0f;
+  // Whether it is the one ringed in the accent, as the bars say at every
+  // change in the model: not asked of the state again where it already is.
+  bool chosen = false;
   struct parts_t {
     std::optional<avatar_mark> face;
     std::optional<nodes::Text> mark;
   } parts;
-  space_icon(config::space_item_t what, folder_t shows, config::space_bar_t in, std::string id, std::string shown, bool chosen,
-             float size, Pick act)
-      : pick(std::move(act)), which(std::move(shows)), item(std::move(what)), bar(in), name(shown), key(id), diameter(size) {
+  space_icon(config::space_item_t what, folder_t shows, config::space_bar_t in, std::string id, std::string shown,
+             bool is_chosen, float size, Pick act)
+      : pick(std::move(act)), which(std::move(shows)), item(std::move(what)), bar(in), name(shown), key(id),
+        diameter(size), chosen(is_chosen) {
     this->setHorizontal();
     fStack.justify = nodes::justify::middle{};
     fState.apply({.width = size, .height = size, .cornerRadius = size * 0.5f, .background = tile_colour,
                   .hoverBackground = chosen_colour,
-                  .border = scene::Border{chosen ? accent_colour : skia::SkColor{0}, chosen ? 2.0f : 0.0f}});
+                  .border = scene::Border{is_chosen ? accent_colour : skia::SkColor{0}, is_chosen ? 2.0f : 0.0f}});
     splice::visit(splice::overloaded{[&](config::space_item::home) { parts.mark.emplace("\u2302", size * 0.5f, text_colour); },
                                      [&](config::space_item::direct) { parts.mark.emplace("@", size * 0.45f, text_colour, true); },
                                      [&](const config::space_item::space&) { parts.face.emplace(id, shown, size - 6.0f); }},
@@ -98,6 +102,9 @@ struct space_icon : nodes::Stack {
   // Ringed or not, as it is chosen or not: restyled where it is, not made
   // again -- every icon of both bars was, at every space chosen.
   void set_chosen(bool on) {
+    if (on == chosen)
+      return;
+    chosen = on;
     fState.apply({.border = scene::Border{on ? accent_colour : skia::SkColor{0}, on ? 2.0f : 0.0f}});
   }
 };
@@ -1600,9 +1607,10 @@ struct conversations_screen : nodes::Stack {
   std::set<conversation_id> muted;
   // What is left written in each chat, as the program keeps it.
   std::map<conversation_id, std::string> drafts;
-  [[nodiscard]] std::string draft_of(const conversation_id& id) const {
+  [[nodiscard]] const std::string& draft_of(const conversation_id& id) const {
+    static const std::string nothing;
     const auto found = drafts.find(id);
-    return found == drafts.end() ? std::string() : found->second;
+    return found == drafts.end() ? nothing : found->second;
   }
   // Where the chosen chat pages back from, and where it was last asked to:
   // scrolled to its top, the older messages are asked for, once for each.
@@ -2468,10 +2476,22 @@ struct conversations_screen : nodes::Stack {
           one = &forum_shown.insert_or_assign(one->id, std::move(made)).first->second;
         }
     // Invites first, as Element lists them; then by their newest.
-    std::ranges::sort(chats, std::ranges::greater{}, [&](const conversation* one) {
+    // The key worked out once for each chat: the comparator asked for it at
+    // every comparison -- a lookup of the chat's own event filters, and a
+    // walk back through its messages to the newest they show, which for a
+    // chat whose end is hidden events runs the whole way. That was O(n log
+    // n) lookups and walks of a list of every chat the account has, at
+    // every change in the model.
+    using newest_at = std::chrono::sys_time<std::chrono::milliseconds>;
+    using sort_key = std::pair<bool, newest_at>;
+    std::vector<std::pair<sort_key, const conversation*>> ranked;
+    ranked.reserve(chats.size());
+    for (const conversation* one : chats) {
       const message* last = newest(*one, events_of(one));
-      return std::pair{one->invite.has_value(), last ? last->at : std::chrono::sys_time<std::chrono::milliseconds>{}};
-    });
+      ranked.emplace_back(sort_key{one->invite.has_value(), last ? last->at : newest_at{}}, one);
+    }
+    std::ranges::sort(ranked, std::ranges::greater{}, &std::pair<sort_key, const conversation*>::first);
+    chats = ranked | std::views::values | std::ranges::to<std::vector>();
     // The rows, as a function of the chats: those whose chat shows the same
     // are kept as they are.
     // The chat open -- or, where Alt+Up or Alt+Down went to a forum, that.
@@ -2498,8 +2518,8 @@ struct conversations_screen : nodes::Stack {
             [](const conversation_row<Actions>& row) { return row.id; },
             [&](const conversation* one) {
               if (const auto kept = rows_kept.find(one->id); kept != rows_kept.end()) {
-                const bool same = kept->second.shown == conversation_row<Actions>::view_of(*one, is_chosen(one), muted.contains(one->id),
-                                                                                           draft_of(one->id), events_of(one), strip_for(one));
+                const bool same = kept->second.shows_same_as(*one, is_chosen(one), muted.contains(one->id),
+                                                             draft_of(one->id), events_of(one), strip_for(one));
                 if (same) {
                   conversation_row<Actions> back = std::move(kept->second);
                   rows_kept.erase(kept);
@@ -2511,9 +2531,8 @@ struct conversations_screen : nodes::Stack {
                                                events_of(one), strip_for(one));
             },
             [&](const conversation_row<Actions>& row, const conversation* one) {
-              return row.shown ==
-                     conversation_row<Actions>::view_of(*one, is_chosen(one), muted.contains(one->id), draft_of(one->id),
-                                                        events_of(one), strip_for(one));
+              return row.shows_same_as(*one, is_chosen(one), muted.contains(one->id), draft_of(one->id),
+                                       events_of(one), strip_for(one));
             })) {
       list.invalidateLayout();
       // A chat come or gone -- or moved to another place: the whole list

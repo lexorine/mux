@@ -1708,13 +1708,18 @@ struct message_bubble : nodes::Stack {
     const bool bare_picture = said.attachment && said.body.plain.empty() && !said.body.html && body.parts.picture;
     if (last_of_run && !said.service && !bare_picture)
       body.grow_tail(outgoing);
-    // The first link's preview, where it has come.
+    // The first link's preview, where it has come: and the link itself,
+    // kept, so that whether a preview of it has come is asked of the model
+    // rather than of the message's text again at every change in it.
     previews_shown = show_preview;
-    if (const auto link = first_link_of(said); link && now && show_preview)
-      if (const auto found = now->previews.find(*link); found != now->previews.end()) {
-        body.parts.preview.emplace(found->second, *link);
-        preview_known = true;
-      }
+    if (const auto link = first_link_of(said)) {
+      preview_link = *link;
+      if (now && show_preview)
+        if (const auto found = now->previews.find(*link); found != now->previews.end()) {
+          body.parts.preview.emplace(found->second, *link);
+          preview_known = true;
+        }
+    }
     if (said.replies_to) {
       // In the timeline, in a thread -- an answer quoting another -- or aside.
       const message* found = held_message(in, *said.replies_to);
@@ -1808,6 +1813,9 @@ struct message_bubble : nodes::Stack {
   bool events_shown = true;
   // Whether its link's preview had come when it was made.
   bool preview_known = false;
+  // Its message's first link, where it has one: what a preview of it is
+  // looked up by, without walking the text again.
+  std::string preview_link;
   // Whether its chat shows link previews, as it was made.
   bool previews_shown = true;
   // Rooms it names whose picture or whose being there is still to come; and

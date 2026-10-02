@@ -145,6 +145,22 @@ struct conversation_row : nodes::Stack {
     return {display_name(one), last ? std::optional<message>(*last) : std::nullopt, one.unread_here(events), is_chosen,
             is_muted, std::move(draft), one.invite, strip};
   }
+  // Whether the row still shows what it would be made of now, worked out
+  // from the chat where it is: `view_of` would copy the chat's newest
+  // message -- its text, what it carries, who has reacted to it -- and its
+  // name, for every row listed at every change in the model, only for the
+  // copies to be compared and thrown away. The same fields a view holds,
+  // compared in place.
+  [[nodiscard]] bool shows_same_as(const conversation& one, bool is_chosen, bool is_muted, const std::string& draft,
+                                   const room_event_filter& events, std::optional<skia::SkColor> strip) const {
+    if (shown.chosen != is_chosen || shown.muted != is_muted || shown.strip != strip || shown.invite != one.invite ||
+        shown.draft != draft)
+      return false;
+    if (shown.unread != one.unread_here(events) || shown.name != display_name_view(one))
+      return false;
+    const message* last = newest(one, events);
+    return shown.last.has_value() == (last != nullptr) && (last == nullptr || *shown.last == *last);
+  }
   view shown;
 
   conversation_row(Actions* a, const conversation& one, bool is_chosen, bool is_muted, std::string draft = {},
