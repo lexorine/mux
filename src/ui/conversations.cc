@@ -68,18 +68,22 @@ struct space_icon : nodes::Stack {
   std::string name;
   std::string key;  // its picture's
   float diameter = 0.0f;
+  // Whether it is the one ringed in the accent, as the bars say at every
+  // change in the model: not asked of the state again where it already is.
+  bool chosen = false;
   struct parts_t {
     std::optional<avatar_mark> face;
     std::optional<nodes::Text> mark;
   } parts;
-  space_icon(config::space_item_t what, folder_t shows, config::space_bar_t in, std::string id, std::string shown, bool chosen,
-             float size, Pick act)
-      : pick(std::move(act)), which(std::move(shows)), item(std::move(what)), bar(in), name(shown), key(id), diameter(size) {
+  space_icon(config::space_item_t what, folder_t shows, config::space_bar_t in, std::string id, std::string shown,
+             bool is_chosen, float size, Pick act)
+      : pick(std::move(act)), which(std::move(shows)), item(std::move(what)), bar(in), name(shown), key(id),
+        diameter(size), chosen(is_chosen) {
     this->setHorizontal();
     fStack.justify = nodes::justify::middle{};
     fState.apply({.width = size, .height = size, .cornerRadius = size * 0.5f, .background = tile_colour,
                   .hoverBackground = chosen_colour,
-                  .border = scene::Border{chosen ? accent_colour : skia::SkColor{0}, chosen ? 2.0f : 0.0f}});
+                  .border = scene::Border{is_chosen ? accent_colour : skia::SkColor{0}, is_chosen ? 2.0f : 0.0f}});
     splice::visit(splice::overloaded{[&](config::space_item::home) { parts.mark.emplace("\u2302", size * 0.5f, text_colour); },
                                      [&](config::space_item::direct) { parts.mark.emplace("@", size * 0.45f, text_colour, true); },
                                      [&](const config::space_item::space&) { parts.face.emplace(id, shown, size - 6.0f); }},
@@ -98,6 +102,9 @@ struct space_icon : nodes::Stack {
   // Ringed or not, as it is chosen or not: restyled where it is, not made
   // again -- every icon of both bars was, at every space chosen.
   void set_chosen(bool on) {
+    if (on == chosen)
+      return;
+    chosen = on;
     fState.apply({.border = scene::Border{on ? accent_colour : skia::SkColor{0}, on ? 2.0f : 0.0f}});
   }
 };
