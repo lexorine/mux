@@ -387,16 +387,28 @@ struct timeline_area : scene::Node {
     // Who has read up to where, where the chat shows it: each other person
     // on the message their receipt points at -- or, pointing at what is not
     // shown or not here, the nearest shown before it, by its time.
+    // Only the messages the receipts point at are indexed, not every message
+    // in the chat: a timeline of thousands had all of it put in an index of
+    // its own, allocated a node per message, and thrown away at every change
+    // in the model -- for the handful of receipts over it. Where one points
+    // at nothing here, its reader's own time is used, as below.
     std::map<std::string, std::vector<std::string>> readers;
-    if (how.receipts) {
-      std::map<std::string, std::size_t> place;
-      for (std::size_t i = 0; i < all.size(); ++i)
-        place.emplace(all[i].id, i);
+    if (how.receipts && !one.read_by.empty()) {
+      std::map<std::string, std::optional<std::size_t>> place;
+      for (const auto& [user, event] : one.read_by)
+        if (user != one.id.account.address)
+          place.try_emplace(event);
+      std::size_t left = place.size();
+      for (std::size_t i = 0; i < all.size() && left > 0; ++i)
+        if (const auto found = place.find(all[i].id); found != place.end() && !found->second) {
+          found->second = i;
+          --left;
+        }
       for (const auto& [user, event] : one.read_by) {
         if (user == one.id.account.address)
           continue;
         std::optional<std::size_t> at;
-        if (const auto found = place.find(event); found != place.end())
+        if (const auto found = place.find(event); found != place.end() && found->second)
           at = found->second;
         else if (const auto when = one.receipt_times.find(user); when != one.receipt_times.end())
           for (std::size_t j = all.size(); j-- > 0;)
