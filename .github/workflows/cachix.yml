@@ -100,12 +100,28 @@ jobs:
         run: |
           set -euo pipefail
           nix build .#mux --print-build-logs --out-link ./result
+          # Every path in the closure, so the cache can serve the binary and
+          # everything it needs to run. --print-out-paths on the already-built
+          # output, plus nix-store --query --requisites for its dependencies.
+          {
+            echo "paths<<EOF"
+            nix path-info --recursive ./result
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
           echo "store path: $(nix path-info ./result)"
+          echo "closure: $(nix path-info --recursive ./result | wc -l) paths"
           ls -la ./result/bin/
           df -h /nix | tail -1
 
-      # Daemon mode (the default) pushes each store path as it is built, so
-      # an interrupted run still leaves a usable partial cache behind.
+      # Push the build's whole closure, explicitly.
+      #
+      # useDaemon was left at its default, which registers a post-build hook
+      # and pushes paths as they are *built*. But the build here is a
+      # separate step that had already finished by the time the daemon
+      # started, so there was nothing left for it to observe: it started,
+      # found no new paths, and exited reporting success while the cache
+      # stayed empty. Naming the paths instead makes the push depend on
+      # this run's output rather than on having observed the build.
       #
       # fixes/next builds to prove a change compiles and must not publish:
       # only the branches meant to be consumed push to the cache.
@@ -115,6 +131,8 @@ jobs:
         with:
           name: mux
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          useDaemon: false
+          pathsToPush: ${{ steps.build.outputs.paths }}
 
       - name: Summary
         run: |
