@@ -457,6 +457,18 @@ class account {
     }
     session_type& session = *made;
     session_ = &session;
+    // Taken away while it was still connecting: closed at once, so that an
+    // account the program removed does not stay logged in on a session
+    // whose changes nothing listens to any more. (stop() found no session
+    // to close when it ran, or it would have closed this one.)
+    if (stopping_) {
+      session.close();
+      session_ = nullptr;
+      wire_ = nullptr;
+      log(id_, "stopped as it connected");
+      say(connection::offline{});
+      return;
+    }
     log(id_, "logged in, as {}", how_.resource.empty() ? std::string("a resource the server chose") : how_.resource);
     say(connection::online{});
 
