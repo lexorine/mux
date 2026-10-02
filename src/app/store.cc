@@ -163,12 +163,19 @@ class message_store {
 
  private:
   // A chat's file in a folder: named one to one by its account and its id
-  // -- what was kept under the names before moved there.
+  // -- what was kept under the names before moved there, first the names
+  // without the hash, then the yet older ones with '_' for every other
+  // character.
   static std::filesystem::path kept_of(std::string_view folder, const mux::conversation_id& in, std::string_view ending) {
     const auto root = mux::config::state_path(std::string(folder));
+    const auto was = root / mux::config::unhashed_file_name_of(in.account.address) /
+                     (mux::config::unhashed_file_name_of(in.id) + std::string(ending));
+    const auto before = root / mux::config::old_file_name_of(in.account.address) /
+                        (mux::config::old_file_name_of(in.id) + std::string(ending));
+    mux::config::moved_from(was, before);
     return mux::config::moved_from(
         root / mux::config::file_name_of(in.account.address) / (mux::config::file_name_of(in.id) + std::string(ending)),
-        root / mux::config::old_file_name_of(in.account.address) / (mux::config::old_file_name_of(in.id) + std::string(ending)));
+        was);
   }
   static std::filesystem::path reads_file_of(const mux::conversation_id& in) { return kept_of("messages", in, ".reads.json"); }
   static std::filesystem::path deleted_file_of(const mux::conversation_id& in) { return kept_of("deleted", in, ".jsonl"); }
