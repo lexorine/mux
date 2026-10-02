@@ -100,19 +100,6 @@ jobs:
         run: |
           set -euo pipefail
           nix build .#mux --print-build-logs --out-link ./result
-          # Every path in the closure, so the cache can serve the binary and
-          # everything it needs to run.
-          #
-          # SPACE separated, not newline: the action splits pathsToPush with
-          # args.split(" "), so newlines would arrive as one malformed path
-          # and the push would silently do nothing again. printf '%s ' into
-          # a single-line output, then trim.
-          {
-            echo 'paths<<OUT_EOF'
-            nix path-info --recursive ./result | tr '\n' ' '
-            echo ''
-            echo 'OUT_EOF'
-          } >> "$GITHUB_OUTPUT"
           echo "store path: $(nix path-info ./result)"
           echo "closure: $(nix path-info --recursive ./result | wc -l) paths"
           ls -la ./result/bin/
@@ -130,14 +117,24 @@ jobs:
       #
       # fixes/next builds to prove a change compiles and must not publish:
       # only the branches meant to be consumed push to the cache.
+      # Push the way the Cachix docs say to: build, then pipe the
+      # result into `cachix push`. The action only installs Nix and
+      # configures the cache; the push itself is a plain CLI call with
+      # visible output, not a daemon whose timing can silently no-op.
+      #
+      # fixes/next builds to prove a change compiles and must not publish:
+      # only the branches meant to be consumed push to the cache.
       - name: Push to Cachix
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/integrate/')
-        uses: cachix/cachix-action@v17
-        with:
-          name: mux
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          useDaemon: false
-          pathsToPush: ${{ steps.build.outputs.paths }}
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          CACHIX_SIGNING_KEY: ${{ secrets.CACHIX_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          nix path-info --recursive ./result > /tmp/closure.txt
+          echo "closure: $(wc -l < /tmp/closure.txt) paths"
+          # shellcheck disable=SC2046
+          cachix push mux $(tr '\n' ' ' < /tmp/closure.txt)
 
       - name: Summary
         run: |
