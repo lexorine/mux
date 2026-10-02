@@ -1685,19 +1685,26 @@ class model {
 };
 
 // Changes from the network's thread to the UI's: pushed on one, taken all
-// at once on the other. `notify` is called after a push -- for the UI to
-// wake its event loop (an SDL user event), so that nothing polls.
+// at once on the other. `notify` is called when a push finds the queue
+// empty -- for the UI to wake its event loop (an SDL user event), so that
+// nothing polls. A burst of changes crosses as one wake: a sync bringing
+// thousands does not queue thousands of wake events for a queue that
+// drains at once anyway.
 template <class Notify>
 class mailbox {
  public:
   explicit mailbox(Notify notify = {}) : notify_(std::move(notify)) {}
 
   void push(change_t one) {
+    bool wake = false;
     {
       std::lock_guard held(lock_);
+      wake = pending_.empty();
       pending_.push_back(std::move(one));
     }
-    notify_();
+    // Outside the lock: the window may be draining what is here already.
+    if (wake)
+      notify_();
   }
 
   std::vector<change_t> take() {

@@ -206,9 +206,49 @@ TEST(Mailbox, CrossesThreads) {
       box.push(change::typing_changed{with_juliet, {}});
   });
   network.join();
+  // One wake for the burst: the window takes them all at once anyway.
+  EXPECT_EQ(notified.load(), 1);
   EXPECT_EQ(box.take().size(), 100u);
   EXPECT_TRUE(box.take().empty());
-  EXPECT_EQ(notified.load(), 100);
+  // Drained, so the next change wakes it again.
+  box.push(change::typing_changed{with_juliet, {}});
+  EXPECT_EQ(notified.load(), 2);
+  EXPECT_EQ(box.take().size(), 1u);
+}
+
+// Taken while the network pushes on: every change crosses, and whenever a
+// take finds nothing left, what is still to come wakes the window for it --
+// a wake coalesced away must not be a wake lost.
+TEST(Mailbox, DrainedWhileTheNetworkPushes) {
+  std::mutex lock;
+  std::condition_variable signal;
+  int wakes = 0;
+  mailbox box([&] {
+    std::lock_guard held(lock);
+    ++wakes;
+    signal.notify_all();
+  });
+  std::thread network([&] {
+    for (int i = 0; i < 100; ++i)
+      box.push(change::typing_changed{with_juliet, {}});
+  });
+  int got = 0;
+  while (got < 100) {
+    int before;
+    {
+      std::lock_guard held(lock);
+      before = wakes;
+    }
+    const auto batch = box.take();
+    got += static_cast<int>(batch.size());
+    if (got >= 100 || !batch.empty())
+      continue;
+    std::unique_lock held(lock);
+    if (!signal.wait_for(held, std::chrono::seconds(5), [&] { return wakes != before; }))
+      break;  // never woken again: failed above, not hung below
+  }
+  network.join();
+  EXPECT_EQ(got, 100);
 }
 
 }  // namespace
