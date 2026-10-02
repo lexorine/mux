@@ -118,6 +118,14 @@
         "-isystem ${pkgs.vulkan-headers}/include"
         "-isystem ${pkgs.sdl3.dev}/include"
         "-isystem ${pkgs.ffmpeg.dev}/include"
+        # Audio. src/audio.cc includes <opus.h> and <vorbis/vorbisfile.h>.
+        # nixpkgs installs opus as opus/opus.h, so the include/opus directory
+        # is named too, to make the bare <opus.h> resolve. opusfile ships no
+        # headers at all and is not needed here.
+        "-isystem ${pkgs.libopus.dev}/include"
+        "-isystem ${pkgs.libopus.dev}/include/opus"
+        "-isystem ${pkgs.libvorbis.dev}/include"
+        "-isystem ${pkgs.libogg.dev}/include"
       ];
 
       ldFlags = lib.concatStringsSep " " [
@@ -134,7 +142,7 @@
         boost openssl
         # The GUI stack. SDL3 and FFmpeg are REQUIRED by mux's CMakeLists,
         # and cme feature-probes FFmpeg's components.
-        sdl3 ffmpeg opusfile libvorbis vulkan-headers expat harfbuzz
+        sdl3 ffmpeg libopus libvorbis vulkan-headers expat harfbuzz
         # Skia's own system deps: its third_party/externals is empty in a
         # cme build, so every codec and font library comes from nixpkgs.
         zlib libpng libjpeg_turbo libwebp freetype
