@@ -1,13 +1,17 @@
 {
   description = "Hermetic Nix build of mux (j4niwzis/mux), the GUI, for Cachix";
 
+  nixConfig = {
+    extra-substituters = [ "https://mux.cachix.org" ];
+    extra-trusted-public-keys = [
+      "mux.cachix.org-1:btkZGxY0dksblZlVjSvDwjEF+U6FwLB6d9PW+mbn6SQ="
+    ];
+  };
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-    # Carries upstream's fix for the clang 23 std::format crash in
-    # show_space_bars (3acea405), so no local patch is needed.
-    # The dependency family, at the commits mux's own cme-lock.json records.
-    alef = { url = "github:j4niwzis/alef/6dc139f9590dc0d3ac1cc0e9748e67d7a1485480"; flake = false; };
+    # The dependency family, at the commits mux's own CMakeLists.txt pins.
     chevron = { url = "github:j4niwzis/chevron/3019faec6c81fbd677736811308967672e7b9911"; flake = false; };
     knot = { url = "github:j4niwzis/knot/035e53fdee8875614e350331a914256495b9bb22"; flake = false; };
     loom = { url = "github:j4niwzis/loom/823bded41602b99d1f1eee1b2bb8bb847618672f"; flake = false; };
@@ -16,6 +20,8 @@
     boost-pfr = { url = "github:boostorg/pfr/401385c240027423acbb1eb6dea2abe0043db5aa"; flake = false; };
     skiff = { url = "github:j4niwzis/skiff/4dda84c2f5bde1c1495e2ea4d01b86206cf2c67b"; flake = false; };
     skiff-widgets = { url = "github:j4niwzis/skiff-widgets/99bf5557a3713aa414cd14ee550c5dbb7bc75cf4"; flake = false; };
+    # alef: same pin upstream CMakeLists.txt carries (unchanged).
+    alef = { url = "github:j4niwzis/alef/6dc139f9590dc0d3ac1cc0e9748e67d7a1485480"; flake = false; };
 
     # Assets mux #embed s. CMake checks for these before downloading, so
     # pre-creating them keeps configure off the network.
@@ -35,6 +41,14 @@
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
       lib = pkgs.lib;
+
+      # Upstream README: "clang 23 with libc++". Pinned libc++ 21 has no
+      # std::views::enumerate (P2164R9, landed for LLVM 23), which splice
+      # 4bc0782 uses in src/bytes.cc. So the whole toolchain comes from
+      # llvmPackages_23, not the default (21.1.8) stdenv.
+      cc = pkgs.llvmPackages_23.clang;
+      cxxStdenv = pkgs.llvmPackages_23.libcxxStdenv;
+      cxxLib = pkgs.llvmPackages_23.libcxx;
 
       # cmake-everywhere itself, as a FILE in the store rather than an
       # unpacked directory.
@@ -96,8 +110,8 @@
       # nothing while -nostdinc++ was in force.
       cxxFlags = lib.concatStringsSep " " [
         "-nostdinc++"
-        "-isystem ${pkgs.libcxx.dev}/include/c++/v1"
-        "-isystem ${pkgs.libcxx}/share/libc++/v1"
+        "-isystem ${cxxLib.dev}/include/c++/v1"
+        "-isystem ${cxxLib}/share/libc++/v1"
         "-isystem ${pkgs.glibc.dev}/include"
         "-isystem ${pkgs.boost.dev}/include"
         "-isystem ${pkgs.openssl.dev}/include"
@@ -129,16 +143,17 @@
       ];
 
       ldFlags = lib.concatStringsSep " " [
-        "-L${pkgs.libcxx}/lib"
+        "-L${cxxLib}/lib"
         "-L${pkgs.glibc}/lib"
-        "-Wl,-rpath,${pkgs.libcxx}/lib"
+        "-Wl,-rpath,${cxxLib}/lib"
         "-Wl,-rpath,${pkgs.glibc}/lib"
         "-lc++"
         "-lc++abi"
       ];
 
       buildInputsList = with pkgs; [
-        clang cmake ninja gn pkg-config which git perl python3
+        cc cmake ninja gn pkg-config which git perl python3
+        cargo rustc
         boost openssl
         # The GUI stack. SDL3 and FFmpeg are REQUIRED by mux's CMakeLists,
         # and cme feature-probes FFmpeg's components.
@@ -154,7 +169,7 @@
       ];
 
       env = {
-        MUX_STDLIB_JSON = "${pkgs.libcxx}/lib/libc++.modules.json";
+        MUX_STDLIB_JSON = "${cxxLib}/lib/libc++.modules.json";
         MUX_CXXFLAGS = cxxFlags;
         MUX_LDFLAGS = ldFlags;
         MUX_CME_ARCHIVE = "${cmeArchive}";
@@ -178,6 +193,18 @@
         # issuer certificate".
         export NIX_SSL_CERT_FILE="''${caCerts}/etc/ssl/certs/ca-bundle.crt"
         export SSL_CERT_FILE="''${caCerts}/etc/ssl/certs/ca-bundle.crt"
+
+        # vodozemac is a Rust library built by cargo through cmake-everywhere
+        # (upstream added E2EE after the fork's pins). Cargo needs a writable
+        # home; its git deps are fetched at configure time through the same
+        # CA bundle the rest of the build uses. No CARGO_NET_OFFLINE: cme
+        # vendored nothing for cargo, the vodozemac checkout comes from
+        # FetchContent at configure time, and cargo's own git fetch of
+        # matrix-org/vodozemac#0.10.0 needs the network.
+        export CARGO_HOME="$NIX_BUILD_TOP/cargo-home"
+        mkdir -p "$CARGO_HOME"
+        export CARGO_NET_GIT_FETCH_WITH_CLI=true
+        export GIT_SSL_CAINFO="''${caCerts}/etc/ssl/certs/ca-bundle.crt"
 
         # emoji_keywords.cc #embed s these. CMake checks for them before
         # downloading and re-verifies its own sha256 of what it finds.
@@ -205,7 +232,7 @@
         runHook postConfigure
       '';
 
-      mkMux = { name, ui, install }: pkgs.stdenv.mkDerivation {
+      mkMux = { name, ui, install }: cxxStdenv.mkDerivation {
         inherit name;
         pname = name;
         version = "0.1";
@@ -224,7 +251,7 @@
         };
 
         nativeBuildInputs = buildInputsList;
-        buildInputs = [ pkgs.libcxx ];
+        buildInputs = [ cxxLib ];
 
         hardeningDisable = [ "fortify" ];
         dontDisableStatic = true;
@@ -265,7 +292,7 @@
 
       # Configure-only probe: resolves the whole dependency graph -- Skia,
       # FFmpeg's codecs, SDL3 -- without spending an hour compiling.
-      probePkg = pkgs.stdenv.mkDerivation {
+      probePkg = cxxStdenv.mkDerivation {
         pname = "mux-configure";
         version = "0.1";
         # .github/ is excluded deliberately. The source is the whole repo,
@@ -281,7 +308,7 @@
             in !(lib.hasPrefix "." base) || base == ".editorconfig";
         };
         nativeBuildInputs = buildInputsList;
-        buildInputs = [ pkgs.libcxx ];
+        buildInputs = [ cxxLib ];
         hardeningDisable = [ "fortify" ];
         dontBuild = true;
         inherit (env) MUX_STDLIB_JSON MUX_CXXFLAGS MUX_LDFLAGS MUX_CME_ARCHIVE
@@ -307,6 +334,17 @@
         mux-cli = cliPkg;
         default = muxPkg;
         mux-configure = probePkg;
+      };
+
+      apps.${system} = {
+        default = {
+          type = "app";
+          program = "${muxPkg}/bin/mux";
+        };
+        cli = {
+          type = "app";
+          program = "${cliPkg}/bin/mux-cli";
+        };
       };
     };
 }
