@@ -740,8 +740,8 @@ void account<Sink>::fetch_unredacted(std::string room, std::string event) {
                                            body_of(content.body, content.format, content.formatted_body)});
                                      },
                                      [&](const auto&) {
-                                       sink_(change::devtools_text{"Removed content of " + event,
-                                                                   knot::to_pretty_json_string(one)});
+                                       sink_(proto::matrix::devtools_text{"Removed content of " + event,
+                                                                        knot::to_pretty_json_string(one)});
                                      }},
                   one.content.data());
   });
