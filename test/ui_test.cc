@@ -157,6 +157,7 @@ struct stub {
   void open_new_room() {}
   void close_new_room() {}
   void copy_text(std::string) {}
+  void text_key(scene::Key) {}
   void settings_notifications() {}
   void flip_notify(mux::config::notify_flag_t) {}
   void flip_unified_push() {}
