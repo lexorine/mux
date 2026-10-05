@@ -288,10 +288,17 @@ if(MUX_UI)
   set(mux_calls_libraries)
   if(MUX_CALLS)
     # 0.24.6's src/configuration.cpp calls std::transform with no <algorithm>
-    # included: force-included for that port's build, the flag going into the
-    # store key too, so the library is built again with it. (libdatachannel's
-    # <srtp2/srtp.h> is libsrtp's own port's, in cmake/ports/.)
-    cme_options(libdatachannel "CMAKE_CXX_FLAGS -include algorithm")
+    # included, so the port is built with it force-included. A port is given
+    # its flags through CMAKE_CXX_FLAGS, and what is put there is the whole
+    # of them, not one more: what this build was invoked with is carried
+    # into it, or the library would be compiled against libstdc++ while the
+    # program links libc++, and every std:: symbol in it undefined at the
+    # link. (The value is part of the store key too, so the library is built
+    # again with it. libdatachannel's <srtp2/srtp.h> is libsrtp's own port's,
+    # in cmake/ports/.)
+    set(mux_calls_libdatachannel_flags "${CMAKE_CXX_FLAGS} -include algorithm")
+    string(STRIP "${mux_calls_libdatachannel_flags}" mux_calls_libdatachannel_flags)
+    cme_options(libdatachannel "CMAKE_CXX_FLAGS ${mux_calls_libdatachannel_flags}")
     cme_find_package(LibDataChannel REQUIRED)
     set(mux_calls_sources src/calls/media.cc)
     set(mux_calls_libraries LibDataChannel::LibDataChannel)
