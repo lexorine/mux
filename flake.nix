@@ -64,9 +64,9 @@
       # minutes and then die with SIGSEGV, on both prtapc and a GitHub
       # runner. Nothing writes to the read-only source tree any more.
       cmeArchive = pkgs.fetchurl {
-        url = "https://github.com/j4niwzis/cmake-everywhere/releases/download/v0.2.24/cmake-everywhere-0.2.24.tar.gz";
-        # Same digest get_cme.cmake has compiled in for v0.2.24.
-        hash = "sha256-0FNcXeY9Z4MwU7V5ZEvu86eUKwSCFKBk5PnOPD1/1Mw=";
+        url = "https://github.com/j4niwzis/cmake-everywhere/releases/download/v0.2.32/cmake-everywhere-0.2.32.tar.gz";
+        # Same digest get_cme.cmake has compiled in for v0.2.32.
+        hash = "sha256-ehq0fN6fSx4M/Oe3maULjjvrIXj5jm7sKGR04v+Q+IQ=";
       };
 
       # cme's documented offline mechanism, in its own words: "A checkout
