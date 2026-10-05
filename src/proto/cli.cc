@@ -81,6 +81,9 @@ std::string of(const change::message_added& one) {
 }
 std::string of(const change::message_edited& one) { return std::format("{} edited {}: {}", one.in.id, one.id, one.now.plain); }
 std::string of(const change::message_redacted& one) { return std::format("{} removed {}", one.in.id, one.id); }
+std::string of(const change::message_unredacted& one) {
+  return std::format("{} viewed removed {}: {}", one.in.id, one.id, one.now.plain);
+}
 std::string of(const change::message_acknowledged& one) { return std::format("{} is {}", one.local_id, one.id); }
 std::string of(const change::delivery_changed& one) { return std::format("{} {}", one.id, name_of(one.now)); }
 std::string of(const change::message_discarded& one) { return std::format("{} let go {}", one.in.id, one.id); }

@@ -197,6 +197,13 @@ class menu_part {
     if (const auto& chosen = s_->root().main().chosen; chosen && !s_->demo())
       s_->net->view_source(*chosen, target_.id);
   }
+  // A removed message's content, fetched back to show to a moderator
+  // (MSC2815).
+  void apply(const request::menu_view_removed&) {
+    s_->root().close_menu();
+    if (const auto& chosen = s_->root().main().chosen; chosen && !s_->demo())
+      s_->net->view_removed(*chosen, target_.id);
+  }
   void apply(const request::forward_to& one) {
     s_->root().close_forward();
     if (!forwarding_ || s_->demo())

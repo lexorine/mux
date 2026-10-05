@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// mux.proto.xmpp.client: an XMPP account, run by a fiber on mux.net's loop through tern,
+// mux.xmpp: an XMPP account, run by a fiber on mux.net's loop through tern,
 // saying what happens as mux.core's changes.
 //
 // Connecting: the domain's SRV records tried in order, STARTTLS with the
@@ -7,7 +7,7 @@
 // binding) through tern; then the roster -- from the version kept, where
 // the server versions rosters -- presence, and the stanzas as they come,
 // through a tern inbox of the account's own.
-export module mux.proto.xmpp.client;
+export module mux.xmpp;
 
 import std;
 import splice;
@@ -15,7 +15,7 @@ import tern;
 import mux.core;
 import mux.net;
 
-export namespace mux::proto::xmpp::client {
+export namespace mux::xmpp {
 
 // A MUC occupant's affiliation or role (XEP-0045), where it is one shown
 // beside their name: read into a type once, where it comes in.
@@ -185,23 +185,68 @@ class account {
 
   // Connected, and kept connected, by a fiber of its own.
   void start() {
-    this->spawn_guarded([this] { run(); });
+    loop_->spawn([this] { run(); });
   }
-
-  // What an account of another protocol does and this does not -- avatars
-  // (XEP-0084), reactions (XEP-0444), chat states (XEP-0085), files (HTTP
-  // upload, XEP-0363), stickers, threads, pins, link previews, directories,
-  // new rooms, forwarding, push -- is not here at all: what is asked of an
-  // account is done where its type has it (mux.app.network's ask_if_able),
-  // and nothing is written for what it has not.
 
   // A chat message sent: from any fiber, or posted to the loop from another
   // thread. What was sent is said as a change at once, and marked sent once
   // it has gone out.
   // A displayed marker (XEP-0333) for a message: its sender, or the room,
   // sees it was read.
+  // Avatars of XMPP contacts (XEP-0084) are not fetched yet.
+  void fetch_avatar(std::string, std::string) {}
+  void fetch_media(std::string, media_use_t, int, bool = false) {}
+  void cancel_media(std::string) {}
+  // A room's occupants come with its presence; nothing to ask for.
+  void fetch_members(std::string) {}
+  // Reactions (XEP-0444) are not sent yet.
+  void react(std::string, std::string, std::string, bool) {}
+  // The developer tools are Matrix's.
+  void view_source(std::string, std::string) {}
+  void list_state(std::string) {}
+  void send_custom(std::string, std::string, std::optional<std::string>, std::string) {}
+  // Stickers are Matrix's.
+  void send_sticker(std::string, mux::emote, std::optional<std::string> = std::nullopt) {}
+  // Link previews come from a Matrix homeserver alone.
+  void fetch_preview(std::string) {}
+  void preview_room(std::string, std::vector<std::string>) {}
+  void search_directory(std::string, std::string) {}
+  void follow(std::optional<std::string>) {}
+  void explore_space(std::string) {}
+  void create_room(std::string, std::string, bool, std::string, bool = true) {}
+  void search_people(std::string) {}
+  void list_packs(std::optional<std::string>) {}
+  void list_threads(std::string) {}
+  void load_thread(std::string, std::string) {}
+  void send_in_thread(std::string, std::string, std::string, std::string, std::optional<std::string>) {}
+  void save_pack(emote_pack) {}
+  void delete_pack(std::string, std::string) {}
+  void upload_pack_picture(pack_picture, std::string) {}
+  void edit_caption(std::string, std::string, std::string, mux::attachment) {}
+  // New chats and groups are made over Matrix alone for now.
+  void create_direct(std::string) {}
+  void create_group(std::string) {}
+  // Forwarding is over Matrix alone for now.
+  void forward(std::string, std::string, std::string) {}
+  // Rooms are managed over Matrix alone for now.
+  void manage(std::string, room_action_t) {}
+  // A quoted message is fetched by Matrix alone for now.
+  void fetch_quoted(std::string, std::string) {}
+  // Viewing removed messages (MSC2815) is Matrix's.
+  void fetch_unredacted(std::string, std::string) {}
+  // Pinning is Matrix's: nothing to do over XMPP.
+  void pin(std::string, std::string, bool) {}
+  // Chat states (XEP-0085) are not sent yet.
+  void typing(std::string, bool) {}
+  // Rooms are joined through their bookmarks; not from a link yet.
+  void join(std::string, std::vector<std::string>) {}
+  void knock(std::string, std::vector<std::string>, std::string) {}
+  // Files over XMPP (HTTP upload, XEP-0363) are not sent yet.
+  void send_file(std::string, std::string, std::string, std::string, std::string, bool, int, int, std::string,
+                 std::optional<std::string> = std::nullopt, std::optional<thread_place> = std::nullopt) {}
+
   void mark_read(std::string to, std::string id) {
-    this->spawn_guarded([this, to = std::move(to), id = std::move(id)] {
+    loop_->spawn([this, to = std::move(to), id = std::move(id)] {
       if (!session_)
         return;
       if (rooms_.contains(to)) {
@@ -219,10 +264,11 @@ class account {
   // Older messages of a conversation, from the server's archive (XEP-0313):
   // one's own archive with a contact, a room's own for a room. `before` is
   // the archive id to page back from, or empty for the latest page.
-  // No window around a message here, and so nothing newer to page to: a
-  // jump pages back instead.
+  // No window around a message here: a jump pages back instead.
+  void load_context(std::string, std::string) {}
+  void load_newer(std::string, std::string) {}
   void load_older(std::string with, std::string before) {
-    this->spawn_guarded([this, with = std::move(with), before = std::move(before)] {
+    loop_->spawn([this, with = std::move(with), before = std::move(before)] {
       if (!session_)
         return;
       const bool room = rooms_.contains(with);
@@ -277,7 +323,7 @@ class account {
 
   // A room left: unavailable to it, and the conversation gone.
   void leave(std::string room) {
-    this->spawn_guarded([this, room = std::move(room)] {
+    loop_->spawn([this, room = std::move(room)] {
       const auto found = rooms_.find(room);
       if (found == rooms_.end())
         return;
@@ -290,7 +336,7 @@ class account {
 
   void send(std::string to, std::string text, std::optional<std::string> reply_to = std::nullopt,
             std::vector<mux::mention> = {}) {
-    this->spawn_guarded([this, to = bare(to), text = std::move(text), reply_to = std::move(reply_to)] {
+    loop_->spawn([this, to = bare(to), text = std::move(text), reply_to = std::move(reply_to)] {
       message out{.in = {id_, to},
                   .id = "mux-" + std::to_string(++sent_),
                   .sender = id_.address,
@@ -314,7 +360,7 @@ class account {
 
   // A message of one's own corrected (XEP-0308): the new text in its place.
   void edit(std::string to, std::string id, std::string text) {
-    this->spawn_guarded([this, to = bare(to), id = std::move(id), text = std::move(text)] {
+    loop_->spawn([this, to = bare(to), id = std::move(id), text = std::move(text)] {
       if (!session_)
         return;
       this->send_to(to, "mux-" + std::to_string(++sent_), text,
@@ -324,7 +370,7 @@ class account {
   }
   // A message of one's own taken back (XEP-0424).
   void remove(std::string to, std::string id) {
-    this->spawn_guarded([this, to = bare(to), id = std::move(id)] {
+    loop_->spawn([this, to = bare(to), id = std::move(id)] {
       if (!session_)
         return;
       this->send_to(to, "mux-" + std::to_string(++sent_), "This message was retracted.",
@@ -350,7 +396,7 @@ class account {
 
   // Unavailable, and the stream closed.
   void stop() {
-    this->spawn_guarded([this] {
+    loop_->spawn([this] {
       stopping_ = true;
       if (session_)
         session_->close();
@@ -359,23 +405,6 @@ class account {
 
  private:
   void say(connection_t state) { sink_(change::connection_changed{id_, std::move(state)}); }
-  // A fiber of this account. What it throws past its own handling -- the
-  // unforeseen, a bug -- is caught here: let out, it left the loop and
-  // stopped every account's network without a word. It is logged
-  // and said; the account shows as failed, to be connected again from what
-  // it kept, so that nothing half done of it is relied on.
-  template <class Body>
-  void spawn_guarded(Body body) {
-    loop_->spawn([this, body = std::move(body)] mutable {
-      try {
-        body();
-      } catch (const std::exception& failed) {
-        log(id_, "stopped by an error: {}", failed.what());
-        this->say(connection::failed{std::format("Stopped by an error: {}", failed.what())});
-      }
-    });
-  }
-
 
   void run() {
     say(connection::connecting{});
@@ -434,15 +463,6 @@ class account {
     // Opened before anything is asked, so that nothing that arrives while
     // the roster is fetched is missed.
     auto inbox = session.open_inbox();
-    // What the server has (its disco#info, XEP-0030), read once, here, into
-    // XMPP's state -- what its extension points decide by.
-    {
-      const std::string own = bare(how_.address);
-      mux::proto::xmpp::state now{.online = true};
-      if (auto info = session.template try_request<tern::query::disco_info>({.to = own.substr(own.find('@') + 1)}))
-        now.archive = std::ranges::contains(info->features, std::string_view("urn:xmpp:mam:2"), &tern::disco::feature::var);
-      sink_(change::protocol_state_changed{id_, protocol_state_t{now}});
-    }
     if (session.try_sync(roster_)) {
       log(id_, "the roster: {} contact{}", roster_.items.size(), roster_.items.size() == 1 ? "" : "s");
       for (const auto& [jid, item] : roster_.items)
@@ -478,7 +498,6 @@ class account {
     wire_ = nullptr;
     if (stopping_ || !wire.failed()) {
       log(id_, "disconnected");
-      sink_(change::protocol_state_changed{id_, protocol_state_t{mux::proto::xmpp::state{}}});
       say(connection::offline{});
     }
   }
@@ -574,8 +593,7 @@ class account {
         if (const auto at = stamp_of(delayed->stamp))
           in.at = *at;
       if (const auto* correction = carried.template get_if<tern::corrections::replace>()) {
-        // Its sender's own message only (XEP-0308): anyone's else.
-        sink_(change::message_edited{in.in, correction->id, in.body, in.sender});
+        sink_(change::message_edited{in.in, correction->id, in.body});
         return;
       }
       if (const auto* taken = carried.template get_if<tern::retractions::retract>()) {
@@ -656,4 +674,4 @@ class account {
   bool stopping_ = false;
 };
 
-}  // namespace mux::proto::xmpp::client
+}  // namespace mux::xmpp

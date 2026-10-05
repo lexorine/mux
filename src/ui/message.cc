@@ -853,12 +853,15 @@ struct message_bubble : nodes::Stack {
     // its links are the URLs in it.
     // Its links in its text, where they stand: an <a>'s label going where
     // its href says, and the addresses in a plain text.
+    // Removed, but its content fetched back by a moderator (MSC2815): the
+    // kept content shown, still marked removed.
+    const mux::body& words = said.redacted && said.unredacted ? *said.unredacted : said.body;
     mentioned shown;
-    if (said.body.html) {
-      auto read = read_html(*said.body.html);
+    if (words.html) {
+      auto read = read_html(*words.html);
       shown = with_mentions(std::move(read.text), std::move(read.spans), in, now, std::move(read.styles));
     } else {
-      shown = with_mentions(said.body.plain, link_spans_in(said.body.plain), in, now);
+      shown = with_mentions(words.plain, link_spans_in(words.plain), in, now);
     }
     rooms_waiting = std::move(shown.waiting);
     rooms_unknown = std::move(shown.unknown);
