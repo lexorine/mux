@@ -12,16 +12,16 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
     # The dependency family, at the commits mux's own CMakeLists.txt pins.
-    chevron = { url = "github:j4niwzis/chevron/3019faec6c81fbd677736811308967672e7b9911"; flake = false; };
-    knot = { url = "github:j4niwzis/knot/035e53fdee8875614e350331a914256495b9bb22"; flake = false; };
-    loom = { url = "github:j4niwzis/loom/823bded41602b99d1f1eee1b2bb8bb847618672f"; flake = false; };
-    splice = { url = "github:j4niwzis/splice/f2c25443061ba5353720eccd0a9438793c2ea053"; flake = false; };
-    tern = { url = "github:j4niwzis/tern/e2fc820634033a2c79aa7f3bf1cfd977036cedaa"; flake = false; };
+    chevron = { url = "github:j4niwzis/chevron/bbc3e0d2a2b67f1cd039c582ef131bafa2d81348"; flake = false; };
+    knot = { url = "github:j4niwzis/knot/fa98812b7a63dde5d81dcd51f3ee0dceb6f98678"; flake = false; };
+    loom = { url = "github:j4niwzis/loom/b893a2c9ed6780484866072d8a375e54ae66b5ad"; flake = false; };
+    splice = { url = "github:j4niwzis/splice/c3dc7bcff228014456b6f4b925da01118cb9e6f1"; flake = false; };
+    tern = { url = "github:j4niwzis/tern/28a2bfad133e61d072d36bf831a231a3adf503a3"; flake = false; };
     boost-pfr = { url = "github:boostorg/pfr/401385c240027423acbb1eb6dea2abe0043db5aa"; flake = false; };
-    skiff = { url = "github:j4niwzis/skiff/4dda84c2f5bde1c1495e2ea4d01b86206cf2c67b"; flake = false; };
-    skiff-widgets = { url = "github:j4niwzis/skiff-widgets/99bf5557a3713aa414cd14ee550c5dbb7bc75cf4"; flake = false; };
-    # alef: same pin upstream CMakeLists.txt carries (unchanged).
-    alef = { url = "github:j4niwzis/alef/6dc139f9590dc0d3ac1cc0e9748e67d7a1485480"; flake = false; };
+    skiff = { url = "github:j4niwzis/skiff/45144706381555614a5e5bc52c44bb90d474d24a"; flake = false; };
+    skiff-widgets = { url = "github:j4niwzis/skiff-widgets/0cdf560945dad34417600d3cfc50136dddcd7431"; flake = false; };
+    # alef: the pin mux's CMakeLists.txt carries.
+    alef = { url = "github:j4niwzis/alef/af2097d1ce5571fd22435540d411a774c199968e"; flake = false; };
 
     # Assets mux #embed s. CMake checks for these before downloading, so
     # pre-creating them keeps configure off the network.
