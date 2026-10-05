@@ -3,54 +3,80 @@
 export module mux.app.network;
 
 import std;
+import mux.vault;
 import splice;
 import mux.core;
 import mux.config;
 import mux.net;
-import mux.xmpp;
-import mux.matrix;
-import mux.host;
+import mux.preview;
+import mux.proto.clients;
+import mux.protocols;
 import mux.ui;
+// The program's sink for what accounts say; and each protocol's account made
+// for it (src/proto/accounts.cc, the protocols' registry).
+export import :sink;
+import :accounts;
 
 export namespace mux::app {
 
-// The window's side of the mailbox: wake it.
-struct wake_window {
-  void operator()() const { mux::host::wake(); }
-};
-using mailbox_type = mux::mailbox<wake_window>;
+// What is asked of an account, where its protocol's account can do it: the
+// call made where it compiles for the account's type -- the ask says what
+// it calls in its return type -- and nothing where it does not. Chosen by
+// overload resolution, the constrained one where it applies: a protocol's
+// account has only what it does, with nothing written for the rest.
+template <class Ask, class Account>
+  requires std::invocable<Ask&, Account&>
+void ask_if_able(Ask ask, Account& account) {
+  ask(account);
+}
+template <class Ask, class Account>
+void ask_if_able(Ask, Account&) {}
 
-// What an account says, put in the mailbox -- while the account is still one
-// the program has. An account taken away keeps running a little while its
-// fibers wind down; nothing it says after that reaches the window.
-struct post_change {
-  mailbox_type* box = nullptr;
-  std::shared_ptr<std::atomic<bool>> live;
-  void operator()(mux::change_t one) const {
-    if (live->load())
-      box->push(std::move(one));
-  }
-};
-
-using xmpp_account = mux::xmpp::account<post_change>;
-using matrix_account = mux::matrix::account<post_change>;
 }  // namespace mux::app
-// The accounts themselves -- their requests, sync, media, and the HTTP and
-// TLS under them -- instantiated in units of their own (accounts_*.cc), in
-// parallel: they were most of this one's four and a half minutes. Outside a
-// release build only: a release build makes them here, where they are used,
-// so that the optimiser sees all of them in one unit.
-#if defined(MUX_SPLIT_ACCOUNTS)
-extern template class mux::xmpp::account<mux::app::post_change>;
-extern template class mux::matrix::account<mux::app::post_change>;
-#endif
 export namespace mux::app {
-using any_account = splice::variant<std::unique_ptr<xmpp_account>, std::unique_ptr<matrix_account>>;
+// Each protocol's account, as its make_account (found by ADL on what it
+// keeps) makes it for the program's sink; and any of them, from the list.
+template <class Kept>
+using account_type_of = typename decltype(make_account(std::declval<const Kept&>(), std::declval<mux::net::loop&>(),
+                                                       std::declval<mux::net::tls&>(), std::declval<mux::vault::vault&>(),
+                                                       std::declval<std::optional<mux::net::proxy>>(),
+                                                       std::declval<post_change>()))::element_type;
+template <class>
+struct account_list;
+template <class... Tags>
+struct account_list<mux::protocol_list<Tags...>> {
+  using type = splice::variant<std::unique_ptr<account_type_of<mux::config::kept_of<Tags>>>...>;
+};
+using any_account = account_list<mux::protocols>::type;
+
+// What an account type does beyond what every account does: whether it has
+// each call -- the account's own members, so that what is offered is what
+// is done.
+template <class Account>
+[[nodiscard]] constexpr mux::proto::account_ops ops_of_type() {
+  return {.react = requires { &Account::react; },
+          .forward = requires { &Account::forward; },
+          .threads = requires { &Account::list_threads; },
+          .view_source = requires { &Account::view_source; },
+          .send_file = requires { &Account::send_file; },
+          .send_sticker = requires { &Account::send_sticker; },
+          .typing = requires { &Account::typing; },
+          .calls = requires { &Account::call; }};
+}
+// Each protocol's, for the window: found once, as the program starts.
+template <class... Tags>
+void tell_protocol_ops(mux::ui::ui_shared& shared, mux::protocol_list<Tags...>) {
+  (shared.protocol_ops.insert_or_assign(mux::protocol_t{Tags{}}, ops_of_type<account_type_of<mux::config::kept_of<Tags>>>()),
+   ...);
+}
 
 struct running_account {
   std::string address;
   any_account account;
   std::shared_ptr<std::atomic<bool>> live;
+  // The proxy it goes through: what is fetched for its chats from elsewhere
+  // -- a link's page, its picture -- goes through it as well.
+  std::optional<mux::net::proxy> via;
 };
 
 // The accounts, on their loop. Everything here runs on the loop's thread;
@@ -59,6 +85,8 @@ struct network {
   mux::net::loop loop;
   mux::net::tls tls = mux::net::client_tls();
   mailbox_type* box = nullptr;
+  // What is kept on disk is read and written through: the program's.
+  mux::vault::vault* vault = nullptr;
   std::vector<running_account> accounts;
   // Accounts taken away, kept until the program ends: their fibers may still
   // be finishing, and they must not be destroyed under them.
@@ -67,8 +95,25 @@ struct network {
 
   // An account started, through the profile of `proxies` it names.
   void start(const mux::config::account_t& saved, const std::vector<mux::config::proxy_settings>& proxies) {
-    const auto* via = mux::config::find_proxy(proxies, mux::config::proxy_of(saved));
-    splice::visit([this, via](const auto& each) { this->start_one(each, proxy_of(via)); }, saved);
+    const auto& named = mux::config::proxy_of(saved);
+    const auto* via = mux::config::find_proxy(proxies, named);
+    // A proxy named and not there: not connected at all -- never straight
+    // to the server instead, which would show it this machine's address.
+    if (named && !via) {
+      const std::string& address = mux::config::address_of(saved);
+      box->push(mux::change_t{mux::change::connection_changed{
+          {mux::ui::protocol_of(address), address},
+          mux::connection::failed{std::format("Not connected: its proxy \"{}\" is gone. Choose a proxy for it, or none.",
+                                              *named)}}});
+      return;
+    }
+    // Made by its protocol, from what it keeps.
+    splice::visit([&](const auto& each) {
+      auto live = std::make_shared<std::atomic<bool>>(true);
+      std::optional<mux::net::proxy> through = proxy_of(via);
+      this->run(std::string(address_of(each)), make_account(each, loop, tls, *vault, through, post_change{box, live}), live,
+                std::move(through));
+    }, saved.own);
   }
   // The proxy a profile names, as mux.net takes it.
   static std::optional<mux::net::proxy> proxy_of(const mux::config::proxy_settings* kept) {
@@ -84,36 +129,19 @@ struct network {
                            .host = kept->host,
                            .port = static_cast<std::uint16_t>(kept->port),
                            .username = kept->username,
-                           .password = kept->password};
+                           .password = kept->password,
+                           .srv = mux::net::srv_lookup_of(kept->srv_resolver)};
   }
 
-  void start_one(const mux::config::xmpp_account& saved, std::optional<mux::net::proxy> via) {
-    auto live = std::make_shared<std::atomic<bool>>(true);
-    mux::xmpp::settings how{.address = saved.address,
-                            .password = saved.password,
-                            .resource = saved.resource,
-                            .host = saved.host,
-                            .plain_without_tls = saved.plain_without_tls,
-                            .proxy = std::move(via)};
-    if (saved.port)
-      how.port = static_cast<std::uint16_t>(*saved.port);
-    this->run(saved.address, std::make_unique<xmpp_account>(loop, tls, std::move(how), post_change{box, live}), live);
-  }
-  void start_one(const mux::config::matrix_account& saved, std::optional<mux::net::proxy> via) {
-    auto live = std::make_shared<std::atomic<bool>>(true);
-    mux::matrix::settings how{.user_id = saved.user_id,
-                              .password = saved.password,
-                              .homeserver = saved.homeserver,
-                              .device_name = saved.device_name,
-                              .proxy = std::move(via),
-                              .access_token = saved.access_token,
-                              .device_id = saved.device_id};
-    this->run(saved.user_id, std::make_unique<matrix_account>(loop, tls, std::move(how), post_change{box, live}),
-              live);
-  }
-  void run(const std::string& address, any_account account, std::shared_ptr<std::atomic<bool>> live) {
-    running_account entry{address, std::move(account), std::move(live)};
+  void run(const std::string& address, any_account account, std::shared_ptr<std::atomic<bool>> live,
+           std::optional<mux::net::proxy> via) {
+    running_account entry{address, std::move(account), std::move(live), std::move(via)};
     splice::visit([](auto& one) { one->start(); }, entry.account);
+    // Started after the endpoint came: given it too.
+    if (push_endpoint)
+      splice::visit([&](auto& one) {
+        ask_if_able([&](auto& a) -> decltype(void(a.set_pusher(push_endpoint))) { a.set_pusher(push_endpoint); }, *one);
+      }, entry.account);
     accounts.push_back(std::move(entry));
   }
 
@@ -167,7 +195,7 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == in.account)
-                account->edit_caption(in.id, id, caption, picture);
+                ask_if_able([&](auto& a) -> decltype(void(a.edit_caption(in.id, id, caption, picture))) { a.edit_caption(in.id, id, caption, picture); }, *account);
             },
             one.account);
     });
@@ -198,15 +226,16 @@ struct network {
   // A file sent into a chat by the account it is of.
   void send_file(const mux::conversation_id& in, std::string local, std::string bytes, std::string name,
                  std::string mimetype, bool image, int width, int height, std::string caption,
-                 std::optional<std::string> reply_to = std::nullopt, std::optional<mux::thread_place> thread = std::nullopt) {
+                 std::optional<std::string> reply_to = std::nullopt, std::optional<mux::thread_place> thread = std::nullopt,
+                 std::optional<mux::video_look> video = std::nullopt) {
     loop.post([this, in, local = std::move(local), bytes = std::move(bytes), name = std::move(name),
                mimetype = std::move(mimetype), image, width, height, caption = std::move(caption),
-               reply_to = std::move(reply_to), thread = std::move(thread)] {
+               reply_to = std::move(reply_to), thread = std::move(thread), video = std::move(video)] {
       for (auto& one : accounts)
         splice::visit(
             [&](auto& account) {
               if (account->id() == in.account)
-                account->send_file(in.id, local, bytes, name, mimetype, image, width, height, caption, reply_to, thread);
+                ask_if_able([&](auto& a) -> decltype(void(a.send_file(in.id, local, bytes, name, mimetype, image, width, height, caption, reply_to, thread, video))) { a.send_file(in.id, local, bytes, name, mimetype, image, width, height, caption, reply_to, thread, video); }, *account);
             },
             one.account);
     });
@@ -218,7 +247,7 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == in.account)
-                account->react(in.id, target, key, on);
+                ask_if_able([&](auto& a) -> decltype(void(a.react(in.id, target, key, on))) { a.react(in.id, target, key, on); }, *account);
             },
             one.account);
     });
@@ -231,25 +260,21 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == in.account)
-                ask(*account);
+                ask_if_able(ask, *account);
             },
             one.account);
     });
   }
   void view_source(const mux::conversation_id& in, std::string event) {
-    on_account_of(in, [room = in.id, event = std::move(event)](auto& account) { account.view_source(room, event); });
+    on_account_of(in, [room = in.id, event = std::move(event)](auto& account) -> decltype(void(account.view_source(room, event))) {
+      account.view_source(room, event);
+    });
   }
   // A removed message's content, fetched back to show to a moderator
-  // (MSC2815).
+  // (MSC2815): the accounts that can ask, asked.
   void view_removed(const mux::conversation_id& in, std::string event) {
-    on_account_of(in, [room = in.id, event = std::move(event)](auto& account) { account.fetch_unredacted(room, event); });
-  }
-  void list_state(const mux::conversation_id& in) {
-    on_account_of(in, [room = in.id](auto& account) { account.list_state(room); });
-  }
-  void send_custom(const mux::conversation_id& in, std::string type, std::optional<std::string> key, std::string json) {
-    on_account_of(in, [room = in.id, type = std::move(type), key = std::move(key), json = std::move(json)](auto& account) {
-      account.send_custom(room, type, key, json);
+    on_account_of(in, [room = in.id, event = std::move(event)](auto& account) -> decltype(void(account.fetch_unredacted(room, event))) {
+      account.fetch_unredacted(room, event);
     });
   }
   // A sticker sent into a chat by the account it is of.
@@ -259,19 +284,46 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == to.account)
-                account->send_sticker(to.id, sticker, reply_to);
+                ask_if_able([&](auto& a) -> decltype(void(a.send_sticker(to.id, sticker, reply_to))) { a.send_sticker(to.id, sticker, reply_to); }, *account);
             },
             one.account);
     });
   }
-  // A link's preview, asked of the account's server.
-  void fetch_preview(const mux::account_id& by, std::string url) {
+  // The proxy of an account: none where it has none, or is gone.
+  [[nodiscard]] std::optional<mux::net::proxy> via_of(const mux::account_id& by) const {
+    const auto found = std::ranges::find(accounts, by.address, &running_account::address);
+    return found == accounts.end() ? std::nullopt : found->via;
+  }
+  // A preview's picture its site's page named: from the site, through the
+  // account's proxy -- asked for only where the chat fetches previews from
+  // sites. Never through fetch_avatar: an https address anything else
+  // carries (a message's, a room's avatar) is not fetched at all.
+  void fetch_preview_picture(const mux::account_id& of, std::string source) {
+    loop.post([this, of, source = std::move(source)] {
+      loop.spawn([this, via = this->via_of(of), source] {
+        if (auto bytes = mux::preview::fetch_picture(loop, tls, via, source))
+          box->push(mux::change_t{mux::change::avatar_loaded{mux::media_use::avatar{source}, source, std::move(*bytes)}});
+      });
+    });
+  }
+  // A link's preview: asked of the account's server, or, where the chat
+  // chose so, of the site itself, through the account's proxy.
+  void fetch_preview(const mux::account_id& by, std::string url, bool direct) {
+    if (direct) {
+      loop.post([this, by, url = std::move(url)] {
+        loop.spawn([this, via = this->via_of(by), url] {
+          if (auto made = mux::preview::fetch_preview(loop, tls, via, url))
+            box->push(mux::change_t{mux::change::preview_loaded{url, std::move(*made)}});
+        });
+      });
+      return;
+    }
     loop.post([this, by, url = std::move(url)] {
       for (auto& one : accounts)
         splice::visit(
             [&](auto& account) {
               if (account->id() == by)
-                account->fetch_preview(url);
+                ask_if_able([&](auto& a) -> decltype(void(a.fetch_preview(url))) { a.fetch_preview(url); }, *account);
             },
             one.account);
     });
@@ -283,7 +335,7 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == by)
-                account->create_direct(user);
+                ask_if_able([&](auto& a) -> decltype(void(a.create_direct(user))) { a.create_direct(user); }, *account);
             },
             one.account);
     });
@@ -294,7 +346,7 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == by)
-                account->create_group(name);
+                ask_if_able([&](auto& a) -> decltype(void(a.create_group(name))) { a.create_group(name); }, *account);
             },
             one.account);
     });
@@ -306,7 +358,7 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == from.account)
-                account->forward(from.id, event, to.id);
+                ask_if_able([&](auto& a) -> decltype(void(a.forward(from.id, event, to.id))) { a.forward(from.id, event, to.id); }, *account);
             },
             one.account);
     });
@@ -318,7 +370,7 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == in.account)
-                account->manage(in.id, action);
+                ask_if_able([&](auto& a) -> decltype(void(a.manage(in.id, action))) { a.manage(in.id, action); }, *account);
             },
             one.account);
     });
@@ -330,7 +382,7 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == in.account)
-                account->fetch_quoted(in.id, target);
+                ask_if_able([&](auto& a) -> decltype(void(a.fetch_quoted(in.id, target))) { a.fetch_quoted(in.id, target); }, *account);
             },
             one.account);
     });
@@ -342,7 +394,7 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == in.account)
-                account->pin(in.id, target, on);
+                ask_if_able([&](auto& a) -> decltype(void(a.pin(in.id, target, on))) { a.pin(in.id, target, on); }, *account);
             },
             one.account);
     });
@@ -354,7 +406,31 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == in.account)
-                account->typing(in.id, on);
+                ask_if_able([&](auto& a) -> decltype(void(a.typing(in.id, on))) { a.typing(in.id, on); }, *account);
+            },
+            one.account);
+    });
+  }
+  // A call's signalling, sent by the account of its chat; and the servers
+  // a call of an account goes through, asked of it (change::call_servers).
+  void call(const mux::conversation_id& in, std::string call_id, mux::change::call_said_t what) {
+    loop.post([this, in, call_id = std::move(call_id), what = std::move(what)] {
+      for (auto& one : accounts)
+        splice::visit(
+            [&](auto& account) {
+              if (account->id() == in.account)
+                ask_if_able([&](auto& a) -> decltype(void(a.call(in.id, call_id, what))) { a.call(in.id, call_id, what); }, *account);
+            },
+            one.account);
+    });
+  }
+  void call_servers(const mux::account_id& of) {
+    loop.post([this, of] {
+      for (auto& one : accounts)
+        splice::visit(
+            [&](auto& account) {
+              if (account->id() == of)
+                ask_if_able([&](auto& a) -> decltype(void(a.call_servers())) { a.call_servers(); }, *account);
             },
             one.account);
     });
@@ -366,7 +442,7 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == by)
-                account->search_directory(server, query);
+                ask_if_able([&](auto& a) -> decltype(void(a.search_directory(server, query))) { a.search_directory(server, query); }, *account);
             },
             one.account);
     });
@@ -378,7 +454,7 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == by)
-                account->follow(room);
+                ask_if_able([&](auto& a) -> decltype(void(a.follow(room))) { a.follow(room); }, *account);
             },
             one.account);
     });
@@ -390,20 +466,21 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == by)
-                account->explore_space(room);
+                ask_if_able([&](auto& a) -> decltype(void(a.explore_space(room))) { a.explore_space(room); }, *account);
             },
             one.account);
     });
   }
   // A room made by the account named, as Element's Create room.
   void create_room(const mux::account_id& by, std::string name, std::string topic, bool open, std::string alias,
-                   bool federate = true) {
-    loop.post([this, by, name = std::move(name), topic = std::move(topic), open, alias = std::move(alias), federate] {
+                   bool federate = true, bool encrypted = false) {
+    loop.post([this, by, name = std::move(name), topic = std::move(topic), open, alias = std::move(alias), federate,
+               encrypted] {
       for (auto& one : accounts)
         splice::visit(
             [&](auto& account) {
               if (account->id() == by)
-                account->create_room(name, topic, open, alias, federate);
+                ask_if_able([&](auto& a) -> decltype(void(a.create_room(name, topic, open, alias, federate, encrypted))) { a.create_room(name, topic, open, alias, federate, encrypted); }, *account);
             },
             one.account);
     });
@@ -415,7 +492,7 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == in.account)
-                account->list_threads(in.id);
+                ask_if_able([&](auto& a) -> decltype(void(a.list_threads(in.id))) { a.list_threads(in.id); }, *account);
             },
             one.account);
     });
@@ -426,7 +503,7 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == in.account)
-                account->load_thread(in.id, root);
+                ask_if_able([&](auto& a) -> decltype(void(a.load_thread(in.id, root))) { a.load_thread(in.id, root); }, *account);
             },
             one.account);
     });
@@ -439,7 +516,7 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == in.account)
-                account->send_in_thread(in.id, body, root, latest, reply_to);
+                ask_if_able([&](auto& a) -> decltype(void(a.send_in_thread(in.id, body, root, latest, reply_to))) { a.send_in_thread(in.id, body, root, latest, reply_to); }, *account);
             },
             one.account);
     });
@@ -451,7 +528,7 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == by)
-                account->list_packs(room);
+                ask_if_able([&](auto& a) -> decltype(void(a.list_packs(room))) { a.list_packs(room); }, *account);
             },
             one.account);
     });
@@ -462,18 +539,18 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == by)
-                account->save_pack(pack);
+                ask_if_able([&](auto& a) -> decltype(void(a.save_pack(pack))) { a.save_pack(pack); }, *account);
             },
             one.account);
     });
   }
-  void delete_pack(const mux::account_id& by, std::string room, std::string state_key) {
-    loop.post([this, by, room = std::move(room), state_key = std::move(state_key)] {
+  void delete_pack(const mux::account_id& by, emote_pack pack) {
+    loop.post([this, by, pack = std::move(pack)] {
       for (auto& one : accounts)
         splice::visit(
             [&](auto& account) {
               if (account->id() == by)
-                account->delete_pack(room, state_key);
+                ask_if_able([&](auto& a) -> decltype(void(a.delete_pack(pack))) { a.delete_pack(pack); }, *account);
             },
             one.account);
     });
@@ -484,19 +561,67 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == by)
-                account->upload_pack_picture(picture, bytes);
+                ask_if_able([&](auto& a) -> decltype(void(a.upload_pack_picture(picture, bytes))) { a.upload_pack_picture(picture, bytes); }, *account);
             },
             one.account);
     });
   }
   // The user directory of the account named, searched.
+  // What the account knows of a person's encryption identity, asked for.
+  void ask_trust(const mux::account_id& by, std::string user) {
+    loop.post([this, by, user = std::move(user)] {
+      for (auto& one : accounts)
+        splice::visit(
+            [&](auto& account) {
+              if (account->id() == by)
+                ask_if_able([&](auto& a) -> decltype(void(a.tell_trust(user))) { a.tell_trust(user); }, *account);
+            },
+            one.account);
+    });
+  }
+  // A person's reset identity accepted ("Withdraw verification").
+  void accept_identity(const mux::account_id& by, std::string user) {
+    loop.post([this, by, user = std::move(user)] {
+      for (auto& one : accounts)
+        splice::visit(
+            [&](auto& account) {
+              if (account->id() == by)
+                ask_if_able([&](auto& a) -> decltype(void(a.accept_identity(user))) { a.accept_identity(user); }, *account);
+            },
+            one.account);
+    });
+  }
+  // Room keys to verified sessions only, or not: told to the account.
+  void set_only_verified(const mux::account_id& by, bool on) {
+    loop.post([this, by, on] {
+      for (auto& one : accounts)
+        splice::visit(
+            [&](auto& account) {
+              if (account->id() == by)
+                ask_if_able([&](auto& a) -> decltype(void(a.set_only_verified(on))) { a.set_only_verified(on); }, *account);
+            },
+            one.account);
+    });
+  }
+  // A person's sessions, each verified or not, asked for.
+  void ask_devices(const mux::account_id& by, std::string user) {
+    loop.post([this, by, user = std::move(user)] {
+      for (auto& one : accounts)
+        splice::visit(
+            [&](auto& account) {
+              if (account->id() == by)
+                ask_if_able([&](auto& a) -> decltype(void(a.tell_devices(user))) { a.tell_devices(user); }, *account);
+            },
+            one.account);
+    });
+  }
   void search_people(const mux::account_id& by, std::string term) {
     loop.post([this, by, term = std::move(term)] {
       for (auto& one : accounts)
         splice::visit(
             [&](auto& account) {
               if (account->id() == by)
-                account->search_people(term);
+                ask_if_able([&](auto& a) -> decltype(void(a.search_people(term))) { a.search_people(term); }, *account);
             },
             one.account);
     });
@@ -508,48 +633,48 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == by)
-                account->preview_room(room, via);
+                ask_if_able([&](auto& a) -> decltype(void(a.preview_room(room, via))) { a.preview_room(room, via); }, *account);
             },
             one.account);
     });
   }
-  // The sessions of the Matrix account named: listed, one renamed, some
-  // signed out.
-  template <class F>
-  void with_matrix(const mux::account_id& by, F f) {
-    loop.post([this, by, f = std::move(f)] {
+  // What is asked of the account named, where its protocol's account can do
+  // it: its keys, its sessions, its identity -- Matrix's today, any
+  // protocol's that has them.
+  template <class Ask>
+  void on_account(const mux::account_id& by, Ask ask) {
+    loop.post([this, by, ask = std::move(ask)] {
       for (auto& one : accounts)
-        splice::visit(splice::overloaded{[&](std::unique_ptr<matrix_account>& account) {
-                                           if (account->id() == by)
-                                             f(*account);
-                                         },
-                                         [](auto&) {}},
-                      one.account);
+        splice::visit(
+            [&](auto& account) {
+              if (account->id() == by)
+                ask_if_able(ask, *account);
+            },
+            one.account);
     });
   }
-  void list_sessions(const mux::account_id& by) {
-    this->with_matrix(by, [](matrix_account& account) { account.list_sessions(); });
+  void verify_start(const mux::account_id& by, std::string user, std::optional<std::string> device) {
+    this->on_account(by, [user = std::move(user), device = std::move(device)](auto& account) -> decltype(void(account.verify_start(user, device))) { account.verify_start(user, device); });
   }
-  void rename_session(const mux::account_id& by, std::string device, std::string name) {
-    this->with_matrix(by, [device = std::move(device), name = std::move(name)](matrix_account& account) {
-      account.rename_session(device, name);
-    });
+  void verify_accept(const mux::account_id& by, std::string txn) {
+    this->on_account(by, [txn = std::move(txn)](auto& account) -> decltype(void(account.verify_accept(txn))) { account.verify_accept(txn); });
   }
-  void sign_out_sessions(const mux::account_id& by, std::vector<std::string> devices, std::string password) {
-    this->with_matrix(by, [devices = std::move(devices), password = std::move(password)](matrix_account& account) {
-      account.sign_out_sessions(devices, password);
-    });
+  void verify_confirm(const mux::account_id& by, std::string txn, bool match) {
+    this->on_account(by, [txn = std::move(txn), match](auto& account) -> decltype(void(account.verify_confirm(txn, match))) { account.verify_confirm(txn, match); });
+  }
+  void verify_cancel(const mux::account_id& by, std::string txn) {
+    this->on_account(by, [txn = std::move(txn)](auto& account) -> decltype(void(account.verify_cancel(txn))) { account.verify_cancel(txn); });
   }
   // A person's profile, asked of the Matrix account named.
   void fetch_profile(const mux::account_id& by, std::string user) {
     loop.post([this, by, user = std::move(user)] {
       for (auto& one : accounts)
-        splice::visit(splice::overloaded{[&](std::unique_ptr<matrix_account>& account) {
-                                           if (account->id() == by)
-                                             account->fetch_profile(user);
-                                         },
-                                         [](auto&) {}},
-                      one.account);
+        splice::visit(
+            [&](auto& account) {
+              if (account->id() == by)
+                ask_if_able([&](auto& a) -> decltype(void(a.fetch_profile(user))) { a.fetch_profile(user); }, *account);
+            },
+            one.account);
     });
   }
   // A room joined by the account named, through the servers named.
@@ -559,7 +684,7 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == by)
-                account->join(room, via);
+                ask_if_able([&](auto& a) -> decltype(void(a.join(room, via))) { a.join(room, via); }, *account);
             },
             one.account);
     });
@@ -571,7 +696,7 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == by)
-                account->knock(room, via, reason);
+                ask_if_able([&](auto& a) -> decltype(void(a.knock(room, via, reason))) { a.knock(room, via, reason); }, *account);
             },
             one.account);
     });
@@ -583,7 +708,7 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == in.account)
-                account->fetch_members(in.id);
+                ask_if_able([&](auto& a) -> decltype(void(a.fetch_members(in.id))) { a.fetch_members(in.id); }, *account);
             },
             one.account);
     });
@@ -596,7 +721,7 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == of)
-                account->fetch_media(source, use, size);
+                ask_if_able([&](auto& a) -> decltype(void(a.fetch_media(source, use, size))) { a.fetch_media(source, use, size); }, *account);
             },
             one.account);
     });
@@ -608,9 +733,30 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == of)
-                account->cancel_media(source);
+                ask_if_able([&](auto& a) -> decltype(void(a.cancel_media(source))) { a.cancel_media(source); }, *account);
             },
             one.account);
+    });
+  }
+  // UnifiedPush's endpoint, for every Matrix account to give its server as
+  // a pusher -- those started later too; none: forgotten.
+  std::optional<std::string> push_endpoint;
+  void set_push_endpoint(std::optional<std::string> url) {
+    loop.post([this, url = std::move(url)] {
+      push_endpoint = url;
+      for (auto& one : accounts)
+        splice::visit([&](auto& account) {
+          ask_if_able([&](auto& a) -> decltype(void(a.set_pusher(url))) { a.set_pusher(url); }, *account);
+        }, one.account);
+    });
+  }
+  // A push come: every account syncs now.
+  void sync_now() {
+    loop.post([this] {
+      for (auto& one : accounts)
+        splice::visit([](auto& account) {
+          ask_if_able([](auto& a) -> decltype(void(a.sync_now())) { a.sync_now(); }, *account);
+        }, one.account);
     });
   }
   // An avatar's picture, fetched by the account it is of, for `key`.
@@ -620,7 +766,7 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == of)
-                account->fetch_avatar(source, key);
+                ask_if_able([&](auto& a) -> decltype(void(a.fetch_avatar(source, key))) { a.fetch_avatar(source, key); }, *account);
             },
             one.account);
     });
@@ -632,7 +778,7 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == in.account)
-                account->load_context(in.id, target);
+                ask_if_able([&](auto& a) -> decltype(void(a.load_context(in.id, target))) { a.load_context(in.id, target); }, *account);
             },
             one.account);
     });
@@ -643,7 +789,7 @@ struct network {
         splice::visit(
             [&](auto& account) {
               if (account->id() == in.account)
-                account->load_newer(in.id, from);
+                ask_if_able([&](auto& a) -> decltype(void(a.load_newer(in.id, from))) { a.load_newer(in.id, from); }, *account);
             },
             one.account);
     });

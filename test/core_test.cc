@@ -170,19 +170,6 @@ TEST(Model, AViewedMessagePutBack) {
   EXPECT_EQ(one->timeline[1].id, "2");
 }
 
-// Who may view removed messages (MSC2815): their level at least the redact
-// level, as the server also asks.
-TEST(Model, MayViewRedacted) {
-  conversation chat;
-  chat.powers = {{"@mod:x.org", 50}, {"@user:x.org", 0}};
-  chat.needs.redact = 50;
-  EXPECT_TRUE(may_view_redacted(chat, "@mod:x.org"));
-  EXPECT_FALSE(may_view_redacted(chat, "@user:x.org"));
-  EXPECT_FALSE(may_view_redacted(chat, "@stranger:x.org"));
-  chat.power_default = 60;
-  EXPECT_TRUE(may_view_redacted(chat, "@stranger:x.org"));
-}
-
 TEST(Model, Acknowledged) {
   model kept;
   kept.apply(change::message_added{said("txn1", "sent from here", true)});

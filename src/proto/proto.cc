@@ -15,6 +15,7 @@
 //   available(state)                             anything at all
 //   offers(state, feature::room_directory{})     what it has, by type
 //   can_pin(state, message id), may_delete(state, chat, outgoing)
+//   may_view_redacted(state, chat, who) -- a removed message viewed back (MSC2815)
 //   may_edit(state, chat, message) -- through the rule edit_rule(state) gives
 //   can_page_back(state)                         older history asked of the server
 //   can_upload(state)                            files sent: the paperclip, a drop, a paste
@@ -233,6 +234,9 @@ inline std::string direct_contact(const auto&, const conversation& one) { return
 constexpr bool can_pin(const auto&, std::string_view) { return false; }
 // One's own messages, and no one else's: what every protocol allows.
 inline bool may_delete(const auto&, const conversation&, bool outgoing) { return outgoing; }
+// Removed messages' content is not shown back: what a protocol without the
+// extension (MSC2815) says.
+constexpr bool may_view_redacted(const auto&, const conversation&, std::string_view) { return false; }
 // Any of one's own messages edited.
 inline own_messages edit_rule(const auto&) { return {}; }
 }  // namespace mux::proto::defaults
@@ -570,6 +574,19 @@ inline constexpr struct may_delete_t {
     }, state);
   }
 } may_delete{};
+
+// Whether a removed message's content may be viewed back by someone
+// (MSC2815): the protocol's own answer, or none at all.
+inline constexpr struct may_view_redacted_t {
+  template <class State>
+  bool operator()(const State& state, const conversation& chat, std::string_view who) const {
+    return splice::visit([&](const auto& now) {
+      using defaults::available;
+      using defaults::may_view_redacted;
+      return available(now) && may_view_redacted(now, chat, who);
+    }, state);
+  }
+} may_view_redacted{};
 
 // Whether a message may be edited: asked of the rule the protocol gives.
 inline constexpr struct may_edit_t {

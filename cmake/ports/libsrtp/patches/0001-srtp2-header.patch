@@ -1,0 +1,29 @@
+Subject: [PATCH] Put srtp.h where <srtp2/srtp.h> looks for it, in the tree
+
+libdatachannel -- the WebRTC library the calls are built on -- includes
+<srtp2/srtp.h>, which is the layout libsrtp's own install rules write. Built
+against libsrtp's source tree, as cmake-everywhere's port does, the header is
+there as include/srtp.h and <srtp2/srtp.h> finds nothing.
+
+A copy is put beside it, so both layouts answer: the store entry that keeps
+this tree then carries srtp2/srtp.h, which is what the port's CHECK_HEADER
+asks of it.
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -301,6 +301,14 @@
+ install(TARGETS srtp2 DESTINATION lib
+   EXPORT libSRTPTargets
+ )
+ 
++# mux: libdatachannel includes <srtp2/srtp.h>, the layout the install rules
++# below write; in the source tree the header is include/srtp.h, and a build
++# against the tree as it is finds nothing. A copy is put where it is looked
++# for, so both layouts answer.
++file(MAKE_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/srtp2)
++file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/include/srtp.h
++  DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/include/srtp2)
++
+ install(FILES include/srtp.h crypto/include/auth.h
+   crypto/include/cipher.h
+   crypto/include/crypto_types.h

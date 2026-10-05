@@ -309,6 +309,9 @@ struct message {
   std::optional<std::string> replies_to;
   bool edited = false;
   bool redacted = false;
+  // Removed, but its content fetched back by a moderator (MSC2815): what
+  // the server still kept of it, shown where the message was.
+  std::optional<mux::body> unredacted;
   // Came end-to-end encrypted, and was read: in an encrypted room, one that
   // did not is marked as such -- a server or anyone in the room can put a
   // plain message there, and it looked the same.

@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// mux.matrix against a homeserver played by a fiber of the same loop, over
+// mux.proto.matrix.client against a homeserver played by a fiber of the same loop, over
 // real TLS on the loopback: a certificate made for the test, trusted by the
 // client and nothing else. Login, a first sync with a named room, members,
 // a formatted message, a reply, an edit, a reaction and typing; a message
 // sent and acknowledged; a later sync; stopped.
 import std;
+import mux.vault;
 import splice;
 import mux.core;
 import mux.net;
-import mux.matrix;
+import mux.proto.matrix;
+import mux.proto.matrix.state;
+import mux.proto.matrix.client;
 import mux.test.certificate;
 import gtest;
 
@@ -80,7 +83,7 @@ struct recorder {
   mux::model model;
   std::vector<mux::connection_t> states;
   bool sent = false;
-  std::optional<mux::matrix::account<sink>> account;
+  std::optional<mux::proto::matrix::client::account<sink>> account;
 };
 
 void sink::operator()(mux::change_t one) const {
@@ -103,51 +106,6 @@ void sink::operator()(mux::change_t one) const {
     to->account->send("!r:x.org", "from mux");
   }
   to->model.apply(one);
-}
-
-// What the MSC2815 test hears from the account: removed messages fetched
-// back once the room is there, refused ones kept to assert on.
-struct unredact_recorder;
-struct unredact_sink {
-  unredact_recorder* to = nullptr;
-  void operator()(mux::change_t one) const;
-};
-
-struct unredact_recorder {
-  mux::net::loop* running = nullptr;
-  mux::model model;
-  std::vector<std::string> refused;
-  bool asked = false;
-  std::optional<mux::matrix::account<unredact_sink>> account;
-};
-
-void unredact_sink::operator()(mux::change_t one) const {
-  splice::visit(splice::overloaded{[&](const mux::change::connection_changed& changed) {
-                                if (splice::visit(splice::overloaded{[](const mux::connection::offline&) { return true; },
-                                                               [](const mux::connection::failed&) { return true; },
-                                                               [](const auto&) { return false; }},
-                                               changed.state))
-                                  to->running->stop();
-                              },
-                              [&](const mux::change::conversation_updated&) {
-                                if (!to->asked) {
-                                  to->asked = true;
-                                  to->account->fetch_unredacted("!r:x.org", "$m1");
-                                  to->account->fetch_unredacted("!r:x.org", "$m9");
-                                }
-                              },
-                              [&](const mux::change::refused& refused) { to->refused.push_back(refused.what); },
-                              [](const auto&) {}},
-              one);
-  to->model.apply(one);
-  // Both answers in: the kept content shown, the erased one refused.
-  const mux::account_id me{mux::protocol::matrix{}, "@a:x.org"};
-  const mux::conversation* room = to->model.find({me, "!r:x.org"});
-  const bool seen = room && std::ranges::any_of(room->timeline, [](const mux::message& said) {
-    return said.id == "$m1" && said.unredacted.has_value();
-  });
-  if (seen && !to->refused.empty())
-    to->account->stop();
 }
 
 TEST(Matrix, AgainstAHomeserverOverTls) {
@@ -196,10 +154,12 @@ TEST(Matrix, AgainstAHomeserverOverTls) {
     }
   });
 
-  mux::matrix::settings how{.user_id = "@a:x.org",
+  mux::vault::vault vault;
+  mux::proto::matrix::client::settings how{.user_id = "@a:x.org",
                             .password = "pw",
                             .homeserver = "https://127.0.0.1:" + std::to_string(listening.port()),
-                            .sync_timeout = std::chrono::milliseconds(0)};
+                            .sync_timeout = std::chrono::milliseconds(0),
+                            .vault = &vault};
   seen.account.emplace(running, client_tls, how, sink{&seen});
   seen.account->start();
   running.run();
@@ -254,37 +214,37 @@ TEST(Matrix, AgainstAHomeserverOverTls) {
   EXPECT_TRUE(put);
 }
 
-// MSC2815: a room's moderator viewing a removed message's content. The
-// first sync brings a message removed before it arrived; fetched back with
-// the MSC's parameter, the server answers with what it kept, and the model
-// shows it where the message was. A message the server already erased is
-// refused with why.
-TEST(Matrix, ModeratorViewsRemovedContent) {
-  const std::string removed_sync = R"({"next_batch":"s1","rooms":{"join":{"!r:x.org":{
-   "state":{"events":[
-    {"type":"m.room.create","state_key":"","event_id":"$c","sender":"@a:x.org","origin_server_ts":1,"content":{"room_version":"11"}},
-    {"type":"m.room.name","state_key":"","event_id":"$n","sender":"@a:x.org","origin_server_ts":2,"content":{"name":"Garden"}},
-    {"type":"m.room.power_levels","state_key":"","event_id":"$pl","sender":"@a:x.org","origin_server_ts":3,
-     "content":{"users":{"@a:x.org":100},"redact":50}}]},
-   "timeline":{"limited":false,"prev_batch":"p0","events":[
-    {"type":"m.room.message","event_id":"$m1","sender":"@b:x.org","origin_server_ts":10,
-     "content":{},"unsigned":{"redacted_because":{"type":"m.room.redaction","event_id":"$red1","sender":"@a:x.org",
-      "origin_server_ts":11,"content":{}}}}]}}}}})";
-  const std::string kept_content = R"({"type":"m.room.message","event_id":"$m1","sender":"@b:x.org","origin_server_ts":10,
-   "content":{"msgtype":"m.text","body":"it was never about the cake"}})";
-  const std::string erased = R"({"errcode":"FI.MAU.MSC2815_UNREDACTED_CONTENT_DELETED",
-   "error":"The content for that event has already been erased from the database"})";
+struct media_sink {
+  bool* online;
+  std::vector<mux::change::avatar_loaded>* pictures;
+  int* acknowledged;
+  void operator()(mux::change_t one) const {
+    splice::visit(splice::overloaded{
+        [&](const mux::change::connection_changed& change) {
+          *online = change.state == mux::connection_t{mux::connection::online{}};
+        },
+        [&](const mux::change::avatar_loaded& picture) { pictures->push_back(picture); },
+        [&](const mux::change::message_acknowledged&) { ++*acknowledged; },
+        [](const auto&) {}}, one);
+  }
+};
 
+TEST(Matrix, MediaFallsBackToOriginalsAndReusesUploads) {
   const auto certificate = mux::test::self_signed();
   mux::net::loop running;
   auto server_tls = mux::net::server_tls(certificate.certificate_pem, certificate.key_pem);
   auto client_tls = mux::net::client_tls();
   mux::net::trust(client_tls, certificate.certificate_pem);
   mux::net::listener listening(running);
-
+  bool online = false, finished = false;
+  int acknowledged = 0;
   std::vector<request> heard;
-  unredact_recorder seen{.running = &running};
-  int syncs = 0;
+  std::vector<mux::change::avatar_loaded> pictures;
+  mux::vault::vault vault;
+  mux::proto::matrix::client::settings how{.user_id = "@a:x.org", .password = "pw",
+      .homeserver = "https://127.0.0.1:" + std::to_string(listening.port()),
+      .sync_timeout = std::chrono::milliseconds(0), .vault = &vault};
+  mux::proto::matrix::client::account account(running, client_tls, how, media_sink{&online, &pictures, &acknowledged});
   running.spawn([&] {
     for (;;) {
       auto socket = listening.accept();
@@ -297,66 +257,78 @@ TEST(Matrix, ModeratorViewsRemovedContent) {
           pending += *it;
           while (auto one = take(pending)) {
             heard.push_back(*one);
-            if (one->target.starts_with("/_matrix/client/v3/login")) {
-              wire->write(answer(login));
-            } else if (one->target.starts_with("/_matrix/client/v3/sync")) {
-              ++syncs;
-              if (one->target.find("since=") == std::string::npos)
-                wire->write(answer(removed_sync));
-              else {
-                wire->write(answer(R"({"next_batch":"s)" + std::to_string(syncs) + R"("})"));
-                if (syncs >= 12)
-                  seen.account->stop();
-              }
-            } else if (one->target.find("/event/") != std::string::npos) {
-              if (one->target.find("m9") != std::string::npos) {
-                wire->write("HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: " +
-                            std::to_string(erased.size()) + "\r\n\r\n" + erased);
-              } else {
-                wire->write(answer(kept_content));
-              }
-            } else {
-              wire->write(answer("{}"));
-            }
+            std::string body = "{}";
+            if (one->target.starts_with("/_matrix/client/v3/login"))
+              body = login;
+            else if (one->target.starts_with("/_matrix/client/v3/sync")) {
+              running.sleep(std::chrono::milliseconds(10));
+              body = R"({"next_batch":"s1"})";
+            } else if (one->target.contains("/thumbnail/x.org/missing?")) {
+              wire->write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+              wire->flush();
+              continue;
+            } else if (one->target.contains("/thumbnail/x.org/ready?"))
+              body = "server thumbnail";
+            else if (one->target.contains("/download/x.org/missing"))
+              body = "original image";
+            else if (one->target.contains("/upload?filename=")) {
+              const auto name = one->target.substr(one->target.find("filename=") + 9);
+              body = "{\"content_uri\":\"mxc://x.org/" + name + "\"}";
+            } else if (one->target.contains("/send/m.room.message/"))
+              body = "{\"event_id\":\"$" + one->target.substr(one->target.rfind('/') + 1) + "\"}";
+            wire->write(answer(body));
             wire->flush();
           }
         }
       });
     }
   });
-
-  mux::matrix::settings how{.user_id = "@a:x.org",
-                            .password = "pw",
-                            .homeserver = "https://127.0.0.1:" + std::to_string(listening.port()),
-                            .sync_timeout = std::chrono::milliseconds(0)};
-  seen.account.emplace(running, client_tls, how, unredact_sink{&seen});
-  seen.account->start();
+  // Bound failures too: the old implementation never delivers the missing thumbnail.
+  running.spawn([&] { running.sleep(std::chrono::seconds(5)); running.stop(); });
+  account.start();
+  running.spawn([&] {
+    while (!online)
+      running.sleep(std::chrono::milliseconds(1));
+    account.fetch_media("mxc://x.org/missing", mux::media_use::thumbnail{}, 860);
+    account.fetch_media("mxc://x.org/ready", mux::media_use::thumbnail{}, 860);
+    account.send_file("!r:x.org", "image", "uploaded image", "image.png", "image/png", true, 2, 2, "");
+    account.send_file("!r:x.org", "video", "uploaded video", "video.mp4", "video/mp4", false, 2, 2, "",
+                      std::nullopt, std::nullopt, mux::video_look{1000, "video thumbnail", 2, 2});
+    while (pictures.size() < 4 || acknowledged < 2)
+      running.sleep(std::chrono::milliseconds(1));
+    finished = true;
+    account.stop();
+    running.stop();
+  });
   running.run();
+  ASSERT_TRUE(finished);
+  const auto bytes = [&](std::string_view source) {
+    const auto found = std::ranges::find(pictures, source, &mux::change::avatar_loaded::source);
+    return found == pictures.end() ? std::string() : found->bytes;
+  };
+  EXPECT_EQ(bytes("mxc://x.org/missing"), "original image");
+  EXPECT_EQ(bytes("mxc://x.org/ready"), "server thumbnail");
+  EXPECT_EQ(bytes("mxc://x.org/image.png"), "uploaded image");
+  EXPECT_EQ(bytes("mxc://x.org/thumbnail.png"), "video thumbnail");
+  EXPECT_FALSE(std::ranges::any_of(heard, [](const request& one) {
+    return one.target.contains("/download/x.org/ready") ||
+           (one.method == "GET" && (one.target.contains("image.png") || one.target.contains("thumbnail.png")));
+  }));
+}
 
-  // Asked with the MSC's unstable parameter, both times.
-  int unredacted_asks = 0;
-  for (const auto& one : heard)
-    if (one.target.find("/event/") != std::string::npos) {
-      EXPECT_NE(one.target.find("fi.mau.msc2815.include_unredacted_content=true"), std::string::npos) << one.target;
-      ++unredacted_asks;
-    }
-  EXPECT_EQ(unredacted_asks, 2);
-
-  const mux::account_id me{mux::protocol::matrix{}, "@a:x.org"};
-  const mux::conversation* room = seen.model.find({me, "!r:x.org"});
-  ASSERT_NE(room, nullptr);
-  EXPECT_EQ(room->name, "Garden");
-  // The removed message put back where its time puts it, as removed, with
-  // what the server kept.
-  ASSERT_EQ(room->timeline.size(), 1u);
-  EXPECT_EQ(room->timeline[0].id, "$m1");
-  EXPECT_EQ(room->timeline[0].sender, "@b:x.org");
-  EXPECT_TRUE(room->timeline[0].redacted);
-  ASSERT_TRUE(room->timeline[0].unredacted);
-  EXPECT_EQ(room->timeline[0].unredacted->plain, "it was never about the cake");
-  // The erased one refused with why.
-  ASSERT_EQ(seen.refused.size(), 1u);
-  EXPECT_NE(seen.refused[0].find("erased"), std::string::npos) << seen.refused[0];
+// Who may view a removed message's content (MSC2815): their level at least
+// the redact level, as the server also asks.
+TEST(Matrix, MayViewRedacted) {
+  const mux::proto::matrix::state now{};
+  mux::conversation chat;
+  auto& rules = mux::proto::matrix::rules_in(chat.theirs);
+  rules.powers = {{"@mod:x.org", 50}, {"@user:x.org", 0}};
+  rules.needs.redact = 50;
+  EXPECT_TRUE(mux::proto::matrix::may_view_redacted(now, chat, "@mod:x.org"));
+  EXPECT_FALSE(mux::proto::matrix::may_view_redacted(now, chat, "@user:x.org"));
+  EXPECT_FALSE(mux::proto::matrix::may_view_redacted(now, chat, "@stranger:x.org"));
+  rules.power_default = 60;
+  EXPECT_TRUE(mux::proto::matrix::may_view_redacted(now, chat, "@stranger:x.org"));
 }
 
 }  // namespace

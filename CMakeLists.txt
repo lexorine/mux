@@ -287,6 +287,11 @@ if(MUX_UI)
   set(mux_calls_sources src/calls/media_none.cc)
   set(mux_calls_libraries)
   if(MUX_CALLS)
+    # 0.24.6's src/configuration.cpp calls std::transform with no <algorithm>
+    # included: force-included for that port's build, the flag going into the
+    # store key too, so the library is built again with it. (libdatachannel's
+    # <srtp2/srtp.h> is libsrtp's own port's, in cmake/ports/.)
+    cme_options(libdatachannel "CMAKE_CXX_FLAGS -include algorithm")
     cme_find_package(LibDataChannel REQUIRED)
     set(mux_calls_sources src/calls/media.cc)
     set(mux_calls_libraries LibDataChannel::LibDataChannel)

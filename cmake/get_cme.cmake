@@ -112,4 +112,17 @@ if(NOT EXISTS "${CME_SOURCE_DIR}/cmake-everywhere.cmake"
   file(WRITE "${cme_stamp}" "${CME_VERSION}\n")
 endif()
 
+# mux's own ports, read before the registry's: what a dependency here needs
+# and its own build has no option for (libsrtp's header layout, for the
+# libdatachannel that includes <srtp2/srtp.h>). Keeping them in the project
+# also keeps them in a store entry's key -- the patch a port carries is part
+# of what the port is, so changing it builds the library again.
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/ports")
+  if(NOT "${CMAKE_CURRENT_LIST_DIR}/ports" IN_LIST CME_OVERLAYS)
+    list(APPEND CME_OVERLAYS "${CMAKE_CURRENT_LIST_DIR}/ports")
+  endif()
+  set(CME_OVERLAYS "${CME_OVERLAYS}" CACHE STRING
+    "cmake-everywhere port overlays" FORCE)
+endif()
+
 include("${CME_SOURCE_DIR}/cmake-everywhere.cmake")

@@ -7,6 +7,8 @@ import skiff.scene;
 import mux.core;
 import mux.config;
 import mux.ui;
+import mux.protocols;
+import mux.ui.proto;
 import gtest;
 
 #include "gtest/gtest-macros.h"
@@ -18,13 +20,15 @@ namespace scene = skiff::scene;
 // The program's side, noting only what is sent.
 struct stub {
   std::vector<std::string> sent;
+  int rooms_joined = 0;
+  int invites_declined = 0;
+  int room_cards_closed = 0;
   void choose(const mux::conversation_id&) {}
   void send(const mux::conversation_id&, std::string) {}
   void back() {}
   void open_accounts() {}
   void open_new_account() {}
-  void add_xmpp() {}
-  void add_matrix() {}
+  void add_account_of(mux::protocol_t) {}
   void select_account(std::string) {}
   void toggle_advanced() {}
   void toggle_plain() {}
@@ -50,10 +54,7 @@ struct stub {
   void menu_copy_link() {}
   void menu_copy_url() {}
   void menu_fave_sticker() {}
-  void sign_out_sessions(std::vector<std::string>, std::string) {}
-  void rename_session(std::string, std::string) {}
-  void refresh_sessions() {}
-  void decline_room_card() {}
+  void decline_room_card() { ++invites_declined; }
   void menu_save() {}
   void menu_react(std::string) {}
   void react(std::string, std::string) {}
@@ -88,7 +89,6 @@ struct stub {
   void open_file(std::string, std::string) {}
   void attach_files() {}
   void typing(bool) {}
-  void flip_account_typing() {}
   void settings_files() {}
   void flip_strip_metadata() {}
   void flip_show_deleted() {}
@@ -98,7 +98,7 @@ struct stub {
   void open_member_info(std::string) {}
   void close_notice() {}
   void close_person_info() {}
-  void close_room_card() {}
+  void close_room_card() { ++room_cards_closed; }
   void jump_to_mark(mux::mark_kind_t) {}
   void list_marks(mux::mark_kind_t) {}
   void go_to_mark(mux::mark_kind_t, std::string) {}
@@ -113,8 +113,9 @@ struct stub {
   void manage_forum() {}
   void explore_space(std::string, std::string = {}) {}
   void join_directory_room(std::string, std::string) {}
-  void create_room(std::string, std::string, bool, std::string, bool = true) {}
+  void create_room(std::string, std::string, bool, std::string, bool = true, bool = false) {}
   void find_people(std::string) {}
+  void search_elsewhere(std::string) {}
   void open_packs() {}
   void toggle_threads() {}
   void open_wallpaper(mux::choice_level_t) {}
@@ -151,13 +152,14 @@ struct stub {
   void open_room_packs() {}
   void close_packs() {}
   void save_pack(mux::emote_pack) {}
-  void delete_pack(std::string, std::string) {}
+  void delete_pack(mux::emote_pack) {}
   void pick_pack_images() {}
   void open_new_room() {}
   void close_new_room() {}
   void copy_text(std::string) {}
   void settings_notifications() {}
   void flip_notify(mux::config::notify_flag_t) {}
+  void flip_unified_push() {}
   void set_notify_backend(mux::config::notify_backend_t) {}
   void flip_account_notify() {}
   void flip_account_notify_sound() {}
@@ -166,11 +168,22 @@ struct stub {
   void set_room_events(mux::choice_level_t, std::optional<bool>, std::optional<mux::config::room_event_kinds>) {}
   void set_receipts_shown(mux::choice_level_t, std::optional<bool>) {}
   void set_link_previews(mux::choice_level_t, std::optional<bool>) {}
+  void set_typing_sent(mux::choice_level_t, std::optional<bool>) {}
+  void set_previews_direct(mux::choice_level_t, std::optional<bool>) {}
+  void give_passphrase(mux::proto::passphrase_for_t, std::string, std::string, std::string, std::string) {}
+  void verify_person(mux::conversation_id) {}
+  void verify_accept_now() {}
+  void verify_cancel_now() {}
+  void verify_match() {}
+  void verify_mismatch() {}
+  void close_verification() {}
+  void flip_local_encryption() {}
+  void change_passphrase() {}
   void set_jump_search(mux::choice_level_t, std::optional<std::int64_t>) {}
   void press_loader(std::string) {}
   void stop_jump() {}
   void open_video(std::string, std::string, std::string, std::string, std::string) {}
-  void join_room_card() {}
+  void join_room_card() { ++rooms_joined; }
   void toggle_emoji() {}
   void close_emoji() {}
   void insert_emoji(std::string, std::string = {}) {}
@@ -187,10 +200,7 @@ struct stub {
   void menu_forward() {}
   void menu_view_source() {}
   void menu_view_removed() {}
-  void explore_state() {}
-  void open_send_custom() {}
-  void close_devtools() {}
-  void send_custom(std::string, std::optional<std::string>, std::string) {}
+  void close_dialog() {}
   void open_new_chat() {}
   void close_new_chat() {}
   void start_direct(std::string) {}
@@ -207,8 +217,13 @@ struct stub {
   void toggle_mute() {}
   void close_account_pages() {}
   void accounts_back() {}
-  void account_page(int) {}
+  void account_page(mux::ui::account_page_t) {}
+  // A protocol's own request, as its UI asks it.
+  template <class Request>
+  void ask_for(Request) {}
   void flip_account_receipts() {}
+  void flip_only_verified() {}
+  void accept_identity(mux::conversation_id) {}
   void proxy_kind(mux::config::proxy_kind_t) {}
   void choose_account_proxy(int) {}
   void manage_proxies() {}
@@ -232,13 +247,36 @@ struct stub {
   void set_renderer(mux::config::renderer_t) {}
   void set_accent(mux::config::accent_t) {}
   void leave_chat() {}
+  void close_chat() {}
+  void toggle_mute_of(mux::conversation_id) {}
+  void set_interface_scale(int) {}
+};
+
+// What each test's window reads and paints with: kept until it is gone.
+struct ui_state {
+  mux::ui::palette colours;
+  mux::ui::emoji_kept emoji;
+  mux::ui::looks_shown looks;
+  mux::ui::ui_shared shared;
+  mux::ui::mux_paint paint;
+
+  ui_state() {
+    paint.looks = &looks;
+    paint.colours = &colours;
+  }
+
+  mux::ui::ui_needs<stub> needs(stub& program) {
+    return {.actions = &program, .colours = &colours, .emoji = &emoji,
+            .looks = &looks, .paint = &paint, .shared = &shared};
+  }
 };
 
 TEST(Composer, TakesWhatIsTypedIntoIt) {
   skia::SkFont font;
   skiff::paint::defaultFont() = &font;
   stub program;
-  scene::Scene<mux::ui::window<stub>> window{std::in_place, &program};
+  ui_state ui;
+  scene::Scene<mux::ui::window<stub>> window{std::in_place, ui.needs(program)};
 
   const mux::account_id alice{mux::protocol::xmpp{}, "alice@example.com"};
   const mux::conversation_id with_bob{alice, "bob@example.com"};
@@ -277,7 +315,8 @@ TEST(Drawer, SlidesOutAfterALongWhileOut) {
   skiff::paint::defaultFont() = &font;
   skiff::paint::motionLevel() = skiff::paint::motion::full{};
   stub program;
-  scene::Scene<mux::ui::window<stub>> window{std::in_place, &program};
+  ui_state ui;
+  scene::Scene<mux::ui::window<stub>> window{std::in_place, ui.needs(program)};
   mux::model model;
   window.root().main().show(model);
   const skia::SkRect viewport = skia::SkRect::MakeWH(1000.0f, 700.0f);
@@ -313,6 +352,112 @@ TEST(Drawer, SlidesOutAfterALongWhileOut) {
   skiff::paint::defaultFont() = nullptr;
 }
 
+TEST(RoomInfo, LongDescriptionsScrollWithoutHidingTheActions) {
+  auto manager = skia::SkFontMgr_New_Custom_Directory("/usr/share/fonts");
+  skia::Sp<skia::SkTypeface> face;
+  for (const char* family : {"DejaVu Sans", "Noto Sans", "Liberation Sans"})
+    if (manager && !face)
+      face = manager->matchFamilyStyle(family, skia::SkFontStyle());
+  ASSERT_TRUE(face);
+  skiff::paint::fonts().setPrimary(face);
+  skia::SkFont font(face);
+  skiff::paint::defaultFont() = &font;
+  struct clear_font {
+    ~clear_font() { skiff::paint::defaultFont() = nullptr; }
+  } clear;
+  stub program;
+  ui_state ui;
+  scene::Scene<mux::ui::window<stub>> window{std::in_place, ui.needs(program)};
+  scene::InputRouter router;
+  const std::array layers{scene::InputRouter::Layer{window.handle(), false}};
+  router.setLayers(layers);
+  auto viewport = skia::SkRect::MakeWH(1000.0f, 720.0f);
+  double now = 1000.0;
+  const auto frame = [&] {
+    window.update(now += 16.0);
+    window.layoutIfNeeded(viewport);
+  };
+  const auto click = [&](const auto& node) {
+    const auto box = node.bounds();
+    router.pointer(scene::PointerEvent{scene::pointer::down{box.centerX(), box.centerY()}});
+    router.pointer(scene::PointerEvent{scene::pointer::up{box.centerX(), box.centerY()}});
+  };
+  mux::room_preview preview{.id = "!room:example.com", .name = "A room with a long description"};
+  for (int i = 0; i < 100; ++i)
+    preview.topic += "A long paragraph about this room, with words that wrap on a narrow screen.\n\n";
+
+  for (const bool invite : {false, true}) {
+    preview.invite = invite;
+    window.root().open_room_card(preview.id, preview);
+    auto* card = window.root().layer().room.shown();
+    ASSERT_NE(card, nullptr);
+    auto& scroll = card->parts.scroll;
+    auto& details = std::get<0>(scroll.fChildren);
+    // Resize the same open card through desktop, portrait and landscape.
+    for (const auto size : {skia::SkRect::MakeWH(1000.0f, 720.0f), skia::SkRect::MakeWH(360.0f, 640.0f),
+                            skia::SkRect::MakeWH(640.0f, 360.0f)}) {
+      viewport = size;
+      for (int i = 0; i < 30; ++i)
+        frame();
+      EXPECT_TRUE(viewport.contains(card->bounds()));
+      EXPECT_GT(scroll.bounds().height(), 0.0f);
+      EXPECT_GT(scroll.extent(), scroll.bounds().height());
+      EXPECT_GE(scroll.bounds().fTop, card->parts.top.bounds().fBottom);
+      EXPECT_LE(scroll.bounds().fBottom, card->parts.join.bounds().fTop);
+      EXPECT_TRUE(card->bounds().contains(card->parts.join.bounds()));
+      if (invite) {
+        ASSERT_TRUE(card->parts.decline);
+        EXPECT_TRUE(card->bounds().contains(card->parts.decline->bounds()));
+      }
+
+      scroll.setCurrent(0.0f);
+      frame();
+      const auto top = card->parts.top.bounds();
+      const auto join = card->parts.join.bounds();
+      const auto view = scroll.bounds();
+      // Start over the selectable description, even in a short window.
+      scroll.setCurrent(details.parts.about.bounds().fTop - view.fTop);
+      frame();
+      const float before = scroll.current();
+      router.pointer(scene::PointerEvent{scene::pointer::scroll{view.centerX(), view.fTop + 8.0f, 0.0f, -1.0f}});
+      for (int i = 0; i < 120; ++i)
+        frame();
+      EXPECT_GT(scroll.current(), before) << "the wheel over the description did not scroll";
+      EXPECT_EQ(card->parts.top.bounds(), top);
+      EXPECT_EQ(card->parts.join.bounds(), join);
+
+      scroll.scrollToEnd(false);
+      frame();
+      EXPECT_NEAR(scroll.current(), scroll.extent(), 1.0f);
+      EXPECT_LE(details.parts.id.bounds().fBottom - scroll.current(), view.fBottom + 1.0f);
+      EXPECT_GE(details.parts.id.bounds().fTop - scroll.current(), view.fTop - 1.0f);
+      const int joined = program.rooms_joined;
+      click(card->parts.join);
+      EXPECT_EQ(program.rooms_joined, joined + 1);
+      if (invite) {
+        const int declined = program.invites_declined;
+        click(*card->parts.decline);
+        EXPECT_EQ(program.invites_declined, declined + 1);
+      }
+    }
+    const int closed = program.room_cards_closed;
+    click(card->parts.top.parts.close);
+    EXPECT_EQ(program.room_cards_closed, closed + 1);
+  }
+
+  // A new, short preview must not inherit the old offset or a tall viewport.
+  viewport = skia::SkRect::MakeWH(1000.0f, 720.0f);
+  preview.topic = "A brief description.";
+  preview.invite = false;
+  window.root().open_room_card(preview.id, preview);
+  frame();
+  auto* card = window.root().layer().room.shown();
+  ASSERT_NE(card, nullptr);
+  EXPECT_LT(card->bounds().height(), 500.0f);
+  EXPECT_FLOAT_EQ(card->parts.scroll.extent(), 0.0f);
+  EXPECT_FLOAT_EQ(card->parts.scroll.current(), 0.0f);
+}
+
 // A long chat scrolled with the wheel, a frame at a time: how long update,
 // layout and drawing take, printed, and the whole held to a frame of a
 // 60 Hz screen. Then a message arriving at the bottom, the same way.
@@ -327,7 +472,8 @@ TEST(Timeline, ScrollsALongChatAtSixtyFrames) {
   skia::SkFont font(face);
   skiff::paint::defaultFont() = &font;
   stub program;
-  scene::Scene<mux::ui::window<stub>> window{std::in_place, &program};
+  ui_state ui;
+  scene::Scene<mux::ui::window<stub>> window{std::in_place, ui.needs(program)};
 
   const mux::account_id alice{mux::protocol::matrix{}, "@alice:example.com"};
   const mux::conversation_id room{alice, "!room:example.com"};
@@ -373,7 +519,7 @@ TEST(Timeline, ScrollsALongChatAtSixtyFrames) {
     const auto b = clock::now();
     window.layoutIfNeeded(viewport);
     const auto c = clock::now();
-    window.draw(surface->getCanvas());
+    window.draw(ui.paint, surface->getCanvas());
     (void)window.finishFrame();
     const auto d = clock::now();
     updating += ms(b - a);
@@ -440,7 +586,7 @@ TEST(Timeline, ScrollsALongChatAtSixtyFrames) {
   // The same message where it was: what is read does not move, whatever
   // the list does above it -- the oldest bubble made goes as the newest
   // comes, and the offset follows what is shown.
-  const auto again = std::ranges::find(bubbles, reading_id, &mux::ui::message_bubble::message_id);
+  const auto again = std::ranges::find(bubbles, reading_id, &mux::ui::message_bubble<stub>::message_id);
   ASSERT_NE(again, bubbles.end());
   EXPECT_NEAR(again->bounds().fTop, reading, 1.0f) << "what was read moved when a message came below it";
   skiff::paint::defaultFont() = nullptr;
@@ -460,7 +606,8 @@ TEST(Timeline, AShortReplyToALongMessageIsNarrow) {
   skia::SkFont font(face);
   skiff::paint::defaultFont() = &font;
   stub program;
-  scene::Scene<mux::ui::window<stub>> window{std::in_place, &program};
+  ui_state ui;
+  scene::Scene<mux::ui::window<stub>> window{std::in_place, ui.needs(program)};
   const mux::account_id alice{mux::protocol::matrix{}, "@alice:example.com"};
   const mux::conversation_id room{alice, "!room:example.com"};
   mux::model model;
@@ -498,7 +645,7 @@ TEST(Timeline, AShortReplyToALongMessageIsNarrow) {
   const skia::SkRect text = body.parts.text.bounds();
   EXPECT_LT(bubble.width(), 360.0f) << "the bubble: " << bubble.width() << " wide, the quote " << quote.width()
                                     << ", the text " << text.width();
-  EXPECT_NEAR(quote.width(), bubble.width() - 2.0f * mux::ui::message_bubble::kPadX, 1.0f) << "the quote spans it";
+  EXPECT_NEAR(quote.width(), bubble.width() - 2.0f * mux::ui::message_bubble<stub>::kPadX, 1.0f) << "the quote spans it";
   EXPECT_LT(text.height(), 24.0f) << "the answer is one line: " << text.height() << " high";
   EXPECT_TRUE(body.parts.inline_time.visible()) << "the time beside the answer";
   skiff::paint::defaultFont() = nullptr;
@@ -510,7 +657,8 @@ TEST(Emoji, ThePanelHasRowsAndScrolls) {
   skia::SkFont font;
   skiff::paint::defaultFont() = &font;
   stub program;
-  scene::Scene<mux::ui::window<stub>> window{std::in_place, &program};
+  ui_state ui;
+  scene::Scene<mux::ui::window<stub>> window{std::in_place, ui.needs(program)};
   window.root().open_emoji(700.0f, 650.0f);
   const skia::SkRect viewport = skia::SkRect::MakeWH(1100.0f, 720.0f);
   for (int i = 0; i < 4; ++i) {
@@ -533,7 +681,7 @@ TEST(Emoji, ThePanelHasRowsAndScrolls) {
   skiff::paint::defaultFont() = nullptr;
 }
 
-// A one-letter message in a group, as in the screenshot of #5378: its bubble
+// A one-letter message in a group, as in a screenshot: its bubble
 // as wide as its name and its letter ask, not its widest; each part's width
 // said where it is not.
 TEST(Timeline, AOneLetterMessageIsNarrow) {
@@ -547,7 +695,8 @@ TEST(Timeline, AOneLetterMessageIsNarrow) {
   skia::SkFont font(face);
   skiff::paint::defaultFont() = &font;
   stub program;
-  scene::Scene<mux::ui::window<stub>> window{std::in_place, &program};
+  ui_state ui;
+  scene::Scene<mux::ui::window<stub>> window{std::in_place, ui.needs(program)};
   const mux::account_id alice{mux::protocol::matrix{}, "@alice:example.com"};
   const mux::conversation_id room{alice, "!room:example.com"};
   mux::model model;
@@ -586,7 +735,8 @@ TEST(Timeline, APicturePressedIsOpened) {
   skia::SkFont font;
   skiff::paint::defaultFont() = &font;
   stub program;
-  scene::Scene<mux::ui::window<stub>> window{std::in_place, &program};
+  ui_state ui;
+  scene::Scene<mux::ui::window<stub>> window{std::in_place, ui.needs(program)};
   const mux::account_id alice{mux::protocol::matrix{}, "@alice:example.com"};
   const mux::conversation_id room{alice, "!room:example.com"};
   mux::model model;
@@ -621,6 +771,128 @@ TEST(Timeline, APicturePressedIsOpened) {
   router.pointer(scene::PointerEvent{scene::pointer::up{picture.centerX(), picture.centerY(), 1}});
   ASSERT_EQ(program.pictures_opened.size(), 1u) << "the press never reached the picture's handler";
   EXPECT_EQ(program.pictures_opened.front(), "mxc://example.com/abc");
+  skiff::paint::defaultFont() = nullptr;
+}
+
+TEST(Timeline, MovingTheMadeRangeRequestsItsMedia) {
+  stub program;
+  ui_state ui;
+  scene::Scene<mux::ui::window<stub>> window{std::in_place, ui.needs(program)};
+  auto& screen = window.root().main();
+  std::vector<mux::message> messages(3);
+  messages[0].id = "$first";
+  messages[1].id = "$middle";
+  messages[2].id = "$last";
+  screen.set_made(messages, 1, 3);
+  EXPECT_TRUE(std::exchange(ui.shared.pictures_due, false));
+  screen.set_made(messages, 1, 3);
+  EXPECT_FALSE(ui.shared.pictures_due);
+  screen.set_made(messages, 0, 2);
+  EXPECT_TRUE(ui.shared.pictures_due);
+}
+
+TEST(Media, AThumbnailArrivalStopsTheLoader) {
+  ui_state ui;
+  const std::string source = "local:ui-test-picture";
+  mux::ui::picture_view picture(ui.colours, source, 2, 2);
+  picture.update(0.0);
+  EXPECT_TRUE(picture.parts.loader.visible());
+  const std::array<std::uint8_t, 16> pixels{};
+  mux::ui::thumbnails().put(source, skia::imageFromRGBA(2, 2, pixels.data()));
+  picture.update(16.0);
+  EXPECT_FALSE(picture.parts.loader.visible());
+  EXPECT_NE(picture.parts.picture.image(), nullptr);
+  mux::ui::thumbnails().clear();
+}
+
+TEST(Media, AVideoWithoutAThumbnailDoesNotWaitForAnImage) {
+  ui_state ui;
+  mux::ui::picture_view picture(ui.colours, "mxc://example.com/video-without-thumbnail", 320, 240);
+  picture.show_video(5000, false);
+  picture.update(16.0);
+  ASSERT_TRUE(picture.parts.video);
+  EXPECT_FALSE(picture.parts.loader.visible());
+  EXPECT_FALSE(picture.wantsTick());
+}
+
+TEST(Settings, AppearanceUsesTheRefreshedChoiceOnTheNextFrame) {
+  skia::SkFont font;
+  skiff::paint::defaultFont() = &font;
+  stub program;
+  ui_state ui;
+  scene::Scene<mux::ui::settings_dialog<stub>> dialog{std::in_place, ui.needs(program), "none"};
+  auto& settings = dialog.root();
+  const mux::config::theme_t theme{};
+  const mux::config::accent_t accent{};
+  const auto frame = [&](double now) {
+    dialog.update(now);
+    dialog.layoutIfNeeded(skia::SkRect::MakeWH(440.0f, 520.0f));
+    (void)dialog.finishFrame();
+  };
+  settings.show_appearance(theme, accent);
+  frame(1000.0);
+  frame(1300.0);
+  settings.keep_offset(100.0f);
+  frame(1316.0);
+  const float offset = settings.offset();
+  ASSERT_GT(offset, 0.0f);
+
+  // Requests reach the dialog before app::refresh publishes looks_shown.
+  settings.show_appearance(theme, accent);
+  ui.looks.everywhere.bubbles = mux::config::bubble_look{mux::config::bubbles::translucent{}, 65};
+  ui.looks.bubbles_everywhere = *ui.looks.everywhere.bubbles;
+  frame(1332.0);
+  ASSERT_NE(settings.appearance(), nullptr);
+  auto& bubbles = settings.appearance()->parts.looks.parts.bubbles;
+  EXPECT_EQ(bubbles.parts.kinds.parts.head.parts.value.text(), "Translucent");
+  EXPECT_EQ(bubbles.parts.opacity_label.text(), "Opacity: 65%");
+  EXPECT_NEAR(bubbles.parts.opacity.fraction(), 55.0f / 90.0f, 0.001f);
+  EXPECT_NEAR(settings.offset(), offset, 1.0f);
+
+  settings.show_appearance(theme, accent);
+  ui.looks.everywhere.bubbles = mux::config::bubble_look{mux::config::bubbles::frosted{}, 80};
+  ui.looks.bubbles_everywhere = *ui.looks.everywhere.bubbles;
+  frame(1348.0);
+  EXPECT_EQ(settings.appearance()->parts.looks.parts.bubbles.parts.kinds.parts.head.parts.value.text(), "Frosted");
+
+  // A queued refresh must not reopen a page the user just left.
+  settings.show_appearance(theme, accent);
+  settings.show_home();
+  frame(1364.0);
+  EXPECT_EQ(settings.appearance(), nullptr);
+  skiff::paint::defaultFont() = nullptr;
+}
+
+TEST(Settings, OpeningAndChangingPagesStartsAtTheTop) {
+  skia::SkFont font;
+  skiff::paint::defaultFont() = &font;
+  for (const auto viewport : {skia::SkRect::MakeWH(1100.0f, 720.0f), skia::SkRect::MakeWH(390.0f, 360.0f)}) {
+    stub program;
+    ui_state ui;
+    scene::Scene<mux::ui::window<stub>> window{std::in_place, ui.needs(program)};
+    window.root().open_settings("none");
+    auto* settings = window.root().settings_up();
+    ASSERT_NE(settings, nullptr);
+    double now = 1000.0;
+    const auto settle = [&] {
+      for (int i = 0; i < 25; ++i) {
+        window.update(now += 16.0);
+        window.layoutIfNeeded(viewport);
+        (void)window.finishFrame();
+      }
+    };
+    settle();
+    EXPECT_FLOAT_EQ(settings->offset(), 0.0f);
+    settings->show_appearance({}, {});
+    settle();
+    EXPECT_FLOAT_EQ(settings->offset(), 0.0f);
+    settings->keep_offset(150.0f);
+    settle();
+    EXPECT_GT(settings->offset(), 0.0f);
+    settings->show_home();
+    settle();
+    EXPECT_FLOAT_EQ(settings->offset(), 0.0f);
+  }
   skiff::paint::defaultFont() = nullptr;
 }
 

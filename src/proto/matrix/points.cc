@@ -200,4 +200,11 @@ inline bool may_delete(const state&, const conversation& chat, bool outgoing) {
   return level >= send && (outgoing || level >= rules_of(chat).needs.redact);
 }
 
+// Whether a removed message's content may be viewed back (MSC2815): one's
+// level at least the redact level, as the server also asks.
+inline bool may_view_redacted(const state&, const conversation& chat, std::string_view who) {
+  const room_rules& rules = rules_of(chat);
+  return level_of(rules, who) >= rules.needs.of(power_need::redact{});
+}
+
 }  // namespace mux::proto::matrix

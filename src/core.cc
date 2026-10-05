@@ -10,853 +10,17 @@ export module mux.core;
 
 import std;
 import splice;
+// The protocols, as tags in their own namespaces, and protocol_t: one list;
+// and each one's account state, protocol_state_t.
+export import mux.proto.tags;
+export import mux.proto.state;
+// What the model is made of; the changes and the model are here -- each
+// protocol's own changes too (mux.proto.changes).
+export import mux.core.ids;
+export import mux.proto.changes;
+export import mux.calls.types;
 
 export namespace mux {
-
-// Which protocol an account speaks. A closed set: what differs between them
-// is in the account types, dispatched with std::visit, not behind a base
-// class.
-namespace protocol {
-struct xmpp {
-  static constexpr bool is_matrix = false;
-  friend auto operator<=>(const xmpp&, const xmpp&) = default;
-};
-struct matrix {
-  static constexpr bool is_matrix = true;
-  friend auto operator<=>(const matrix&, const matrix&) = default;
-};
-}  // namespace protocol
-using protocol_t = splice::variant<protocol::xmpp, protocol::matrix>;
-[[nodiscard]] inline bool is_matrix(const protocol_t& speaks) {
-  return splice::visit([](auto one) { return one.is_matrix; }, speaks);
-}
-
-// An account, as the user names it: user@example.com, or @user:example.org.
-struct account_id {
-  protocol_t speaks = protocol::xmpp{};
-  std::string address;
-  friend bool operator==(const account_id&, const account_id&) = default;
-  friend auto operator<=>(const account_id&, const account_id&) = default;
-};
-
-// A conversation within an account: an XMPP contact's bare JID or a MUC's,
-// or a Matrix room's id.
-struct conversation_id {
-  account_id account;
-  std::string id;
-  friend bool operator==(const conversation_id&, const conversation_id&) = default;
-  friend auto operator<=>(const conversation_id&, const conversation_id&) = default;
-};
-
-namespace conversation_kind {
-struct direct {
-  static constexpr bool one_to_one = true;
-  friend bool operator==(const direct&, const direct&) = default;
-};
-struct group {
-  static constexpr bool one_to_one = false;
-  friend bool operator==(const group&, const group&) = default;
-};
-}  // namespace conversation_kind
-using conversation_kind_t = splice::variant<conversation_kind::direct, conversation_kind::group>;
-[[nodiscard]] inline bool one_to_one(const conversation_kind_t& kind) {
-  return splice::visit([](auto one) { return one.one_to_one; }, kind);
-}
-
-// Where an account is with its server. A failure says why; a connection
-// being made again may say why too.
-namespace connection {
-struct offline {
-  friend bool operator==(const offline&, const offline&) = default;
-};
-struct connecting {
-  std::optional<std::string> reason;
-  friend bool operator==(const connecting&, const connecting&) = default;
-};
-struct online {
-  friend bool operator==(const online&, const online&) = default;
-};
-struct failed {
-  std::string error;
-  friend bool operator==(const failed&, const failed&) = default;
-};
-}  // namespace connection
-using connection_t = splice::variant<connection::offline, connection::connecting, connection::online, connection::failed>;
-
-[[nodiscard]] inline bool is_online(const connection_t& state) {
-  return splice::visit(splice::overloaded{[](const connection::online&) { return true; }, [](const auto&) { return false; }},
-                    state);
-}
-
-namespace availability {
-struct offline {
-  friend bool operator==(const offline&, const offline&) = default;
-};
-struct online {
-  friend bool operator==(const online&, const online&) = default;
-};
-struct away {
-  friend bool operator==(const away&, const away&) = default;
-};
-struct extended_away {
-  friend bool operator==(const extended_away&, const extended_away&) = default;
-};
-struct do_not_disturb {
-  friend bool operator==(const do_not_disturb&, const do_not_disturb&) = default;
-};
-struct chat {
-  friend bool operator==(const chat&, const chat&) = default;
-};
-}  // namespace availability
-using availability_t = splice::variant<availability::offline, availability::online, availability::away,
-                                    availability::extended_away, availability::do_not_disturb, availability::chat>;
-
-struct presence {
-  availability_t state = availability::offline{};
-  std::optional<std::string> status;
-  friend bool operator==(const presence&, const presence&) = default;
-};
-
-// What a message says, as plain text and, where it has one, as the
-// protocol's formatted body (XHTML-IM's or Matrix's org.matrix.custom.html).
-struct body {
-  std::string plain;
-  std::optional<std::string> html;
-  friend bool operator==(const body&, const body&) = default;
-};
-
-namespace delivery {
-struct sending {
-  friend bool operator==(const sending&, const sending&) = default;
-};
-struct sent {
-  friend bool operator==(const sent&, const sent&) = default;
-};
-struct delivered {
-  friend bool operator==(const delivered&, const delivered&) = default;
-};
-struct read {
-  friend bool operator==(const read&, const read&) = default;
-};
-struct failed {
-  friend bool operator==(const failed&, const failed&) = default;
-};
-}  // namespace delivery
-using delivery_t = splice::variant<delivery::sending, delivery::sent, delivery::delivered, delivery::read, delivery::failed>;
-
-// What a message carries besides its text: a picture, shown in it, or a
-// file, offered to be saved -- by where its protocol keeps it (an mxc://).
-namespace attachment_kind {
-struct image {
-  static constexpr bool picture = true;
-  // A GIF or a WebP: frames that move, played where it is shown.
-  bool moves = false;
-  friend bool operator==(image, image) = default;
-};
-struct file {
-  static constexpr bool picture = false;
-  friend bool operator==(file, file) = default;
-};
-}  // namespace attachment_kind
-using attachment_kind_t = splice::variant<attachment_kind::image, attachment_kind::file>;
-[[nodiscard]] inline bool is_picture(const attachment_kind_t& kind) {
-  return splice::visit([](auto one) { return one.picture; }, kind);
-}
-// Whether it is a picture that moves.
-[[nodiscard]] inline bool moves(const attachment_kind_t& kind) {
-  return splice::visit(splice::overloaded{[](attachment_kind::image one) { return one.moves; },
-                               [](attachment_kind::file) { return false; }},
-                    kind);
-}
-// Whether a picture of this type may move: GIF and WebP -- read where a
-// picture comes in, from what its sender says it is.
-// Sound: a voice message or an audio file, by its type, as the protocol
-// said it; an Ogg file by its name where no type was said.
-[[nodiscard]] inline bool audio_type(std::string_view mimetype, std::string_view name) {
-  return mimetype.starts_with("audio/") || name.ends_with(".ogg") || name.ends_with(".opus") || name.ends_with(".oga");
-}
-[[nodiscard]] inline bool moving_type(std::string_view mimetype) {
-  return mimetype == "image/gif" || mimetype == "image/webp";
-}
-struct attachment {
-  attachment_kind_t kind = attachment_kind::file{};
-  std::string source;      // where it is kept: an mxc:// URI
-  std::string name;        // its file's name
-  std::string mimetype;
-  std::int64_t size = 0;   // in bytes, where said
-  int width = 0, height = 0;  // a picture's, where said
-  // A picture's blurhash, where its sender gave one: what is shown until
-  // the picture comes.
-  std::optional<std::string> blurhash;
-  // A video's file, where it is one -- the source above is then its
-  // thumbnail, shown as a picture is -- and how long it runs.
-  std::optional<std::string> video;
-  std::int64_t duration_ms = 0;
-  friend bool operator==(const attachment&, const attachment&) = default;
-};
-
-// What a room event is, for choosing which to show, as Element splits them.
-namespace room_event {
-struct joins {
-  friend bool operator==(joins, joins) = default;
-};        // joins and leaves
-struct invites {
-  friend bool operator==(invites, invites) = default;
-};      // invitations, removals, bans, knocks
-struct names {
-  friend bool operator==(names, names) = default;
-};        // members' names changed
-struct avatars {
-  friend bool operator==(avatars, avatars) = default;
-};      // members' pictures changed
-struct room_name {
-  friend bool operator==(room_name, room_name) = default;
-};
-struct topic {
-  friend bool operator==(topic, topic) = default;
-};
-struct room_avatar {
-  friend bool operator==(room_avatar, room_avatar) = default;
-};
-struct address {
-  friend bool operator==(address, address) = default;
-};
-struct pins {
-  friend bool operator==(pins, pins) = default;
-};
-struct permissions {
-  friend bool operator==(permissions, permissions) = default;
-};  // power levels
-struct access {
-  friend bool operator==(access, access) = default;
-};       // who may join, who may read the history
-struct encryption {
-  friend bool operator==(encryption, encryption) = default;
-};
-struct other {
-  friend bool operator==(other, other) = default;
-};        // the room made, and the rest of what is said of the room
-struct unreadable {
-  friend bool operator==(unreadable, unreadable) = default;
-};   // an event mux cannot read: said as "sent <its type>" (#11927)
-struct reactions {
-  friend bool operator==(reactions, reactions) = default;
-};    // each reaction, as a line of its own: hidden unless chosen
-struct unreactions {
-  friend bool operator==(unreactions, unreactions) = default;
-};    // each reaction taken back, as a line of its own: hidden unless chosen
-}  // namespace room_event
-using room_event_t =
-    splice::variant<room_event::joins, room_event::invites, room_event::names, room_event::avatars, room_event::room_name,
-                 room_event::topic, room_event::room_avatar, room_event::address, room_event::pins,
-                 room_event::permissions, room_event::access, room_event::encryption, room_event::other,
-                 room_event::unreadable, room_event::reactions, room_event::unreactions>;
-inline constexpr std::size_t kRoomEventKinds = splice::variant_size_v<room_event_t>;
-inline const std::array<room_event_t, kRoomEventKinds> all_room_events{
-    room_event::joins{},     room_event::invites{}, room_event::names{},       room_event::avatars{},
-    room_event::room_name{}, room_event::topic{},   room_event::room_avatar{}, room_event::address{},
-    room_event::pins{},      room_event::permissions{}, room_event::access{},  room_event::encryption{},
-    room_event::other{},     room_event::unreadable{}, room_event::reactions{}, room_event::unreactions{}};
-// Which kinds of room event a chat shows, as its choices resolve: each by
-// its place in room_event_t.
-struct room_event_filter {
-  std::array<bool, kRoomEventKinds> shown;
-  room_event_filter() { shown.fill(true); }
-  [[nodiscard]] bool shows(const room_event_t& kind) const { return shown[kind.index()]; }
-  friend bool operator==(const room_event_filter&, const room_event_filter&) = default;
-};
-// Where a choice is made: for every account, for one, for one chat.
-namespace choice_level {
-struct everywhere {};
-struct account {};
-struct chat {};
-}  // namespace choice_level
-using choice_level_t = splice::variant<choice_level::everywhere, choice_level::account, choice_level::chat>;
-
-// A thread's summary, on its root (m.relations' m.thread, or counted
-// here): how many answers, the latest -- who, what, when -- and whether the
-// user took part.
-struct thread_summary {
-  std::int64_t count = 0;
-  std::string last_id;
-  std::string last_sender;
-  std::string last_text;
-  std::chrono::sys_time<std::chrono::milliseconds> last_at{};
-  bool participated = false;
-  friend bool operator==(const thread_summary&, const thread_summary&) = default;
-};
-
-// A message forwarded, as the client that sent it marked it: who it is from
-// -- their id and name -- and a link to the original.
-// Sent into a thread: its root, and its latest event -- what a client that
-// does not know threads shows it as an answer to.
-struct thread_place {
-  std::string root;
-  std::string latest;
-};
-struct forward_info {
-  std::string from;
-  std::string name;
-  std::string link;
-  friend bool operator==(const forward_info&, const forward_info&) = default;
-};
-struct message {
-  conversation_id in;
-  // The protocol's own id: an XMPP stanza id (or origin-id), a Matrix event
-  // id -- what an edit, a reply, a reaction or a receipt points at.
-  std::string id;
-  std::string sender;  // a bare JID or a Matrix user id
-  std::chrono::sys_time<std::chrono::milliseconds> at{};
-  mux::body body;
-  std::optional<std::string> replies_to;
-  bool edited = false;
-  bool redacted = false;
-  // Removed, but its content fetched back by a moderator (MSC2815): what
-  // the server still kept of it, shown where the message was.
-  std::optional<mux::body> unredacted;
-  bool outgoing = false;
-  // Not something said but something done -- someone joined, the room was
-  // renamed, an event nothing here reads -- shown as a line of its own in
-  // the middle, as tdesktop shows its service messages.
-  bool service = false;
-  room_event_t event_kind = room_event::other{};  // what is done, where it is that
-  // A reaction, as a reply quotes it: its replies_to is the message it
-  // reacted to, where a press on the quote goes.
-  bool reaction = false;
-  delivery_t delivery = delivery::sent{};
-  std::map<std::string, std::set<std::string>> reactions;  // key -> who
-  // The same reactions as the events they are, where the protocol has
-  // them as events (Matrix): who, with what, when -- to be listed, and
-  // answered, one by one.
-  struct reaction_event {
-    std::string event;
-    std::string key;
-    std::string who;
-    std::chrono::sys_time<std::chrono::milliseconds> at{};
-    friend bool operator==(const reaction_event&, const reaction_event&) = default;
-  };
-  std::vector<reaction_event> reaction_events;
-  std::optional<mux::attachment> attachment;
-  // Several pictures or files in one message, as a gallery (MSC4274) carries
-  // them: shown as an album.
-  std::vector<mux::attachment> album;
-  // In a thread (m.thread): its root -- kept in the chat's threads, not in
-  // its timeline. And, where it is a thread's root, the thread's summary.
-  std::optional<std::string> thread;
-  std::optional<thread_summary> threaded;
-  // Forwarded: from whom, and where it was.
-  std::optional<forward_info> forwarded;
-  // A sticker (m.sticker): its picture drawn as Telegram draws one -- no
-  // bubble, smaller than a photo, the time on a plate over its corner.
-  bool sticker = false;
-  // A reaction's key, where it is one -- shown as a line, or fetched aside:
-  // what its menu changes it from.
-  std::string reaction_key;
-  friend bool operator==(const message&, const message&) = default;
-};
-
-// Someone in a group: their id (a JID in the room, a Matrix user id), the
-// name they go by there, and their role, where it has one (owner, admin,
-// moderator).
-struct member {
-  std::string id;
-  std::string name;
-  std::optional<std::string> role;
-  std::optional<std::string> avatar;  // an mxc:// or a hash, the protocol's
-  friend bool operator==(const member&, const member&) = default;
-};
-
-// One asking to join a room that lets people knock: who, and why they say.
-struct knock_request {
-  std::string id;
-  std::string name;
-  std::string reason;
-  friend bool operator==(const knock_request&, const knock_request&) = default;
-};
-
-// Who may join a room, as its join rule says.
-namespace join_rule {
-struct open {};      // anyone: "public"
-struct invite {};    // those invited
-struct knock {};     // those who ask, once let in
-struct other {};     // restricted, private -- a rule not offered here
-}  // namespace join_rule
-using join_rule_t = splice::variant<join_rule::open, join_rule::invite, join_rule::knock, join_rule::other>;
-// Who may read a room's history.
-namespace history_rule {
-struct shared {};          // members, all of it
-struct invited {};         // members, from when they were invited
-struct joined {};          // members, from when they joined
-struct world_readable {};  // anyone
-}  // namespace history_rule
-using history_rule_t =
-    splice::variant<history_rule::shared, history_rule::invited, history_rule::joined, history_rule::world_readable>;
-
-// What a room asks of those who do something in it: the level each needs,
-// as its power levels say (m.room.power_levels), Matrix's defaults where
-// they say nothing. What is asked is a tag, one for each thing done; one
-// that sends a kind of state event carries that kind's name, as Matrix
-// writes it -- the key its level is kept by.
-namespace power_need {
-struct send_messages {};  // events_default
-struct change_settings {};  // state_default: any state event not listed
-struct default_role {};  // users_default
-struct invite {};
-struct kick {};
-struct ban {};
-struct redact {};  // remove what others sent
-struct notify_everyone {};  // notifications.room: @room
-struct rename {
-  static constexpr std::string_view event = "m.room.name";
-};
-struct retopic {
-  static constexpr std::string_view event = "m.room.topic";
-};
-struct change_avatar {
-  static constexpr std::string_view event = "m.room.avatar";
-};
-struct change_address {
-  static constexpr std::string_view event = "m.room.canonical_alias";
-};
-struct change_history {
-  static constexpr std::string_view event = "m.room.history_visibility";
-};
-struct change_access {
-  static constexpr std::string_view event = "m.room.join_rules";
-};
-struct change_permissions {
-  static constexpr std::string_view event = "m.room.power_levels";
-};
-struct encrypt {
-  static constexpr std::string_view event = "m.room.encryption";
-};
-struct upgrade {
-  static constexpr std::string_view event = "m.room.tombstone";
-};
-struct change_acl {
-  static constexpr std::string_view event = "m.room.server_acl";
-};
-struct pin {
-  static constexpr std::string_view event = "m.room.pinned_events";
-};
-}  // namespace power_need
-using power_need_t =
-    splice::variant<power_need::default_role, power_need::send_messages, power_need::invite, power_need::change_settings,
-                 power_need::kick, power_need::ban, power_need::redact, power_need::notify_everyone,
-                 power_need::rename, power_need::retopic, power_need::change_avatar, power_need::change_address,
-                 power_need::change_history, power_need::change_access, power_need::change_permissions,
-                 power_need::encrypt, power_need::upgrade, power_need::change_acl, power_need::pin>;
-template <class Need>
-concept sends_state = requires { Need::event; };
-
-struct power_needs {
-  std::int64_t users_default = 0;
-  std::int64_t events_default = 0;
-  std::int64_t state_default = 50;
-  std::int64_t invite = 0;
-  std::int64_t kick = 50;
-  std::int64_t ban = 50;
-  std::int64_t redact = 50;
-  std::int64_t notify_room = 50;
-  std::map<std::string, std::int64_t, std::less<>> events;  // by the kind of event
-  friend bool operator==(const power_needs&, const power_needs&) = default;
-
-  [[nodiscard]] std::int64_t of(power_need::default_role) const { return users_default; }
-  [[nodiscard]] std::int64_t of(power_need::send_messages) const { return events_default; }
-  [[nodiscard]] std::int64_t of(power_need::change_settings) const { return state_default; }
-  [[nodiscard]] std::int64_t of(power_need::invite) const { return invite; }
-  [[nodiscard]] std::int64_t of(power_need::kick) const { return kick; }
-  [[nodiscard]] std::int64_t of(power_need::ban) const { return ban; }
-  [[nodiscard]] std::int64_t of(power_need::redact) const { return redact; }
-  [[nodiscard]] std::int64_t of(power_need::notify_everyone) const { return notify_room; }
-  template <sends_state Need>
-  [[nodiscard]] std::int64_t of(Need) const {
-    const auto found = events.find(Need::event);
-    return found == events.end() ? state_default : found->second;
-  }
-  [[nodiscard]] std::int64_t of(const power_need_t& need) const {
-    return splice::visit([this](auto one) { return this->of(one); }, need);
-  }
-};
-
-// What can be done to a room by those allowed to: named, described, opened
-// or closed, people let in or sent out, and given a say.
-namespace room_action {
-struct rename {
-  std::string name;
-};
-struct retopic {
-  std::string topic;
-};
-struct set_join_rule {
-  join_rule_t rule;
-};
-struct set_history {
-  history_rule_t rule;
-};
-struct invite {
-  std::string user;
-};
-struct kick {
-  std::string user;
-};
-struct ban {
-  std::string user;
-};
-struct unban {
-  std::string user;
-};
-struct set_power {
-  std::string user;
-  std::int64_t level = 0;
-};
-struct encrypt {};  // for good: it cannot be turned off
-struct set_need {  // the level a thing done asks
-  power_need_t need;
-  std::int64_t level = 0;
-};
-// Upgraded to a room version: a new room made, this one tombstoned (#11839).
-struct upgrade {
-  std::string version;
-};
-// The level any kind of event asks, by its type as Matrix names it -- one
-// of the list's or not (#11826).
-struct set_event_need {
-  std::string event;
-  std::int64_t level = 0;
-};
-}  // namespace room_action
-// A room's creator, from room version 12 on: above every level, and not
-// listed in the power levels (MSC4289).
-inline constexpr std::int64_t kCreatorPower = std::numeric_limits<std::int64_t>::max();
-using room_action_t =
-    splice::variant<room_action::rename, room_action::retopic, room_action::set_join_rule, room_action::set_history,
-                 room_action::invite, room_action::kick, room_action::ban, room_action::unban, room_action::set_power,
-                 room_action::encrypt, room_action::set_need, room_action::set_event_need, room_action::upgrade>;
-
-// A custom emoji: its shortcode, as written between colons, and its picture
-// on the server -- one of a Matrix room's packs, or the user's own.
-struct emote {
-  std::string shortcode;
-  std::string url;
-  // As its pack says: its words, its size and type -- sent with a sticker,
-  // which other clients size by -- and the pack it is of, for the picker.
-  std::string body;
-  std::optional<std::int64_t> w, h, size;
-  std::optional<std::string> mimetype;
-  std::string pack;
-  std::optional<std::string> pack_avatar;
-  friend bool operator==(const emote&, const emote&) = default;
-};
-
-// Something for the user in a chat, not yet seen, as Telegram's @ and heart
-// buttons count them: a message mentioning them, or a reaction to one of
-// theirs -- its event, the message to go to, and when.
-struct unread_mark {
-  std::string event;
-  std::string target;
-  std::chrono::sys_time<std::chrono::milliseconds> at{};
-  friend bool operator==(const unread_mark&, const unread_mark&) = default;
-};
-namespace mark_kind {
-struct mention {};
-struct reaction {};
-}  // namespace mark_kind
-using mark_kind_t = splice::variant<mark_kind::mention, mark_kind::reaction>;
-
-// A room of a server's public directory, as it lists it.
-// Someone found -- in the user directory, or among one's chats: their ID,
-// their name and picture where known.
-struct found_person {
-  std::string id;
-  std::string name;
-  std::optional<std::string> avatar;
-  friend bool operator==(const found_person&, const found_person&) = default;
-};
-// A pack of custom emoji and stickers (MSC2545), as it is edited: one's own
-// (account data) or a room's (a state event, by its state key) -- its name,
-// picture, attribution and use, and its images.
-struct pack_picture {
-  std::string shortcode;
-  std::string url;  // mxc://
-  std::string body;
-  bool emoji = true;    // usable as an emoji
-  bool sticker = true;  // and as a sticker
-  std::string mimetype;
-  std::int64_t width = 0, height = 0, size = 0;
-  friend bool operator==(const pack_picture&, const pack_picture&) = default;
-};
-struct emote_pack {
-  std::optional<std::string> room;  // none: one's own
-  std::string state_key;
-  std::string name;
-  std::optional<std::string> avatar;
-  std::string attribution;
-  bool emoji = true;
-  bool sticker = true;
-  std::vector<pack_picture> pictures;
-  friend bool operator==(const emote_pack&, const emote_pack&) = default;
-};
-struct directory_room {
-  std::string id;
-  std::string name;
-  std::string alias;
-  std::string topic;
-  std::optional<std::string> avatar;
-  std::int64_t members = 0;
-  bool space = false;  // a space: browsed into, not only joined
-  friend bool operator==(const directory_room&, const directory_room&) = default;
-};
-
-// Someone mentioned in what is sent: the name as written in it, and who.
-struct mention {
-  std::string name;
-  std::string user;
-  friend bool operator==(const mention&, const mention&) = default;
-};
-
-// An invite to a room not joined yet: who sent it, by their ID and their
-// name, and whether it is to a direct chat.
-struct invite_info {
-  std::string from;
-  std::string from_name;
-  bool direct = false;
-  friend bool operator==(const invite_info&, const invite_info&) = default;
-};
-struct conversation {
-  conversation_id id;
-  conversation_kind_t kind = conversation_kind::direct{};
-  std::string name;
-  std::optional<std::string> avatar;  // an mxc:// or a hash, the protocol's
-  std::optional<std::string> topic;
-  bool encrypted = false;
-  std::int64_t unread = 0;
-  std::int64_t highlights = 0;
-  std::vector<std::string> typing;
-  std::vector<knock_request> knocking;  // asking to join, where it lets them knock
-  std::vector<member> members;  // a group's, as far as they are known
-  std::vector<message> timeline;  // oldest first, as far back as is loaded
-  // Where to page back from, in the protocol's terms: a MAM id, a Matrix
-  // prev_batch. Nothing where the beginning has been reached.
-  std::optional<std::string> history_from;
-  // How many are in it, as its server counts: more than `members` where
-  // not all of them are known yet.
-  std::int64_t member_count = 0;
-  // Its alias, where it has one: a Matrix room's canonical #alias.
-  std::optional<std::string> alias;
-  // The messages pinned in it, by their ids, oldest first: a Matrix room's
-  // m.room.pinned_events.
-  std::vector<std::string> pinned;
-  // The custom emoji that can be used in it: its packs' and the user's own.
-  std::vector<emote> emotes;
-  // And the stickers, of the same packs.
-  std::vector<emote> stickers;
-  // Who may join it and read its history, and each one's say in it: a
-  // Matrix room's power levels, those not listed having the default.
-  join_rule_t join_rule = join_rule::invite{};
-  history_rule_t history = history_rule::shared{};
-  std::map<std::string, std::int64_t> powers;
-  std::int64_t power_default = 0;
-  // And what each thing done in it asks.
-  power_needs needs;
-  // Its room version, as it was made: what an upgrade goes from.
-  std::string version;
-  // Upgraded away: the room it continues in (m.room.tombstone), and what
-  // its tombstone said; and the room this one continues, where it does.
-  std::optional<std::string> replaced_by;
-  std::string replaced_why;
-  std::optional<std::string> predecessor;
-  // Its other published addresses, besides its alias.
-  std::vector<std::string> other_aliases;
-  // What is for the user in it, not yet seen, oldest first: kept to a number.
-  std::vector<unread_mark> unread_mentions;
-  std::vector<unread_mark> unread_reactions;
-  // The marks already seen or gone to, by their event: kept (and on disk),
-  // so that what the next start catches up on again is not unread again.
-  std::vector<std::string> seen_marks;
-  // Messages a reply in view quotes that are not in the timeline, fetched
-  // on their own for their quotes -- kept out of the timeline, and let go
-  // once the timeline has them, or when too many have gathered.
-  std::map<std::string, message> quoted;
-  // Each thread's answers, by its root, oldest first: kept apart from the
-  // timeline, as Element keeps them; and the roots the server listed.
-  std::map<std::string, std::vector<message>> threads;
-  std::vector<std::string> thread_roots;
-  // Who has read up to where: each other person's last message read, as
-  // their receipts say; and the user's own, kept here whether it is sent or
-  // not -- what is unread is counted from it.
-  std::map<std::string, std::string> read_by;
-  std::map<std::string, std::chrono::sys_time<std::chrono::milliseconds>> receipt_times;
-  std::optional<std::string> read_up_to;
-  // What is unread, as counted here from the user's own position where there
-  // is one, and as the server counts it where not.
-  //
-  // Counted only where the timeline reaches the newest and holds the
-  // position: a window far back in the history, or a timeline that no
-  // longer has it, counted every message in it as unread -- 60 new in a
-  // room where none were.
-  // How many unread: those after the one read up to that are not one's own
-  // -- and not room events the chat does not show (`shown`, as its settings
-  // resolve): what is hidden in it is not counted either.
-  [[nodiscard]] std::int64_t unread_here(const room_event_filter& shown = {}) const {
-    if (!read_up_to)
-      return unread;
-    if (detached)
-      return latest && latest->id == *read_up_to ? 0 : unread;
-    std::int64_t after = 0;
-    for (auto it = timeline.rbegin(); it != timeline.rend(); ++it) {
-      if (it->id == *read_up_to)
-        return after;
-      if (!it->outgoing && (!it->service || shown.shows(it->event_kind)))
-        ++after;
-    }
-    return unread;
-  }
-  // When it was last read, as the model counts: the chats read longest ago
-  // lose their loaded history first.
-  std::uint64_t read_at = 0;
-  // A Matrix space, and the rooms it holds: a folder of chats, not a chat.
-  bool space = false;
-  // Made for a forum's row in the chat list only: the room its newest is in.
-  std::optional<std::string> forum_topic;
-  std::vector<std::string> children;
-  // The named groups it is in, as an XMPP roster's.
-  std::vector<std::string> groups;
-  // A window of its history, away from its newest -- a message jumped to
-  // and what is around it -- rather than all of it from there to the
-  // newest: `future_from` is where to page forward from, and what arrives
-  // meanwhile is not put in it but only kept as `latest`, until paging
-  // forward meets the newest and it is live again.
-  bool detached = false;
-  std::optional<std::string> future_from;
-  std::optional<message> latest;
-  // Counted up whenever its members change: what shows them is made again
-  // only then -- a big room has thousands.
-  std::uint64_t members_revision = 0;
-  // Invited to, not joined: who asked. Joined, or declined, it goes.
-  std::optional<invite_info> invite;
-};
-
-// Its newest message, as the chat list shows it and sorts by: the last of
-// its timeline, or the newest that came while it is a window elsewhere.
-[[nodiscard]] inline const message* newest(const conversation& one) {
-  if (one.latest && (one.detached || one.timeline.empty() || one.latest->at > one.timeline.back().at))
-    return &*one.latest;
-  return one.timeline.empty() ? nullptr : &one.timeline.back();
-}
-// The newest of what the chat shows: a room event it hides passed over, as
-// its preview in the list says what is in it.
-[[nodiscard]] inline const message* newest(const conversation& one, const room_event_filter& shown) {
-  const auto visible = [&](const message& said) { return !said.service || shown.shows(said.event_kind); };
-  if (one.latest && visible(*one.latest) &&
-      (one.detached || one.timeline.empty() || one.latest->at > one.timeline.back().at))
-    return &*one.latest;
-  for (auto it = one.timeline.rbegin(); it != one.timeline.rend(); ++it)
-    if (visible(*it))
-      return &*it;
-  return nullptr;
-}
-
-// A member's power level, as the room's power levels say: their own, else
-// the default.
-[[nodiscard]] inline std::int64_t power_of(const conversation& chat, std::string_view user) {
-  const auto found = chat.powers.find(std::string(user));
-  return found != chat.powers.end() ? found->second : chat.power_default;
-}
-// Whether the user may view removed messages' content (MSC2815): their
-// level at least the redact level, as the server also asks.
-[[nodiscard]] inline bool may_view_redacted(const conversation& chat, std::string_view user) {
-  return power_of(chat, user) >= chat.needs.redact;
-}
-
-struct account {
-  account_id id;
-  connection_t state = connection::offline{};
-  std::string display_name;
-  std::map<std::string, conversation> conversations;  // by conversation id
-  std::map<std::string, presence> presences;          // by contact
-};
-
-// ---------------------------------------------------------------------------
-// The log: a line on standard error for each step an account takes --
-// connecting, where to, logged in, what was loaded -- with when and whose.
-// Lines from the protocols' threads do not run into each other.
-
-inline void log_line(std::string_view who, std::string_view what) {
-  static std::mutex writing;
-  const auto now = std::chrono::floor<std::chrono::milliseconds>(std::chrono::system_clock::now());
-  const std::scoped_lock held(writing);
-  std::println(std::cerr, "{:%H:%M:%S} [{}] {}", now, who, what);
-}
-template <class... Args>
-void log(const account_id& who, std::format_string<Args...> what, Args&&... args) {
-  log_line(who.address, std::format(what, std::forward<Args>(args)...));
-}
-
-// ---------------------------------------------------------------------------
-// Changes: what the protocols say happened.
-
-// What a picture or a file is fetched for: told by its type, never by a
-// word in a key.
-namespace media_use {
-struct avatar {  // a chat's avatar or a person's, shown by their id
-  std::string of;
-};
-struct thumbnail {};  // a message's picture, small, as the chat shows it
-struct whole {};      // a message's picture, whole, as the viewer shows it
-struct to_open {      // a file, saved to Downloads and opened
-  std::string name;
-};
-struct to_save {  // a picture or a file, saved to Downloads
-  std::string name;
-};
-// Sound to play: fetched whole, kept as a whole picture is, and played.
-struct to_play {};
-// A video to watch: fetched whole into a file of its own, and played.
-struct to_watch {};
-// A picture to copy: fetched whole, kept as a whole picture is, and put on
-// the clipboard.
-struct to_copy {};
-}  // namespace media_use
-using media_use_t = splice::variant<media_use::avatar, media_use::thumbnail, media_use::whole, media_use::to_open,
-                                 media_use::to_save, media_use::to_play, media_use::to_watch, media_use::to_copy>;
-
-// Where a message goes among those of its chat.
-namespace placement {
-struct at_end {};     // live: after the rest -- but not into a window away from the newest
-struct at_start {};   // history paged back: before the rest
-struct in_window {};  // a window's own: loaded around a message, or paged forward
-struct aside {};      // not in the timeline: a message a reply quotes, fetched for its quote
-}  // namespace placement
-using placement_t = splice::variant<placement::at_end, placement::at_start, placement::in_window, placement::aside>;
-
-// What a link in a message is, as its page says (Open Graph): the site, the
-// title, a line about it, and its picture, kept on the server.
-struct link_preview {
-  std::string site;
-  std::string title;
-  std::string description;
-  std::optional<std::string> image;
-  friend bool operator==(const link_preview&, const link_preview&) = default;
-};
-
-// A room the user is not in, as its server tells of it (/room_summary): its
-// ID, name, address, what it is about, its picture and how many are in it --
-// or, where it tells nothing, why.
-struct room_preview {
-  std::string id;
-  std::string name;
-  std::string alias;
-  std::string topic;
-  std::optional<std::string> avatar;
-  std::optional<std::int64_t> members;
-  std::string note;
-  // An invite to it: Accept and Decline, in place of Join.
-  bool invite = false;
-  // Its join rule lets people ask: Ask to join, in place of Join.
-  bool knock = false;
-  friend bool operator==(const room_preview&, const room_preview&) = default;
-};
 
 namespace change {
 
@@ -865,8 +29,35 @@ struct connection_changed {
   connection_t state;
 };
 
+
+// Something done that is said to the user, as a notice: its heading, and
+// what it says.
+struct notice {
+  account_id by;
+  std::string heading;
+  std::string what;
+};
+
 // Something asked of the server that it refused: said to the user, as a
 // notice, with what the server gave as its reason.
+// A person's sessions, as their keys list them: each by its id and name,
+// and whether it is verified -- cross-signed by them, or by emoji here.
+struct device_view {
+  std::string id;
+  std::string name;
+  bool verified = false;
+  friend bool operator==(const device_view&, const device_view&) = default;
+};
+struct devices_listed {
+  account_id by;
+  std::string user;
+  std::vector<device_view> devices;
+};
+struct trust_changed {
+  account_id by;
+  std::string user;
+  trust_t now;
+};
 struct refused {
   account_id by;
   std::string what;
@@ -886,6 +77,9 @@ struct conversation_updated {
   std::optional<std::string> topic;
   bool encrypted = false;
   std::int64_t unread = 0;
+  // When it was turned on (m.room.encryption's time): what was said before
+  // was said in the clear, and is not marked for it.
+  std::optional<std::chrono::sys_time<std::chrono::milliseconds>> encrypted_since;
   std::int64_t highlights = 0;
   bool space = false;
   std::vector<std::string> children;
@@ -895,17 +89,9 @@ struct conversation_updated {
   std::vector<std::string> pinned;
   std::vector<emote> emotes;
   std::vector<emote> stickers;
-  join_rule_t join_rule = join_rule::invite{};
-  history_rule_t history = history_rule::shared{};
-  std::map<std::string, std::int64_t> powers;
-  std::int64_t power_default = 0;
-  power_needs needs;
-  std::string version;
+  room_part_t theirs;  // its protocol's own part of it
   // Upgraded away: the room it continues in (m.room.tombstone), and what
   // its tombstone said; and the room this one continues, where it does.
-  std::optional<std::string> replaced_by;
-  std::string replaced_why;
-  std::optional<std::string> predecessor;
   std::vector<std::string> other_aliases;
   // Invited to, not joined: who asked.
   std::optional<invite_info> invite;
@@ -922,6 +108,13 @@ struct receipts_changed {
 
 
 // A picture or a file as its protocol fetched it: the bytes, what they
+// What an account's protocol says it is now -- its stream up, what its server
+// has -- for its extension points to decide by.
+struct protocol_state_changed {
+  account_id account;
+  protocol_state_t now;
+};
+
 // were fetched for, and the source they were fetched by.
 struct avatar_loaded {
   media_use_t use;
@@ -944,21 +137,6 @@ struct room_previewed {
   room_preview preview;
 };
 
-// What the developer tools show: a title over some JSON or an answer; and a
-// room's state, every event of it, by type and key.
-struct devtools_text {
-  std::string title;
-  std::string text;
-};
-struct state_entry {
-  std::string type;
-  std::string key;
-  std::string json;
-};
-struct state_listed {
-  conversation_id in;
-  std::vector<state_entry> entries;
-};
 
 // A room the user made, to be shown once it is: a direct chat or a group.
 struct room_created {
@@ -972,17 +150,12 @@ struct media_progress {
 
 // A session an account was given -- a Matrix access token and device -- to
 // be kept, so the next start goes on with it rather than logging in again.
-struct session_given {
-  account_id account;
-  std::string access_token;
-  std::string device_id;
-};
 
 // Who is in a group now: the whole list.
 struct members_changed {
   conversation_id in;
   std::vector<member> members;
-  std::vector<knock_request> knocking;  // asking to join (#11857)
+  std::vector<knock_request> knocking;  // asking to join
 };
 
 struct conversation_removed {
@@ -1022,6 +195,24 @@ struct message_edited {
   conversation_id in;
   std::string id;
   mux::body now;
+  // Who edited it: applied only where they sent what it edits. Anyone in a
+  // room could otherwise rewrite anyone's message.
+  std::optional<std::string> by;
+  // Came from the server in the clear: never applied to a message that came
+  // encrypted -- the server could otherwise rewrite it (review 4, H3).
+  bool plain = false;
+};
+
+// A message that came encrypted and was read so.
+struct message_encrypted {
+  conversation_id in;
+  std::string id;
+  // From a device its sender cross-signed.
+  bool verified = false;
+  // Read with a key that came from the backup or an import, not from its
+  // sender: its authenticity cannot be guaranteed on this device (Element's
+  // words).
+  bool imported = false;
 };
 
 struct message_redacted {
@@ -1096,26 +287,6 @@ struct reacted_to_mine {
   std::string target;
   std::chrono::sys_time<std::chrono::milliseconds> at{};
 };
-// The packs of a room, or one's own, as asked for to edit.
-struct packs_listed {
-  account_id by;
-  std::optional<std::string> room;
-  std::vector<emote_pack> packs;
-};
-// A pack saved -- or taken away, where `removed` -- or not.
-struct pack_saved {
-  account_id by;
-  emote_pack pack;
-  bool removed = false;
-  bool done = false;
-};
-// An image uploaded for a pack being edited: its mxc://, none where it
-// failed.
-struct pack_picture_uploaded {
-  account_id by;
-  pack_picture picture;
-  bool done = false;
-};
 // A room's threads, as the server lists them: their roots, newest first
 // (each root's own message comes aside, with its summary).
 struct threads_listed {
@@ -1127,28 +298,6 @@ struct people_found {
   account_id by;
   std::string query;
   std::vector<found_person> people;
-};
-// One of the account's sessions (Matrix's devices), as Element lists them:
-// its ID, its name, and where and when it was last seen.
-struct session_info {
-  std::string id;
-  std::string name;
-  std::optional<std::string> ip;
-  std::optional<std::chrono::sys_time<std::chrono::milliseconds>> last_seen;
-  friend bool operator==(const session_info&, const session_info&) = default;
-};
-// The account's sessions, this one's ID among them.
-struct sessions_listed {
-  account_id by;
-  std::string current;
-  std::vector<session_info> sessions;
-};
-// Sessions not signed out, or not renamed: why -- and whether the password
-// is what was missing.
-struct sessions_refused {
-  account_id by;
-  std::string why;
-  bool needs_password = false;
 };
 // A person's profile, as their server gives it: their name and their
 // picture -- one met outside the room, a forward's sender.
@@ -1189,31 +338,144 @@ struct history_position {
   conversation_id in;
   std::optional<std::string> from;
 };
+// An event the server says is not there -- not found, or not this user's
+// to see: the marks on it let go, for nothing will ever show it.
+struct event_missing {
+  conversation_id in;
+  std::string id;
+  // Shown under another's id instead: an edit, in the message it edits.
+  std::optional<std::string> instead{};
+};
+
+// A call's signalling, as its protocol carried it: what was said in one
+// call, by the other side or by the user's own other session. Protocol-
+// neutral: Matrix's m.call.* events and XMPP's Jingle are read into it.
+namespace call_end {
+struct hung_up {};
+struct busy {};
+struct timed_out {};    // not answered in time
+struct failed {};       // the connection, or the sound, could not be had
+struct other {
+  std::string said;
+};
+}  // namespace call_end
+using call_end_t = splice::variant<call_end::hung_up, call_end::busy, call_end::timed_out, call_end::failed, call_end::other>;
+namespace call_said {
+struct invite {
+  calls::session_description offer;
+  std::chrono::milliseconds lifetime{60000};
+};
+struct answer {
+  calls::session_description it;
+};
+struct candidates {
+  std::vector<calls::ice_candidate> them;
+};
+struct hangup {
+  call_end_t why;
+};
+struct reject {};
+// The caller's choice among those who answered: the one it talks to.
+struct select_answer {
+  std::string party;
+};
+}  // namespace call_said
+using call_said_t =
+    splice::variant<call_said::invite, call_said::answer, call_said::candidates, call_said::hangup, call_said::reject,
+                    call_said::select_answer>;
+struct call_signalled {
+  conversation_id in;
+  std::string call;    // the call's id
+  std::string party;   // the device that said it: one of several a person has
+  std::string sender;
+  bool mine = false;   // the user's own, from another session
+  std::chrono::sys_time<std::chrono::milliseconds> at{};
+  call_said_t said;
+};
+// The servers a call of an account goes through, as its server gave them
+// (Matrix's /voip/turnServer): asked as a call starts.
+struct call_servers {
+  account_id account;
+  std::vector<calls::ice_server> servers;
+};
 
 }  // namespace change
 
-using change_t = splice::variant<change::connection_changed, change::refused, change::account_removed, change::conversation_updated,
-                              change::conversation_removed,
-                              change::presence_changed, change::message_added, change::message_edited,
-                              change::message_redacted, change::message_unredacted, change::message_acknowledged, change::delivery_changed, change::message_discarded, change::reaction_changed,
-                              change::typing_changed, change::history_position, change::members_changed,
-                              change::session_given, change::avatar_loaded, change::receipts_changed,
-                              change::window_opened, change::window_extended, change::media_progress,
-                              change::room_created, change::preview_loaded, change::devtools_text,
-                              change::state_listed, change::room_previewed, change::mentioned,
-                              change::marks_shown, change::mark_taken, change::marks_seen, change::reacted_to_mine,
-                              change::directory_listed, change::people_found, change::profile_found, change::sessions_listed, change::sessions_refused, change::packs_listed, change::pack_saved, change::threads_listed,
-                              change::pack_picture_uploaded>;
+// The changes every protocol says, here; and each protocol's own, from its
+// change list -- changes_type(state), found by ADL in its folder (mux.proto.
+// <p>.changes), none where it gives none -- all one variant.
+using core_changes = splice::variant<change::protocol_state_changed, change::trust_changed, change::devices_listed, change::message_encrypted, change::connection_changed, change::refused, change::notice, change::account_removed, change::conversation_updated, change::conversation_removed, change::presence_changed, change::message_added, change::message_edited, change::message_redacted, change::message_unredacted, change::message_acknowledged, change::delivery_changed, change::message_discarded, change::reaction_changed, change::typing_changed, change::history_position, change::event_missing, change::members_changed, change::avatar_loaded, change::receipts_changed, change::window_opened, change::window_extended, change::media_progress, change::room_created, change::preview_loaded, change::room_previewed, change::mentioned, change::marks_shown, change::mark_taken, change::marks_seen, change::reacted_to_mine, change::directory_listed, change::people_found, change::profile_found, change::threads_listed, change::call_signalled, change::call_servers>;
+namespace changes_defaults {
+constexpr type_tag<change_list<>> changes_type(const auto&) { return {}; }
+}  // namespace changes_defaults
+template <class Tag>
+constexpr auto changes_type_of() {
+  using changes_defaults::changes_type;
+  return changes_type(state_of<Tag>{});
+}
+template <class Tag>
+using changes_of = typename decltype(changes_type_of<Tag>())::type;
+template <class Variant, class... Lists>
+struct with_changes {
+  using type = Variant;
+};
+template <class... Have, class... Theirs, class... Lists>
+struct with_changes<splice::variant<Have...>, change_list<Theirs...>, Lists...>
+    : with_changes<splice::variant<Have..., Theirs...>, Lists...> {};
+template <class>
+struct all_changes;
+template <class... Tags>
+struct all_changes<protocol_list<Tags...>> {
+  using type = typename with_changes<core_changes, changes_of<Tags>...>::type;
+};
+using change_t = all_changes<protocols>::type;
+
+// Whether a change is a protocol's own: one of its list's.
+template <class Change, class... Cs>
+constexpr bool lists_change(change_list<Cs...>) {
+  struct all : type_tag<Cs>... {};
+  return std::derived_from<all, type_tag<Change>>;
+}
+template <class Change, class... Tags>
+constexpr bool protocols_change(protocol_list<Tags...>) {
+  return (lists_change<Change>(changes_of<Tags>{}) || ...);
+}
+template <class Change>
+concept protocol_change = protocols_change<Change>(protocols{});
 
 // The model: every account, and every change applied to it.
+// What a protocol's own change does to the model: nothing, unless the
+// protocol says (changed_in, by ADL on its change).
+namespace model_defaults {
+inline void changed_in(auto&, const auto&) {}
+}  // namespace model_defaults
+
 class model {
  public:
   // A message deleted is shown where it was, marked -- or taken out.
   bool show_deleted = false;
   // The links' previews, by their URLs: as fetched this session.
   std::map<std::string, link_preview> previews;
+  // Rooms not joined here whose server said they are there, by the address
+  // a message names them by, and each one's name as its server gave it: as
+  // asked this session.
+  std::map<std::string, std::string, std::less<>> rooms_found;
 
   const std::map<account_id, account>& accounts() const noexcept { return accounts_; }
+  // What an account knows of a person's encryption identity, where it said.
+  // How many times what is known of anyone's identity changed: what shows
+  // it is made again when it moves.
+  [[nodiscard]] std::uint64_t trust_revision() const { return trust_revision_; }
+  // This session of an account: its ID and key, where encryption runs.
+  // A person's sessions, where their account listed them.
+  [[nodiscard]] const std::vector<change::device_view>* devices_of(const account_id& by, const std::string& user) const {
+    const auto found = devices_.find({by, user});
+    return found == devices_.end() ? nullptr : &found->second;
+  }
+  [[nodiscard]] std::optional<trust_t> trust_of(const account_id& by, const std::string& user) const {
+    const auto found = trust_.find({by, user});
+    return found == trust_.end() ? std::nullopt : std::optional<trust_t>(found->second);
+  }
 
   account& add(account_id id, std::string display_name = {}) {
     account& made = accounts_[id];
@@ -1222,12 +484,27 @@ class model {
     return made;
   }
 
-  const conversation* find(const conversation_id& id) const {
-    const auto found = accounts_.find(id.account);
-    if (found == accounts_.end())
-      return nullptr;
+  // A chat, where the model has it: as const as the model it is asked of.
+  template <class Self>
+  [[nodiscard]] auto* chat_in(this Self& self, const conversation_id& id) {
+    using found_t = std::conditional_t<std::is_const_v<Self>, const conversation, conversation>;
+    const auto found = self.accounts_.find(id.account);
+    if (found == self.accounts_.end())
+      return static_cast<found_t*>(nullptr);
     const auto in = found->second.conversations.find(id.id);
-    return in == found->second.conversations.end() ? nullptr : &in->second;
+    return in == found->second.conversations.end() ? static_cast<found_t*>(nullptr) : &in->second;
+  }
+  const conversation* find(const conversation_id& id) const { return this->chat_in(id); }
+  // For a protocol's own change (changed_in): a chat it changes, where the
+  // model has it, and a message in it -- a room's part, a poll's counts in a
+  // message's part.
+  [[nodiscard]] conversation* chat_to_change(const conversation_id& id) { return this->chat_in(id); }
+  [[nodiscard]] message* message_to_change(const conversation_id& in, std::string_view id) {
+    conversation* chat = this->chat_to_change(in);
+    if (chat == nullptr)
+      return nullptr;
+    const auto found = std::ranges::find(chat->timeline, id, &message::id);
+    return found == chat->timeline.end() ? nullptr : &*found;
   }
 
   void apply(const change_t& what) {
@@ -1288,6 +565,14 @@ class model {
     made.id = id;
     return made;
   }
+  // The copy of the newest kept while the chat is a window elsewhere, where it
+  // is the message changed: changed as the timeline's is, the list saying
+  // what the chat says.
+  template <class Change>
+  static void in_latest(conversation& where, std::string_view id, Change change) {
+    if (where.latest && where.latest->id == id)
+      change(*where.latest);
+  }
   static message* message_in(conversation& where, std::string_view id) {
     for (auto it = where.timeline.rbegin(); it != where.timeline.rend(); ++it)
       if (it->id == id)
@@ -1339,6 +624,7 @@ class model {
     kept.avatar = one.avatar;
     kept.topic = one.topic;
     kept.encrypted = one.encrypted;
+    kept.encrypted_since = one.encrypted_since;
     kept.unread = one.unread;
     kept.highlights = one.highlights;
     kept.space = one.space;
@@ -1349,21 +635,30 @@ class model {
     kept.pinned = one.pinned;
     kept.emotes = one.emotes;
     kept.stickers = one.stickers;
-    kept.join_rule = one.join_rule;
-    kept.history = one.history;
-    kept.powers = one.powers;
-    kept.power_default = one.power_default;
-    kept.needs = one.needs;
-    kept.version = one.version;
-    kept.replaced_by = one.replaced_by;
-    kept.replaced_why = one.replaced_why;
-    kept.predecessor = one.predecessor;
+    kept.theirs = one.theirs;
     kept.other_aliases = one.other_aliases;
     kept.invite = one.invite;
   }
   void on(const change::conversation_removed& one) { of(one.id.account).conversations.erase(one.id.id); }
   void on(const change::presence_changed& one) { of(one.account).presences[one.contact] = one.now; }
+  // Reactions come before the message they are on is here (it is further
+  // back, or in a thread not loaded): kept until it comes, then put on it.
+  // Dropped, they were lost for good -- the event seen in the history, the
+  // message without it.
+  std::map<std::pair<conversation_id, std::string>, std::vector<change::reaction_changed>> waiting_reactions_;
+  static constexpr std::size_t kReactionsWaiting = 2000;
   void on(const change::message_added& one) {
+    this->add_message(one);
+    if (one.message.id.empty())
+      return;
+    if (const auto waiting = waiting_reactions_.find({one.message.in, one.message.id}); waiting != waiting_reactions_.end()) {
+      const auto held = std::move(waiting->second);
+      waiting_reactions_.erase(waiting);
+      for (const change::reaction_changed& reaction : held)
+        this->on(reaction);
+    }
+  }
+  void add_message(const change::message_added& one) {
     // A deleted one, read back from the disk: only where deleted messages
     // are kept, and something of it is left to show.
     if (one.message.redacted &&
@@ -1371,7 +666,16 @@ class model {
       return;
     conversation& where = of(one.message.in);
     if (message* kept = one.message.id.empty() ? nullptr : message_in(where, one.message.id)) {
+      // Come again -- a page, the disk, a window around it: its reactions
+      // kept, which what came may not carry.
+      auto reactions = std::move(kept->reactions);
+      auto reaction_events = std::move(kept->reaction_events);
       *kept = one.message;
+      for (auto& [key, who] : reactions)
+        kept->reactions[key].insert(who.begin(), who.end());
+      for (auto& each : reaction_events)
+        if (!std::ranges::contains(kept->reaction_events, each))
+          kept->reaction_events.push_back(std::move(each));
       return;
     }
     // An answer in a thread: with the thread's, in time's order, not in the
@@ -1433,8 +737,7 @@ class model {
                             // those -- it was sent before them. After them, a
                             // message sent a second before another, its copy
                             // come by the sync unmatched to its echo, stood
-                            // below the next one until that one's came too
-                            // (#11542).
+                            // below the next one until that one's came too.
                             if (one.message.outgoing) {
                               const auto pending = std::ranges::find_if(where.timeline, [](const message& said) {
                                 return said.outgoing &&
@@ -1483,15 +786,35 @@ class model {
     where.future_from = one.future_from;
     where.detached = one.future_from.has_value();
   }
+  void on(const change::message_encrypted& one) {
+    const auto mark = [&](message& kept) {
+      kept.encrypted = true;
+      kept.unverified = !one.verified;
+      kept.unauthenticated = one.imported;
+    };
+    if (message* kept = message_in(of(one.in), one.id))
+      mark(*kept);
+    in_latest(of(one.in), one.id, mark);
+  }
   void on(const change::message_edited& one) {
     conversation& where = of(one.in);
     if (message* kept = message_in(where, one.id)) {
+      if ((one.by && *one.by != kept->sender) || (one.plain && kept->encrypted))
+        return;
       kept->body = one.now;
       kept->edited = true;
     }
+    in_latest(where, one.id, [&](message& kept) {
+      if ((one.by && *one.by != kept.sender) || (one.plain && kept.encrypted))
+        return;
+      kept.body = one.now;
+      kept.edited = true;
+    });
     // And the copy fetched aside for the replies quoting it: what they quote
     // is what it says now.
-    if (const auto aside = where.quoted.find(one.id); aside != where.quoted.end()) {
+    if (const auto aside = where.quoted.find(one.id);
+        aside != where.quoted.end() && (!one.by || *one.by == aside->second.sender) &&
+        !(one.plain && aside->second.encrypted)) {
       aside->second.body = one.now;
       aside->second.edited = true;
     }
@@ -1500,9 +823,14 @@ class model {
   // was with all it said and its time, marked; else it is taken out.
   void on(const change::message_redacted& one) {
     conversation& where = of(one.in);
+    // A mark on the event taken back -- a reaction to the user's own,
+    // removed where the message it was on is not here to match it: gone too.
+    for (auto* marks : {&where.unread_reactions, &where.unread_mentions})
+      std::erase_if(*marks, [&](const unread_mark& mark) { return mark.event == one.id; });
     if (show_deleted) {
       if (message* kept = message_in(where, one.id))
         kept->redacted = true;
+      in_latest(where, one.id, [](message& kept) { kept.redacted = true; });
       return;
     }
     std::erase_if(where.timeline, [&](const message& each) { return each.id == one.id; });
@@ -1519,6 +847,7 @@ class model {
     conversation& where = of(one.in);
     if (message* kept = message_in(where, one.id)) {
       kept->unredacted = one.now;
+      in_latest(where, one.id, [&](message& latest) { latest.unredacted = one.now; });
       return;
     }
     // And the copy fetched aside for the replies quoting it: what they quote
@@ -1535,16 +864,20 @@ class model {
                  .redacted = true,
                  .unredacted = one.now};
     made.outgoing = one.sender == where.id.account.address;
-    where.timeline.insert(std::ranges::upper_bound(where.timeline, made.at, {}, &message::at), std::move(made));
-    if (!where.detached) {
-      const message& back = where.timeline.back();
-      if (!where.latest || back.at >= where.latest->at)
-        where.latest = back;
-    }
+    where.timeline.insert(std::ranges::upper_bound(where.timeline, made.at, {}, &message::at), made);
+    if (!where.detached && (!where.latest || made.at >= where.latest->at))
+      where.latest = std::move(made);
   }
   void on(const change::threads_listed& one) { of(one.in).thread_roots = one.roots; }
+  // A call's: the program's calls part's (mux.app.calls), not the model's.
+  void on(const change::call_signalled&) {}
+  void on(const change::call_servers&) {}
   void on(const change::message_acknowledged& one) {
     conversation& where = of(one.in);
+    in_latest(where, one.local_id, [&](message& kept) {
+      kept.id = one.id;
+      kept.delivery = delivery::sent{};
+    });
     if (message_in(where, one.id)) {
       std::erase_if(where.timeline, [&](const message& kept) { return kept.id == one.local_id; });
       for (auto& [root, answers] : where.threads)
@@ -1559,6 +892,7 @@ class model {
   void on(const change::delivery_changed& one) {
     if (message* kept = message_in(of(one.in), one.id))
       kept->delivery = one.now;
+    in_latest(of(one.in), one.id, [&](message& kept) { kept.delivery = one.now; });
   }
   void on(const change::message_discarded& one) {
     conversation& where = of(one.in);
@@ -1567,8 +901,24 @@ class model {
       where.latest.reset();
   }
   void on(const change::reaction_changed& one) {
+    if (message_in(of(one.in), one.id) == nullptr) {
+      auto& waiting = waiting_reactions_[{one.in, one.id}];
+      if (one.added) {
+        if (waiting.size() < kReactionsWaiting)
+          waiting.push_back(one);
+      } else {
+        std::erase_if(waiting, [&](const change::reaction_changed& each) { return each.key == one.key && each.who == one.who; });
+      }
+      return;
+    }
     if (message* kept = message_in(of(one.in), one.id)) {
       auto& who = kept->reactions[one.key];
+      // Taken back: its mark too -- a reaction changed for another was
+      // counted twice by the heart, the one taken back still in it.
+      if (!one.added)
+        for (const message::reaction_event& each : kept->reaction_events)
+          if (each.key == one.key && each.who == one.who)
+            std::erase_if(of(one.in).unread_reactions, [&](const unread_mark& mark) { return mark.event == each.event; });
       std::erase_if(kept->reaction_events, [&](const message::reaction_event& each) {
         return each.key == one.key && each.who == one.who;
       });
@@ -1621,12 +971,19 @@ class model {
   void on(const change::directory_listed&) {}  // the window's: the Explore dialog
   void on(const change::people_found&) {}  // the window's: the Start chat dialog
   void on(const change::profile_found&) {}  // the window's: a pill's picture
-  void on(const change::sessions_listed&) {}  // the window's: the account's Sessions page
-  void on(const change::sessions_refused&) {}
   void on(const change::refused&) {}  // the window's: a notice
-  void on(const change::packs_listed&) {}  // the window's: the packs' dialog
-  void on(const change::pack_saved&) {}
-  void on(const change::pack_picture_uploaded&) {}
+  void on(const change::trust_changed& one) {
+    trust_.insert_or_assign({one.by, one.user}, one.now);
+    ++trust_revision_;
+  }
+  std::uint64_t trust_revision_ = 0;
+  void on(const change::devices_listed& one) {
+    devices_.insert_or_assign({one.by, one.user}, one.devices);
+    ++trust_revision_;
+  }
+  std::map<std::pair<account_id, std::string>, std::vector<change::device_view>> devices_;
+  std::map<std::pair<account_id, std::string>, trust_t> trust_;
+  void on(const change::notice&) {}
   void on(const change::reacted_to_mine& one) {
     keep_mark(of(one.in), of(one.in).unread_reactions, {one.event, one.target, one.at});
   }
@@ -1655,18 +1012,37 @@ class model {
   }
   void on(const change::typing_changed& one) { of(one.in).typing = one.who; }
   void on(const change::history_position& one) { of(one.in).history_from = one.from; }
+  void on(const change::event_missing& one) {
+    conversation& where = of(one.in);
+    for (auto* marks : {&where.unread_mentions, &where.unread_reactions})
+      for (const unread_mark& gone : *marks)
+        if (gone.target == one.id && !std::ranges::contains(where.seen_marks, gone.event))
+          where.seen_marks.push_back(gone.event);
+    for (auto* marks : {&where.unread_mentions, &where.unread_reactions})
+      std::erase_if(*marks, [&](const unread_mark& mark) { return mark.target == one.id; });
+  }
   void on(const change::members_changed& one) {
     conversation& where = of(one.in);
+    // Who was in it and is no longer -- left, kicked, banned -- types no
+    // more: their typing, said before they went, stayed under the name.
+    std::erase_if(where.typing, [&](const std::string& who) {
+      return std::ranges::contains(where.members, who, &member::id) && !std::ranges::contains(one.members, who, &member::id);
+    });
     where.members = one.members;
     where.knocking = one.knocking;
     ++where.members_revision;
   }
-  void on(const change::session_given&) {}  // the program's to keep, not the model's
   void on(const change::avatar_loaded&) {}  // the window's to show, not the model's
+  void on(const change::protocol_state_changed&) {}  // the window's: what it offers
+  // A protocol's own change: what its changed_in(model, change) makes of the
+  // model, found by ADL -- nothing by default (the window's, then).
+  template <protocol_change Change>
+  void on(const Change& one) {
+    using model_defaults::changed_in;
+    changed_in(*this, one);
+  }
   void on(const change::media_progress&) {}  // the window's too
   void on(const change::room_created&) {}    // the program's: it shows it
-  void on(const change::devtools_text&) {}   // the window's
-  void on(const change::state_listed&) {}    // the window's
   void on(const change::room_previewed&) {}  // the window's: the room's card
   void on(const change::preview_loaded& one) { previews.insert_or_assign(one.url, one.preview); }
   void on(const change::receipts_changed& one) {
