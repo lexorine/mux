@@ -128,6 +128,61 @@ TEST(Model, ADeletedMessageGoesWhereNotKept) {
   EXPECT_EQ(kept.find(in)->timeline.size(), 1u);
 }
 
+// A removed message's content fetched back by a moderator (MSC2815): shown
+// where the message is kept, still marked removed.
+TEST(Model, AnUnredactedMessageViewed) {
+  model kept;
+  kept.apply(change::message_added{said("1", "hello")});
+  kept.show_deleted = true;
+  kept.apply(change::message_redacted{with_juliet, "1"});
+  kept.apply(change::message_unredacted{with_juliet, "1", "juliet@example.com", {}, {"hello", std::nullopt}});
+  const conversation* one = kept.find(with_juliet);
+  ASSERT_NE(one, nullptr);
+  ASSERT_EQ(one->timeline.size(), 1u);
+  EXPECT_TRUE(one->timeline[0].redacted);
+  ASSERT_TRUE(one->timeline[0].unredacted);
+  EXPECT_EQ(one->timeline[0].unredacted->plain, "hello");
+}
+
+// Where removed messages are not kept: the viewed one put back where its
+// time puts it, as removed, with its content.
+TEST(Model, AViewedMessagePutBack) {
+  model kept;
+  const auto at = [](int ms) {
+    return std::chrono::sys_time<std::chrono::milliseconds>{std::chrono::milliseconds(ms)};
+  };
+  auto first = said("1", "first");
+  first.at = at(1);
+  auto second = said("2", "second");
+  second.at = at(3);
+  kept.apply(change::message_added{first});
+  kept.apply(change::message_added{second});
+  kept.apply(change::message_redacted{with_juliet, "1"});
+  ASSERT_EQ(kept.find(with_juliet)->timeline.size(), 1u);
+  kept.apply(change::message_unredacted{with_juliet, "1", "juliet@example.com", at(1), {"first", std::nullopt}});
+  const conversation* one = kept.find(with_juliet);
+  ASSERT_NE(one, nullptr);
+  ASSERT_EQ(one->timeline.size(), 2u);
+  EXPECT_EQ(one->timeline[0].id, "1");
+  EXPECT_TRUE(one->timeline[0].redacted);
+  ASSERT_TRUE(one->timeline[0].unredacted);
+  EXPECT_EQ(one->timeline[0].unredacted->plain, "first");
+  EXPECT_EQ(one->timeline[1].id, "2");
+}
+
+// Who may view removed messages (MSC2815): their level at least the redact
+// level, as the server also asks.
+TEST(Model, MayViewRedacted) {
+  conversation chat;
+  chat.powers = {{"@mod:x.org", 50}, {"@user:x.org", 0}};
+  chat.needs.redact = 50;
+  EXPECT_TRUE(may_view_redacted(chat, "@mod:x.org"));
+  EXPECT_FALSE(may_view_redacted(chat, "@user:x.org"));
+  EXPECT_FALSE(may_view_redacted(chat, "@stranger:x.org"));
+  chat.power_default = 60;
+  EXPECT_TRUE(may_view_redacted(chat, "@stranger:x.org"));
+}
+
 TEST(Model, Acknowledged) {
   model kept;
   kept.apply(change::message_added{said("txn1", "sent from here", true)});
