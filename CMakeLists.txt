@@ -295,7 +295,8 @@ if(MUX_UI)
     # program links libc++, and every std:: symbol in it undefined at the
     # link. (The value is part of the store key too, so the library is built
     # again with it. libdatachannel's <srtp2/srtp.h> is libsrtp's own port's,
-    # in cmake/ports/.)
+    # cmake-everywhere's registry one, which lays the headers out under srtp2/
+    # for a build from source.)
     set(mux_calls_libdatachannel_flags "${CMAKE_CXX_FLAGS} -include algorithm")
     string(STRIP "${mux_calls_libdatachannel_flags}" mux_calls_libdatachannel_flags)
     cme_options(libdatachannel "CMAKE_CXX_FLAGS ${mux_calls_libdatachannel_flags}")
