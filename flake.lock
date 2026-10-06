@@ -95,17 +95,17 @@
     "loom": {
       "flake": false,
       "locked": {
-        "lastModified": 1791152599,
-        "narHash": "sha256-y9ATcOOL0vapzmTh+UBvgxcNbswxOFONeaKd1W26WIw=",
+        "lastModified": 1791239108,
+        "narHash": "sha256-kQ0LQLxkfnsuhWa4g+bIUhYcG0pZfsM3Pr6fJNBU11M=",
         "owner": "j4niwzis",
         "repo": "loom",
-        "rev": "b893a2c9ed6780484866072d8a375e54ae66b5ad",
+        "rev": "96447ca69ee375f72ecca7a71764ce2dba36d336",
         "type": "github"
       },
       "original": {
         "owner": "j4niwzis",
         "repo": "loom",
-        "rev": "b893a2c9ed6780484866072d8a375e54ae66b5ad",
+        "rev": "96447ca69ee375f72ecca7a71764ce2dba36d336",
         "type": "github"
       }
     },
@@ -144,17 +144,17 @@
     "skiff": {
       "flake": false,
       "locked": {
-        "lastModified": 1791222546,
-        "narHash": "sha256-X+q6mrGYgnBaOdquMTjcAquw+orYs9WLcWYs7GejQzM=",
+        "lastModified": 1791242745,
+        "narHash": "sha256-aP4J5zV61MLYl4f+ApSK5nOJStKpR0p5SxAkz9Mlfag=",
         "owner": "j4niwzis",
         "repo": "skiff",
-        "rev": "45144706381555614a5e5bc52c44bb90d474d24a",
+        "rev": "547091adbc241e7dd7498c0a2a86e4b39e8b0b20",
         "type": "github"
       },
       "original": {
         "owner": "j4niwzis",
         "repo": "skiff",
-        "rev": "45144706381555614a5e5bc52c44bb90d474d24a",
+        "rev": "547091adbc241e7dd7498c0a2a86e4b39e8b0b20",
         "type": "github"
       }
     },
@@ -195,17 +195,17 @@
     "tern": {
       "flake": false,
       "locked": {
-        "lastModified": 1791143583,
-        "narHash": "sha256-OB9E4A2rGv7uRSV/Lkn7svk9cN7PnYNsp0kLGPJORHU=",
+        "lastModified": 1791232092,
+        "narHash": "sha256-8MYclXyzN2Ax41Y05VLMuNoP1Xt/qCQib/r6TsSeYf8=",
         "owner": "j4niwzis",
         "repo": "tern",
-        "rev": "28a2bfad133e61d072d36bf831a231a3adf503a3",
+        "rev": "92676a097f5b1b4c3c0874b23b3e864b4d892248",
         "type": "github"
       },
       "original": {
         "owner": "j4niwzis",
         "repo": "tern",
-        "rev": "28a2bfad133e61d072d36bf831a231a3adf503a3",
+        "rev": "92676a097f5b1b4c3c0874b23b3e864b4d892248",
         "type": "github"
       }
     }

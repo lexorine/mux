@@ -14,11 +14,11 @@
     # The dependency family, at the commits mux's own CMakeLists.txt pins.
     chevron = { url = "github:j4niwzis/chevron/bbc3e0d2a2b67f1cd039c582ef131bafa2d81348"; flake = false; };
     knot = { url = "github:j4niwzis/knot/fa98812b7a63dde5d81dcd51f3ee0dceb6f98678"; flake = false; };
-    loom = { url = "github:j4niwzis/loom/b893a2c9ed6780484866072d8a375e54ae66b5ad"; flake = false; };
+    loom = { url = "github:j4niwzis/loom/96447ca69ee375f72ecca7a71764ce2dba36d336"; flake = false; };
     splice = { url = "github:j4niwzis/splice/c3dc7bcff228014456b6f4b925da01118cb9e6f1"; flake = false; };
-    tern = { url = "github:j4niwzis/tern/28a2bfad133e61d072d36bf831a231a3adf503a3"; flake = false; };
+    tern = { url = "github:j4niwzis/tern/92676a097f5b1b4c3c0874b23b3e864b4d892248"; flake = false; };
     boost-pfr = { url = "github:boostorg/pfr/401385c240027423acbb1eb6dea2abe0043db5aa"; flake = false; };
-    skiff = { url = "github:j4niwzis/skiff/45144706381555614a5e5bc52c44bb90d474d24a"; flake = false; };
+    skiff = { url = "github:j4niwzis/skiff/547091adbc241e7dd7498c0a2a86e4b39e8b0b20"; flake = false; };
     skiff-widgets = { url = "github:j4niwzis/skiff-widgets/0cdf560945dad34417600d3cfc50136dddcd7431"; flake = false; };
     # alef: the pin mux's CMakeLists.txt carries.
     alef = { url = "github:j4niwzis/alef/af2097d1ce5571fd22435540d411a774c199968e"; flake = false; };
@@ -64,9 +64,9 @@
       # minutes and then die with SIGSEGV, on both prtapc and a GitHub
       # runner. Nothing writes to the read-only source tree any more.
       cmeArchive = pkgs.fetchurl {
-        url = "https://github.com/j4niwzis/cmake-everywhere/releases/download/v0.2.32/cmake-everywhere-0.2.32.tar.gz";
-        # Same digest get_cme.cmake has compiled in for v0.2.32.
-        hash = "sha256-ehq0fN6fSx4M/Oe3maULjjvrIXj5jm7sKGR04v+Q+IQ=";
+        url = "https://github.com/j4niwzis/cmake-everywhere/releases/download/v0.2.36/cmake-everywhere-0.2.36.tar.gz";
+        # Same digest get_cme.cmake has compiled in for v0.2.36.
+        hash = "sha256-TDOkNrSXf1WCScLoeq6guHaGP6ltHc4erf/uNd0Wt2s=";
       };
 
       # cme's documented offline mechanism, in its own words: "A checkout
