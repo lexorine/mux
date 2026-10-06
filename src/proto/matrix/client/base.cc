@@ -105,6 +105,18 @@ struct settings {
   bool only_verified = false;
   // What is kept on disk is read and written through: the program's.
   mux::vault::vault* vault = nullptr;
+  // A new account, registered before anything else (POST /register, its
+  // interactive auth walked): the token a server registering by invitation
+  // asks for, and whether the user agrees to the server's terms.
+  bool create = false;
+  std::optional<std::string> registration_token;
+  bool accept_terms = false;
+  // Signed in in the browser, on the server's own page (OAuth 2.0, the
+  // authorization code with PKCE): the client the server knows mux as, and
+  // the token that renews the session, where they are kept.
+  bool oauth = false;
+  std::optional<std::string> oauth_client_id;
+  std::optional<std::string> refresh_token;
 };
 
 // A typed content as a request's body: its JSON text.

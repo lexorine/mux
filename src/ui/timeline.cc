@@ -50,6 +50,7 @@ struct menu_facts {
   bool pinned = false;  // pinned in its chat: the menu offers Unpin
   bool pinnable = false;  // in a chat where pins are kept: a Matrix room
   bool editable = false;  // one's own, as its protocol's rule for edits allows
+  bool history = false;   // edited here before: its edit history can be shown
   proto::account_ops can;  // what its account does: React, Forward, threads...
   bool deletable = false;  // one may take it away: one's own, or another's with the power to
   bool view_removed = false;  // removed, and its content may be viewed back: a moderator's menu offers it
@@ -269,6 +270,7 @@ template <class Actions>
     facts.pinnable = proto::can_pin(now, one.message_id);
     // Edited as its protocol's rule allows: any of one's own, or the last.
     facts.editable = proto::may_edit(now, *chat, one.said);
+    facts.history = !one.said.versions.empty();
     // Delete as the protocol allows it -- Matrix: as the room's power levels do.
     facts.deletable = proto::may_delete(now, *chat, one.outgoing);
     // Its removed content viewed back (MSC2815): removed, and one's level at
@@ -611,11 +613,27 @@ struct timeline_area : scene::Node {
   // its sender -- as a click: it comes here from what was pressed when that
   // did not take it, at once or, in a list that scrolls, on the release.
   [[nodiscard]] const conversation* seen_chat_of() const { return seen_model && seen_chat ? seen_model->find(*seen_chat) : nullptr; }
+  // Messages selected: while there are, a press on a message selects it or
+  // lets it go, rather than doing what a press there does.
+  std::set<std::string> selected_ids;
+  void set_selected(const std::set<std::string>& ids) {
+    selected_ids = ids;
+    for (message_bubble<Actions>& one : this->bubbles())
+      one.select(selected_ids.contains(one.message_id));
+  }
   [[nodiscard]] bool onClick(float x, float y) {
     // In the space the rows are laid out in: the list draws them scrolled.
     const struct {
       float x, y;
     } press{x, y - parts.timeline.contentsShift()};
+    if (!selected_ids.empty()) {
+      for (const message_bubble<Actions>& one : this->bubbles())
+        if (one.bounds().contains(press.x, press.y) && !one.message_id.empty()) {
+          actions->toggle_selected(one.message_id);
+          return true;
+        }
+      return false;
+    }
       for (const message_bubble<Actions>& one : this->bubbles()) {
         if (press_in_bubble(actions, one, press.x, press.y, seen_chat_of()))
           return true;

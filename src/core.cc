@@ -201,6 +201,9 @@ struct message_edited {
   // Came from the server in the clear: never applied to a message that came
   // encrypted -- the server could otherwise rewrite it (review 4, H3).
   bool plain = false;
+  // When it was edited, where the protocol says: what replaced the text
+  // before it, in the message's edit history. Now, where it does not.
+  std::chrono::sys_time<std::chrono::milliseconds> at{};
 };
 
 // A message that came encrypted and was read so.
@@ -662,7 +665,8 @@ class model {
     // A deleted one, read back from the disk: only where deleted messages
     // are kept, and something of it is left to show.
     if (one.message.redacted &&
-        (!show_deleted || (one.message.body.plain.empty() && !one.message.body.html && !one.message.attachment)))
+        (!show_deleted || one.message.outgoing ||
+         (one.message.body.plain.empty() && !one.message.body.html && !one.message.attachment)))
       return;
     conversation& where = of(one.message.in);
     if (message* kept = one.message.id.empty() ? nullptr : message_in(where, one.message.id)) {
@@ -801,6 +805,13 @@ class model {
     if (message* kept = message_in(where, one.id)) {
       if ((one.by && *one.by != kept->sender) || (one.plain && kept->encrypted))
         return;
+      // What it said until now, kept in its edit history: once for each edit
+      // that changed it -- the same edit come again changes nothing.
+      if (kept->body != one.now)
+        kept->versions.push_back(
+            {kept->body, one.at != std::chrono::sys_time<std::chrono::milliseconds>{}
+                             ? one.at
+                             : std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now())});
       kept->body = one.now;
       kept->edited = true;
     }
@@ -820,14 +831,18 @@ class model {
     }
   }
   // A message deleted: where deleted messages are kept, it stays where it
-  // was with all it said and its time, marked; else it is taken out.
+  // was with all it said and its time, marked -- someone else's; the user's
+  // own, and every one where they are not kept, is taken out.
   void on(const change::message_redacted& one) {
     conversation& where = of(one.in);
     // A mark on the event taken back -- a reaction to the user's own,
     // removed where the message it was on is not here to match it: gone too.
     for (auto* marks : {&where.unread_reactions, &where.unread_mentions})
       std::erase_if(*marks, [&](const unread_mark& mark) { return mark.event == one.id; });
-    if (show_deleted) {
+    // Kept where deleted messages are -- but never the user's own: what they
+    // deleted themselves goes, whatever is kept of others'.
+    const message* found = message_in(where, one.id);
+    if (show_deleted && !(found && found->outgoing)) {
       if (message* kept = message_in(where, one.id))
         kept->redacted = true;
       in_latest(where, one.id, [](message& kept) { kept.redacted = true; });

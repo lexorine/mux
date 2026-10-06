@@ -499,13 +499,24 @@ struct message_bubble : nodes::Stack {
                 0.0f, true}}};
     }
     void grow_tail(bool mine) {
+      const scene::Corners squared = mine ? scene::Corners{12.0f, 12.0f, 0.0f, 12.0f} : scene::Corners{12.0f, 12.0f, 12.0f, 0.0f};
+      // The bubble's own fill and its tail one shape (skiff's Tail): a
+      // see-through bubble is so once, with no seam -- a tail of its own
+      // over the bubble's edge showed both through, darker where they met.
+      if (!parts.frost) {
+        fState.apply({.corners = squared,
+                      .tail = scene::Tail{.side = mine ? scene::TailSide{scene::tail_side::right{}} : scene::TailSide{scene::tail_side::left{}}}});
+        return;
+      }
+      // Frosted, the fill is the pane's, under the bubble's own: the tail a
+      // shape of its own, in the pane's tint.
       parts.tail.emplace(tail_shape(mine), plate);
       parts.tail->apply({.place = mine ? scene::anchor::kBottomRight : scene::anchor::kBottomLeft,
                          .x = mine ? kPadX + 10.0f : -(kPadX + 10.0f),
                          .y = kPadY,
                          .width = 10.0f,
                          .height = 12.0f});
-      fState.apply({.corners = mine ? scene::Corners{12.0f, 12.0f, 0.0f, 12.0f} : scene::Corners{12.0f, 12.0f, 12.0f, 0.0f}});
+      fState.apply({.corners = squared});
       this->sync_frost();
     }
     // Before its first layout, where the time goes is guessed from the text
@@ -1044,6 +1055,19 @@ struct message_bubble : nodes::Stack {
   // A stretch of its text marked -- what a reply quoted of it -- while it
   // is flashed; let go as the flash ends.
   bool marked = false;
+  // Selected, among messages selected: the whole row washed in the accent,
+  // as the flash washes it, and held.
+  bool selected = false;
+  [[nodiscard]] skia::SkColor wash(float strength) const {
+    return (colours_->accent & 0x00FFFFFFu) | (static_cast<skia::SkColor>(std::lround(strength)) << 24);
+  }
+  void select(bool on) {
+    if (on == selected)
+      return;
+    selected = on;
+    if (!flash.moving())
+      fState.apply({.background = selected ? this->wash(56.0f) : skia::SkColor{0}});
+  }
   // The quote its text opened with, shown in its header instead: what a
   // click on the header goes to, marked.
   std::optional<std::string> header_quote;
@@ -1083,8 +1107,7 @@ struct message_bubble : nodes::Stack {
   [[nodiscard]] bool wantsTick() const { return this->settling(); }
   void update(double now_ms) {
     if (flash.step(now_ms))
-      fState.apply({.background = (colours_->accent & 0x00FFFFFFu) |
-                                  (static_cast<skia::SkColor>(std::lround(80.0f * flash.value())) << 24)});
+      fState.apply({.background = this->wash(std::max(80.0f * flash.value(), selected ? 56.0f : 0.0f))});
     if (marked && !flash.moving())
       this->unmark();
     if (appearing.step(now_ms)) {

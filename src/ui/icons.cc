@@ -43,6 +43,10 @@ struct up {};      // a chevron up
 struct down {};    // a chevron down
 struct download {};
 struct compass {};  // Explore rooms
+struct phone {};   // a handset: a call
+struct hang_up {};  // the handset turned down: a call ended
+struct microphone {};
+struct microphone_off {};  // the microphone, crossed out: muted
 struct threads {};  // a room's threads  // an arrow down onto a line: saved to the disk
 struct reply {};   // tdesktop's historyReplyIcon: an arrow turned back
 struct pencil {};  // tdesktop's historyEditIcon
@@ -58,7 +62,8 @@ using icon_t = splice::variant<icon::none, icon::person, icon::gear, icon::power
                             icon::close, icon::info, icon::people, icon::add_person, icon::bell, icon::sliders,
                             icon::leave, icon::check, icon::clip, icon::send, icon::eye, icon::dot, icon::minus,
                             icon::reply, icon::pencil, icon::search, icon::up, icon::down, icon::smile,
-                            icon::play, icon::pause, icon::download, icon::compass, icon::threads>;
+                            icon::play, icon::pause, icon::download, icon::compass, icon::threads, icon::phone,
+                            icon::hang_up, icon::microphone, icon::microphone_off>;
 
 // Each icon's shape, as data, in points from the middle of its box -- about
 // 20 across -- for nodes::Icon to draw.
@@ -68,6 +73,46 @@ namespace marks = nodes::mark;
 namespace steps = nodes::path_step;
 
 [[nodiscard]] inline IconShape shape_of(icon::none) { return {}; }
+// A handset, filled, as the call buttons of Telegram and Element draw it:
+// the earpiece at the upper left, the mouthpiece at the lower right, the
+// grip curving between them.
+[[nodiscard]] inline IconShape shape_of(icon::phone) {
+  return {{{marks::path{{steps::move{-5.38f, -1.21f},
+                         steps::cubic{-3.94f, 1.62f, -1.62f, 3.93f, 1.21f, 5.38f},
+                         steps::line{3.41f, 3.18f},
+                         steps::cubic{3.68f, 2.91f, 4.08f, 2.82f, 4.43f, 2.94f},
+                         steps::cubic{5.55f, 3.31f, 6.76f, 3.51f, 8.00f, 3.51f},
+                         steps::cubic{8.55f, 3.51f, 9.00f, 3.96f, 9.00f, 4.51f},
+                         steps::line{9.00f, 8.00f},
+                         steps::cubic{9.00f, 8.55f, 8.55f, 9.00f, 8.00f, 9.00f},
+                         steps::cubic{-1.39f, 9.00f, -9.00f, 1.39f, -9.00f, -8.00f},
+                         steps::cubic{-9.00f, -8.55f, -8.55f, -9.00f, -8.00f, -9.00f},
+                         steps::line{-4.50f, -9.00f},
+                         steps::cubic{-3.95f, -9.00f, -3.50f, -8.55f, -3.50f, -8.00f},
+                         steps::cubic{-3.50f, -6.75f, -3.30f, -5.55f, -2.93f, -4.43f},
+                         steps::cubic{-2.82f, -4.08f, -2.90f, -3.69f, -3.18f, -3.41f},
+                         steps::line{-5.38f, -1.21f},
+                         steps::close{}}},
+            0.0f, true}}};
+}
+// The handset turned down, as Element's hang-up button has it.
+[[nodiscard]] inline IconShape shape_of(icon::hang_up) {
+  IconShape out = shape_of(icon::phone{});
+  out.rotation = 135.0f;
+  return out;
+}
+// A microphone: its head, the holder round it, its stem and foot.
+[[nodiscard]] inline IconShape shape_of(icon::microphone) {
+  return {{{marks::rect{-3.2f, -9.0f, 3.2f, 3.0f, 3.2f}, 1.8f},
+           {marks::arc{-6.5f, -4.5f, 6.5f, 6.5f, 0.0f, 180.0f}, 1.8f},
+           {marks::line{0.0f, 6.5f, 0.0f, 9.0f}, 1.8f},
+           {marks::line{-3.5f, 9.0f, 3.5f, 9.0f}, 1.8f}}};
+}
+[[nodiscard]] inline IconShape shape_of(icon::microphone_off) {
+  IconShape out = shape_of(icon::microphone{});
+  out.marks.push_back({marks::line{-8.0f, -8.0f, 8.0f, 8.0f}, 1.8f});
+  return out;
+}
 [[nodiscard]] inline IconShape shape_of(icon::person) {
   return {{{marks::circle{0.0f, -4.0f, 3.8f}}, {marks::arc{-7.5f, 2.0f, 7.5f, 17.0f, 180.0f, 180.0f}}}};
 }

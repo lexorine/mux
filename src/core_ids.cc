@@ -308,6 +308,15 @@ struct message {
   mux::body body;
   std::optional<std::string> replies_to;
   bool edited = false;
+  // What it said before each edit, as mux saw the edits come: oldest
+  // first, each with when it was replaced -- its edit history, kept here
+  // whatever the server keeps, as AyuGram keeps it.
+  struct version {
+    mux::body body;
+    std::chrono::sys_time<std::chrono::milliseconds> until{};
+    friend bool operator==(const version&, const version&) = default;
+  };
+  std::vector<version> versions;
   bool redacted = false;
   // Removed, but its content fetched back by a moderator (MSC2815): what
   // the server still kept of it, shown where the message was.
