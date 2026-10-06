@@ -159,8 +159,10 @@ struct stub {
   void copy_text(std::string) {}
   void text_key(scene::Key) {}
   void start_call(mux::conversation_id) {}
+  void dismiss_call() {}
   void call_chosen() {}
   void menu_edit_history() {}
+  void close_edit_history() {}
   void menu_select() {}
   void toggle_selected(std::string) {}
   void selection_forward() {}
