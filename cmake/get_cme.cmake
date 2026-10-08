@@ -129,12 +129,26 @@ endif()
 # never reached the Android build, which failed its CMake generate step on
 # it. Kept as a note so the overlay is not written again from the older
 # registry.
-if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/ports")
-  if(NOT "${CMAKE_CURRENT_LIST_DIR}/ports" IN_LIST CME_OVERLAYS)
-    list(APPEND CME_OVERLAYS "${CMAKE_CURRENT_LIST_DIR}/ports")
+set(cme_own_ports "${CMAKE_CURRENT_LIST_DIR}/ports")
+if(EXISTS "${cme_own_ports}")
+  if(NOT "${cme_own_ports}" IN_LIST CME_OVERLAYS)
+    list(APPEND CME_OVERLAYS "${cme_own_ports}")
   endif()
-  set(CME_OVERLAYS "${CME_OVERLAYS}" CACHE STRING
-    "cmake-everywhere port overlays" FORCE)
+else()
+  # CME_OVERLAYS is a cache variable and check.yml and android.yml both
+  # restore the build directory, CMakeCache.txt in it, across runs. A cache
+  # written while this overlay was still there names it, and keeping quiet
+  # about it is not enough: cme reads the cached list and fails on a
+  # directory that is gone.
+  #
+  #   cmake-everywhere: the overlay ".../cmake/ports" is not a directory
+  #   that exists and not a URL.
+  #
+  # So the name is taken back out. The set below is outside the branch on
+  # purpose, or the removal would never be written to the cache.
+  list(REMOVE_ITEM CME_OVERLAYS "${cme_own_ports}")
 endif()
+set(CME_OVERLAYS "${CME_OVERLAYS}" CACHE STRING
+  "cmake-everywhere port overlays" FORCE)
 
 include("${CME_SOURCE_DIR}/cmake-everywhere.cmake")
