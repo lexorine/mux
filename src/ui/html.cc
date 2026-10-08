@@ -32,9 +32,15 @@ struct emphasis {};  // <i>, <em>
 struct struck {};    // <del>, <s>, <strike>
 struct code {};      // <code>
 struct quote {};     // <blockquote>
+struct underline {}; // <u>, <ins>
+// <span>: a spoiler where it says so (data-mx-spoiler), else nothing -- a
+// span all the same, so that its end closes it and not another.
+struct span {
+  bool spoiler = false;
+};
 }  // namespace text_style
-using text_style_t =
-    splice::variant<text_style::strong, text_style::emphasis, text_style::struck, text_style::code, text_style::quote>;
+using text_style_t = spl::variant<text_style::strong, text_style::emphasis, text_style::struck, text_style::code,
+                                  text_style::quote, text_style::underline, text_style::span>;
 [[nodiscard]] inline nodes::Text::Styled styled(text_style::strong, std::size_t a, std::size_t b) {
   return {.first = a, .last = b, .strong = true};
 }
@@ -49,6 +55,12 @@ using text_style_t =
 }
 [[nodiscard]] inline nodes::Text::Styled styled(text_style::quote, std::size_t a, std::size_t b) {
   return {.first = a, .last = b, .quote = true};
+}
+[[nodiscard]] inline nodes::Text::Styled styled(text_style::underline, std::size_t a, std::size_t b) {
+  return {.first = a, .last = b, .underline = true};
+}
+[[nodiscard]] inline nodes::Text::Styled styled(text_style::span one, std::size_t a, std::size_t b) {
+  return {.first = a, .last = b, .spoiler = one.spoiler};
 }
 // An HTML tag, as read: what it does to the text, told by its type. Its
 // name is looked up once, where it is read (start_of, end_of); what follows works on
@@ -80,7 +92,7 @@ struct block_open {};   // <pre>: a block of code
 struct block_close {};  // </pre>
 struct other {};  // anything else: dropped
 }  // namespace html_tag
-using html_tag_t = splice::variant<html_tag::line_break, html_tag::block_end, html_tag::list_item, html_tag::quote,
+using html_tag_t = spl::variant<html_tag::line_break, html_tag::block_end, html_tag::list_item, html_tag::quote,
                                 html_tag::reply, html_tag::link_open, html_tag::link_close, html_tag::image,
                                 html_tag::style_open, html_tag::style_close, html_tag::code_open, html_tag::block_open,
                                 html_tag::block_close, html_tag::other>;
@@ -103,6 +115,9 @@ using html_tag_t = splice::variant<html_tag::line_break, html_tag::block_end, ht
       {"del", html_tag::style_open{text_style::struck{}}},
       {"s", html_tag::style_open{text_style::struck{}}},
       {"strike", html_tag::style_open{text_style::struck{}}},
+      {"u", html_tag::style_open{text_style::underline{}}},
+      {"ins", html_tag::style_open{text_style::underline{}}},
+      {"span", html_tag::style_open{text_style::span{}}},
       {"code", html_tag::code_open{}},
       {"pre", html_tag::block_open{}},
       {"blockquote", html_tag::style_open{text_style::quote{}}},
@@ -112,7 +127,7 @@ using html_tag_t = splice::variant<html_tag::line_break, html_tag::block_end, ht
   const auto found = known.find(one.name.local);
   if (found == known.end())
     return html_tag::other{};
-  return splice::visit(splice::overloaded{[&](html_tag::link_open) -> html_tag_t {
+  return spl::visit(spl::overloaded{[&](html_tag::link_open) -> html_tag_t {
                                             const std::string href = attribute("href");
                                             return href.empty() ? html_tag_t{html_tag::other{}} : html_tag_t{html_tag::link_open{href}};
                                           },
@@ -126,6 +141,17 @@ using html_tag_t = splice::variant<html_tag::line_break, html_tag::block_end, ht
                                             const auto end = classes.find(' ', at);
                                             return html_tag::code_open{classes.substr(
                                                 at + prefix.size(), end == std::string::npos ? std::string::npos : end - at - prefix.size())};
+                                          },
+                                          // A span: a spoiler where it has data-mx-spoiler, a
+                                          // value or none.
+                                          [&](html_tag::style_open open) -> html_tag_t {
+                                            const bool spoiler = std::ranges::any_of(one.attributes, [](const chevron::attribute& each) {
+                                              return each.name.local == "data-mx-spoiler";
+                                            });
+                                            spl::visit(spl::overloaded{[&](text_style::span& span) { span.spoiler = spoiler; },
+                                                                       [](const auto&) {}},
+                                                       open.style);
+                                            return open;
                                           },
                                           [&](html_tag::image) -> html_tag_t {
                                             return html_tag::image{attribute("src"), attribute("alt")};
@@ -150,6 +176,9 @@ using html_tag_t = splice::variant<html_tag::line_break, html_tag::block_end, ht
       {"del", html_tag::style_close{text_style::struck{}}},
       {"s", html_tag::style_close{text_style::struck{}}},
       {"strike", html_tag::style_close{text_style::struck{}}},
+      {"u", html_tag::style_close{text_style::underline{}}},
+      {"ins", html_tag::style_close{text_style::underline{}}},
+      {"span", html_tag::style_close{text_style::span{}}},
       {"code", html_tag::style_close{text_style::code{}}},
       {"pre", html_tag::block_close{}},
       {"blockquote", html_tag::style_close{text_style::quote{}}},
@@ -175,7 +204,7 @@ using html_tag_t = splice::variant<html_tag::line_break, html_tag::block_end, ht
   // between two, nor one at the start. Inside code, every line kept.
   const auto in_code = [&] {
     return block_from.has_value() || std::ranges::any_of(opened, [](const auto& one) {
-      return splice::visit(splice::overloaded{[](text_style::code) { return true; }, [](const auto&) { return false; }}, one.first);
+      return spl::visit(spl::overloaded{[](text_style::code) { return true; }, [](const auto&) { return false; }}, one.first);
     });
   };
   const auto end_line = [&] {
@@ -187,7 +216,7 @@ using html_tag_t = splice::variant<html_tag::line_break, html_tag::block_end, ht
   // elements passed over -- not shown twice.
   int skipping = 0;
   const auto apply = [&](html_tag_t read) {
-      splice::visit(splice::overloaded{[&](html_tag::line_break) { out.text += '\n'; },
+      spl::visit(spl::overloaded{[&](html_tag::line_break) { out.text += '\n'; },
                             // A block of code: on lines of its own, its language as its
                             // code says, a stretch of the text marked as one.
                             [&](html_tag::block_open) {
@@ -221,7 +250,7 @@ using html_tag_t = splice::variant<html_tag::line_break, html_tag::block_end, ht
                             [&](html_tag::quote) {},
                             [&](html_tag::style_open& open) {
                               // A quote and a block of code start on a line of their own.
-                              splice::visit(splice::overloaded{[&](text_style::quote) { end_line(); },
+                              spl::visit(spl::overloaded{[&](text_style::quote) { end_line(); },
                                                     [](const auto&) {}},
                                          open.style);
                               opened.emplace_back(open.style, out.text.size());
@@ -231,12 +260,12 @@ using html_tag_t = splice::variant<html_tag::line_break, html_tag::block_end, ht
                                 if (it->first.index() == close.style.index()) {
                                   const std::size_t from = it->second;
                                   if (out.text.size() > from)
-                                    out.styles.push_back(splice::visit(
+                                    out.styles.push_back(spl::visit(
                                         [&](auto kind) { return styled(kind, from, out.text.size()); }, close.style));
                                   opened.erase(std::next(it).base());
                                   break;
                                 }
-                              splice::visit(splice::overloaded{[&](text_style::quote) { end_line(); }, [](const auto&) {}},
+                              spl::visit(spl::overloaded{[&](text_style::quote) { end_line(); }, [](const auto&) {}},
                                          close.style);
                             },
                             [&](html_tag::reply) { skipping = 1; },
@@ -288,7 +317,7 @@ using html_tag_t = splice::variant<html_tag::line_break, html_tag::block_end, ht
   reader.feed(html);
   reader.finish();
   for (auto next = reader.next(); next && *next; next = reader.next())
-    splice::visit(splice::overloaded{[&](const chevron::start_element& one) {
+    spl::visit(spl::overloaded{[&](const chevron::start_element& one) {
                                        if (skipping > 0) {
                                          ++skipping;
                                          return;
@@ -357,8 +386,37 @@ using html_tag_t = splice::variant<html_tag::line_break, html_tag::block_end, ht
 // The links of a plain text, each with its words: where link_spans_in finds
 // them, the URL its own words.
 [[nodiscard]] inline std::vector<std::pair<std::string, std::string>> links_in(std::string_view text) {
-  return link_spans_in(text) | std::views::transform([](const nodes::Text::Link& one) { return std::pair{one.target, one.target}; }) |
-         std::ranges::to<std::vector>();
+  return std::ranges::to<std::vector>(std::views::transform(link_spans_in(text), [](const nodes::Text::Link& one) { return std::pair{one.target, one.target}; }));
+}
+
+// A message's HTML as the message field edits it: its text and its runs,
+// where it has only runs -- bold, links and the like. Not where it has a
+// quote, a block of code or a list, which the field writes as marks of
+// their own, nor a mention's pill or a custom emoji, which are atoms there:
+// those are edited from the text as it is.
+[[nodiscard]] inline std::optional<std::pair<std::string, std::vector<mux::styled_run>>> editable_runs(std::string_view html) {
+  formatted read = read_html(html);
+  if (std::ranges::any_of(read.styles, [](const nodes::Text::Styled& one) { return one.quote || one.block; }) ||
+      std::ranges::any_of(read.spans, [](const nodes::Text::Link& one) { return one.pill || one.picture; }) ||
+      read.text.contains("\u2022 "))
+    return std::nullopt;
+  std::vector<mux::styled_run> runs;
+  for (const nodes::Text::Styled& one : read.styles) {
+    const auto put = [&](bool on, mux::run_style_t style) {
+      if (on)
+        runs.push_back({one.first, one.last, std::move(style)});
+    };
+    put(one.strong, run_style::bold{});
+    put(one.emphasis, run_style::italic{});
+    put(one.underline, run_style::underline{});
+    put(one.struck, run_style::strike{});
+    put(one.code, run_style::code{});
+    put(one.spoiler, run_style::spoiler{});
+  }
+  for (const nodes::Text::Link& one : read.spans)
+    if (!one.target.empty())
+      runs.push_back({one.first, one.last, run_style::link{one.target}});
+  return std::pair{std::move(read.text), std::move(runs)};
 }
 
 }  // namespace mux::ui

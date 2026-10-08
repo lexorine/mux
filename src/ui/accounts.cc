@@ -38,7 +38,7 @@ export namespace mux::ui {
   if (found == now.accounts().end())
     return {"offline", false};
   bool failed = false;
-  std::string said = splice::visit(splice::overloaded{[](const connection::offline&) { return std::string("offline"); },
+  std::string said = spl::visit(spl::overloaded{[](const connection::offline&) { return std::string("offline"); },
                                            [](const connection::connecting&) { return std::string("connecting…"); },
                                            [](const connection::online&) { return std::string("online"); },
                                            [&failed](const connection::failed& why) {
@@ -149,7 +149,7 @@ struct account_editor : nodes::Stack {
   }
 
   void say(std::string text, bool error) {
-    splice::visit([&](auto& one) { one.say(std::move(text), error); }, parts.form);
+    spl::visit([&](auto& one) { one.say(std::move(text), error); }, parts.form);
   }
 };
 
@@ -247,7 +247,7 @@ struct account_pages : nodes::Stack {
   // The rows of the chosen account's protocol.
   void show_for(const protocol_state_t& state) {
     parts.own.clear();
-    splice::visit([&](const auto& now) { this->add(proto::account_pages_of(now)); }, state);
+    spl::visit([&](const auto& now) { this->add(proto::account_pages_of(now)); }, state);
     this->invalidateLayout();
   }
   void light(const account_page_t& page) {
@@ -270,11 +270,18 @@ inline nodes::Text note_text(const palette& colours, std::string text) { return 
 template <class Actions>
 struct account_privacy : nodes::Stack {
   using receipts_row = switch_row<ask<Actions, &Actions::flip_account_receipts>>;
+  using mentions_shared_row = switch_row<ask<Actions, &Actions::flip_account_mentions_shared>>;
+  using mentions_sealed_row = switch_row<ask<Actions, &Actions::flip_account_mentions_sealed>>;
   struct parts_t {
     nodes::Text title;
     receipts_row receipts;
     typing_choice<Actions> typing;
     nodes::Text note;
+    // The mentions read, shared with the account's other sessions; sealed
+    // there -- where its protocol can (Matrix's).
+    mentions_shared_row mentions_shared;
+    mentions_sealed_row mentions_sealed;
+    nodes::Text mentions_note;
   } parts;
 
   template <class... Rest>
@@ -282,21 +289,44 @@ struct account_privacy : nodes::Stack {
   account_privacy(const palette& colours, Actions* a, bool receipts_on, std::optional<bool> typing_on, std::optional<bool> events_all = std::nullopt,
                   const std::optional<config::room_event_kinds>& kinds = std::nullopt, bool notify_on = true,
                   bool notify_sound_on = true, std::optional<bool> faces_on = std::nullopt,
-                  std::optional<std::int64_t> jump_most = std::nullopt, std::optional<bool> previews_on = std::nullopt)
+                  std::optional<std::int64_t> jump_most = std::nullopt, std::optional<bool> previews_on = std::nullopt,
+                  std::optional<config::mentions_choice> mentions = std::nullopt)
       : parts{.title = section_title(colours, "PRIVACY"),
               .receipts = receipts_row(colours, "Send read receipts", {a}),
               .typing = typing_choice<Actions>(a, colours, choice_level::account{}, typing_on),
               .note = note_text(colours, "Off, the people you talk to through this account are not told when you have read "
                                          "their messages, or that you are typing. Theirs are still shown, and receipts are "
-                                         "still kept here.")} {
+                                         "still kept here."),
+              .mentions_shared = mentions_shared_row(colours, "Sync read mentions between sessions", {a}),
+              .mentions_sealed = mentions_sealed_row(colours, "Encrypt them (with the recovery key)", {a}),
+              .mentions_note = note_text(colours, "Which mentions you have read, kept with your account on its server, so "
+                                                  "your other sessions take them as read too. Encrypted, the server cannot "
+                                                  "read them; a session gets the key when it is restored with the "
+                                                  "recovery key.")} {
     (void)events_all, (void)kinds, (void)faces_on, (void)jump_most, (void)previews_on, (void)notify_on, (void)notify_sound_on;
     this->setGap(8.0f);
     parts.note.apply({.fillX = true});
     fState.apply({.fill = true});
     parts.note.setWrapped(true);
     parts.receipts.parts.toggle.setOnNow(receipts_on);
+    parts.mentions_note.apply({.fillX = true});
+    parts.mentions_note.setWrapped(true);
+    for (scene::Node* one : std::initializer_list<scene::Node*>{&parts.mentions_shared, &parts.mentions_sealed, &parts.mentions_note})
+      one->setVisible(mentions.has_value());
+    if (mentions) {
+      parts.mentions_shared.parts.toggle.setOnNow(mentions->shared);
+      parts.mentions_sealed.parts.toggle.setOnNow(mentions->sealed);
+      this->show_sealable(mentions->shared);
+    }
   }
   void show(bool receipts_on) { parts.receipts.parts.toggle.setOn(receipts_on); }
+  void show_mentions(config::mentions_choice now) {
+    parts.mentions_shared.parts.toggle.setOn(now.shared);
+    parts.mentions_sealed.parts.toggle.setOn(now.sealed);
+    this->show_sealable(now.shared);
+  }
+  // Sealing says something only while they are shared.
+  void show_sealable(bool shared) { parts.mentions_sealed.apply({.alpha = shared ? 1.0f : 0.4f, .disabled = !shared}); }
   void say(std::string, bool) {}
 };
 
@@ -428,7 +458,7 @@ struct account_proxy : nodes::Stack {
 // The saved accounts down the side, and the chosen one's settings beside
 // them.
 template <class Actions>
-struct accounts_panel : closes_on_escape<Actions> {
+struct accounts_panel : closes_on_escape<Actions, ask<Actions, &Actions::accounts_back>> {
   static constexpr int kTab = 2;
   static constexpr float kListWidth = 280.0f;
 
@@ -536,7 +566,7 @@ struct accounts_panel : closes_on_escape<Actions> {
   // The page shown: across the pane, as tall as what it holds -- scrolled
   // from its top.
   void fit_detail() {
-    splice::visit(
+    spl::visit(
         [](auto& one) {
           one.fState.apply({.relativeSize = scene::axes::kX});
           one.fState.apply({.autoSize = scene::axes::kY});
@@ -557,7 +587,7 @@ struct accounts_panel : closes_on_escape<Actions> {
   void fade() {
     const float value = swap.value();
     const float shift = (1.0f - value) * 28.0f * swap_side;
-    splice::visit(
+    spl::visit(
         [&](auto& one) {
           one.fState.setAlpha(value);
           one.apply({.shiftX = shift});
@@ -573,7 +603,7 @@ struct accounts_panel : closes_on_escape<Actions> {
     const float shift = (1.0f - value) * 36.0f * side_from;
     const std::array<scene::Node*, 2> shown = pages.visible() ? std::array<scene::Node*, 2>{&pages, nullptr}
                                                                : std::array<scene::Node*, 2>{&list, &add};
-    for (scene::Node* each : shown | std::views::filter([](scene::Node* one) { return one != nullptr; })) {
+    for (scene::Node* each : std::views::filter(shown, [](scene::Node* one) { return one != nullptr; })) {
       each->fState.setAlpha(value);
       each->apply({.shiftX = shift});
     }
@@ -590,7 +620,7 @@ struct accounts_panel : closes_on_escape<Actions> {
   ui_needs<Actions> needs_;
   explicit accounts_panel(const ui_needs<Actions>& n) : accounts_panel(n, n.actions) {}
   accounts_panel(const ui_needs<Actions>& n, Actions* a)
-      : closes_on_escape<Actions>(a),
+      : closes_on_escape<Actions, ask<Actions, &Actions::accounts_back>>(a),
         parts{.header = header_t(*n.colours, "Accounts", {a}, {a}, true, false), .body = body_row(*n.colours, a)},
         needs_(n) {
     this->fState.apply({.fill = true});
@@ -627,18 +657,18 @@ struct accounts_panel : closes_on_escape<Actions> {
                  const std::vector<config::proxy_settings>& proxies = {}, const config::theme_t& theme = config::theme_t{}) {
     pages.light(page);
     this->show_detail(true);
-    splice::visit(
-        splice::overloaded{
+    spl::visit(
+        spl::overloaded{
             [&](account_page::connection) {
               detail.template emplace<1>(needs_, one);
-              splice::get<1>(detail).show(one, now);
+              spl::get<1>(detail).show(one, now);
             },
             [&](account_page::privacy) {
               detail.template emplace<3>(needs_, config::read_receipts_of(one), config::send_typing_of(one),
                                            config::room_events_of(one), config::room_event_kinds_of(one),
                                            config::notify_of(one).value_or(true), config::notify_sound_of(one).value_or(true),
                                            config::show_receipts_of(one), config::jump_search_of(one),
-                                           config::link_previews_of(one));
+                                           config::link_previews_of(one), config::mentions_choice_of(one));
             },
             [&](account_page::notifications) {
               detail.template emplace<6>(needs_, config::notify_choices_of(one.shared));
@@ -666,12 +696,12 @@ struct accounts_panel : closes_on_escape<Actions> {
     this->invalidateLayout();
   }
   [[nodiscard]] account_privacy<Actions>* privacy() {
-    return splice::visit(splice::overloaded{[](account_privacy<Actions>& one) { return &one; },
+    return spl::visit(spl::overloaded{[](account_privacy<Actions>& one) { return &one; },
                                  [](auto&) -> account_privacy<Actions>* { return nullptr; }},
                       detail);
   }
   [[nodiscard]] account_chats<Actions>* chats_page() {
-    return splice::visit(splice::overloaded{[](account_chats<Actions>& one) { return &one; },
+    return spl::visit(spl::overloaded{[](account_chats<Actions>& one) { return &one; },
                                             [](auto&) -> account_chats<Actions>* { return nullptr; }},
                          detail);
   }
@@ -688,14 +718,14 @@ struct accounts_panel : closes_on_escape<Actions> {
   static void tell(F&, Page&) {}
   template <class F>
   void tell_shown(F f) {
-    splice::visit([&](auto& page) { tell(f, page); }, detail);
+    spl::visit([&](auto& page) { tell(f, page); }, detail);
   }
   template <class Node>
   [[nodiscard]] Node* shown_page() {
-    return splice::visit(splice::overloaded{[](Node& one) { return &one; }, [](auto&) -> Node* { return nullptr; }}, detail);
+    return spl::visit(spl::overloaded{[](Node& one) { return &one; }, [](auto&) -> Node* { return nullptr; }}, detail);
   }
   [[nodiscard]] account_proxy<Actions>* proxy() {
-    return splice::visit(splice::overloaded{[](account_proxy<Actions>& one) { return &one; },
+    return spl::visit(spl::overloaded{[](account_proxy<Actions>& one) { return &one; },
                                  [](auto&) -> account_proxy<Actions>* { return nullptr; }},
                       detail);
   }
@@ -766,18 +796,18 @@ struct accounts_panel : closes_on_escape<Actions> {
   }
 
   [[nodiscard]] account_editor<Actions>* editor() {
-    return splice::visit(splice::overloaded{[](account_editor<Actions>& one) { return &one; },
+    return spl::visit(spl::overloaded{[](account_editor<Actions>& one) { return &one; },
                                  [](auto&) -> account_editor<Actions>* { return nullptr; }},
                       detail);
   }
   [[nodiscard]] add_account_pane<Actions>* adding() {
-    return splice::visit(splice::overloaded{[](add_account_pane<Actions>& one) { return &one; },
+    return spl::visit(spl::overloaded{[](add_account_pane<Actions>& one) { return &one; },
                                  [](auto&) -> add_account_pane<Actions>* { return nullptr; }},
                       detail);
   }
   // The account form up -- an editor's, or the pane's that adds one.
   [[nodiscard]] account_form<Actions>* form() {
-    return splice::visit(splice::overloaded{[](account_editor<Actions>& one) { return &one.parts.form; },
+    return spl::visit(spl::overloaded{[](account_editor<Actions>& one) { return &one.parts.form; },
                                  [](add_account_pane<Actions>& one) { return &one.parts.form; },
                                  [](auto&) -> account_form<Actions>* { return nullptr; }},
                       detail);

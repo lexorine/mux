@@ -88,14 +88,14 @@ void account<Sink>::catch_up(std::string room, std::string from, std::string unt
         if (one.sender == id_.address)
           continue;
         const auto at = std::chrono::sys_time<std::chrono::milliseconds>(std::chrono::milliseconds(one.origin_server_ts));
-        splice::visit(
-            splice::overloaded{
+        spl::visit(
+            spl::overloaded{
                 [&](const loom::ev::m_room_message_content_t& content) {
                   // Not an edit: it is never shown under its own id -- its
                   // mark said "Loading..." for ever, the server finding it.
                   using values = loom::ev::m_room_message_content_t::m_relates_to_t::rel_type_values;
                   const bool edit = content.m_relates_to && content.m_relates_to->rel_type &&
-                                    splice::visit(splice::overloaded{[](values::m_replace) { return true; },
+                                    spl::visit(spl::overloaded{[](values::m_replace) { return true; },
                                                                      [](const auto&) { return false; }},
                                                   *content.m_relates_to->rel_type);
                   // An edit that mentions the user: the message it edits, as
@@ -122,7 +122,7 @@ void account<Sink>::catch_up(std::string room, std::string from, std::string unt
     }
     // Into the timeline, oldest first, by their time: between what was there
     // and what the sync brought.
-    for (const auto& one : gap | std::views::reverse)
+    for (const auto& one : std::views::reverse(gap))
       this->event(in, one, placement::in_window{});
     // The reactions to what the user sent: known by who sent it, where the
     // pages or the room's last events held it.
@@ -166,7 +166,8 @@ void account<Sink>::preview_room(std::string room, std::vector<std::string> via)
                                   .topic = got->topic.value_or(""),
                                   .avatar = got->avatar_url,
                                   .members = got->num_joined_members,
-                                  .knock = splice::visit(splice::overloaded{[](mux::proto::matrix::join_rule::knock) { return true; },
+                                  .knock = spl::visit(spl::overloaded{[](mux::proto::matrix::join_rule::knock) { return true; },
+                                                                            [](const mux::proto::matrix::join_rule::knock_restricted&) { return true; },
                                                                             [](const auto&) { return false; }},
                                                          join_rule_of(got->join_rule))}});
   });
@@ -233,7 +234,7 @@ void account<Sink>::forward(std::string from, std::string event, std::string to)
     // replaced: sent on as a message of its own. Anything else is not
     // forwarded.
     std::optional<loom::ev::m_room_message_content_t> content;
-    splice::visit(splice::overloaded{[&](const loom::ev::m_room_message_content_t& one) { content = one; },
+    spl::visit(spl::overloaded{[&](const loom::ev::m_room_message_content_t& one) { content = one; },
                                      [](const auto&) {}},
                   got->content.data());
     if (!content) {
@@ -295,7 +296,7 @@ void account<Sink>::list_sessions() {
       return;
     }
     std::vector<mux::proto::matrix::session_info> out =
-        got->devices.value_or(std::vector<loom::cs::def::device_t>{}) | std::views::transform([](const loom::cs::def::device_t& one) {
+        std::ranges::to<std::vector>(std::views::transform(got->devices.value_or(std::vector<loom::cs::def::device_t>{}), [](const loom::cs::def::device_t& one) {
           return mux::proto::matrix::session_info{
               .id = one.device_id,
               .name = one.display_name.value_or(""),
@@ -303,8 +304,7 @@ void account<Sink>::list_sessions() {
               .last_seen = one.last_seen_ts ? std::optional(std::chrono::sys_time<std::chrono::milliseconds>(
                                                   std::chrono::milliseconds(*one.last_seen_ts)))
                                             : std::nullopt};
-        }) |
-        std::ranges::to<std::vector>();
+        }));
     sink_(proto::matrix::sessions_listed{id_, how_.device_id.value_or(""), std::move(out)});
     sink_(proto::matrix::security_state{id_, crypto_ && crypto_->cross_signing_keys().has_value(), crypto_ && crypto_->backup().has_value()});
   });
@@ -340,10 +340,20 @@ void account<Sink>::sign_out_sessions(std::vector<std::string> devices, std::str
       return;
     }
     const std::string given = !password.empty() ? password : how_.password;
-    if (given.empty()) {
-      sink_(proto::matrix::sessions_refused{id_, "Your password is needed to sign sessions out.", true});
+    const bool asked_elsewhere = spl::visit(
+        spl::overloaded{[](const uia_password&) { return false; },
+                        [&](const uia_browser& page) {
+                          uia_ = pending_uia{*said->session, uia_sign_out{devices}};
+                          sink_(proto::matrix::uia_in_browser{id_, page.url, "Sign sessions out"});
+                          return true;
+                        },
+                        [&](const uia_none&) {
+                          sink_(proto::matrix::sessions_refused{id_, "Your password is needed to sign sessions out.", true});
+                          return true;
+                        }},
+        this->uia_answer(*said, given));
+    if (asked_elsewhere)
       return;
-    }
     body_t::authentication_data_t auth{.type = "m.login.password", .session = *said->session};
     auth.rest = as_body(password_auth{.identifier = {.user = how_.user_id}, .password = given});
     auto done = perform(*api_, loom::cs::delete_devices{.body = body_t{.devices = devices, .auth = std::move(auth)}});
@@ -416,6 +426,20 @@ void account<Sink>::setup_cross_signing(std::string password, bool reset) {
         return;
       }
       const std::string given = !password.empty() ? password : how_.password;
+      const bool asked_elsewhere = spl::visit(
+          spl::overloaded{[](const uia_password&) { return false; },
+                          [&](const uia_browser& page) {
+                            uia_ = pending_uia{*said->session, uia_cross_signing{secrets, body, *master_pub, *self_pub}};
+                            sink_(proto::matrix::uia_in_browser{id_, page.url, "Set up cross-signing"});
+                            return true;
+                          },
+                          [&](const uia_none&) {
+                            sink_(change::refused{id_, "Cross-signing not set up: your password is needed."});
+                            return true;
+                          }},
+          this->uia_answer(*said, given));
+      if (asked_elsewhere)
+        return;
       upload::body_t::authentication_data_t auth{.type = "m.login.password", .session = *said->session};
       auth.rest = as_body(password_auth{.identifier = {.user = how_.user_id}, .password = given});
       body.auth = std::move(auth);
@@ -424,33 +448,90 @@ void account<Sink>::setup_cross_signing(std::string password, bool reset) {
         return;
       }
     }
-    crypto_->keep_cross_signing(secrets);
-    crypto_->verify_master(id_.address, *master_pub);
-    // This device, signed with the self-signing key.
-    if (const auto own = crypto_->signed_device_keys()) {
-      const auto canonical = knot::to_canonical_json(own->keys);
-      const auto by_self = canonical ? crypto::detail::ed25519_sign(secrets.self_signing, *canonical) : std::nullopt;
-      if (by_self) {
-        const crypto::signed_device_part signed_one{.algorithms = own->keys.algorithms,
-                                                    .device_id = own->keys.device_id,
-                                                    .keys = own->keys.keys,
-                                                    .user_id = own->keys.user_id,
-                                                    .signatures = {{id_.address, {{"ed25519:" + *self_pub, *by_self}}}}};
-        std::map<std::string, std::map<std::string, knot::raw>> signed_body;
-        signed_body[id_.address][own->keys.device_id] = knot::raw{knot::to_json_string(signed_one)};
-        (void)perform(*api_, loom::cs::upload_cross_signing_signatures{.body = std::move(signed_body)});
-      }
+    this->finish_cross_signing(secrets, *master_pub, *self_pub);
+  });
+}
+
+template <class Sink>
+void account<Sink>::finish_cross_signing(const crypto::cross_signing_secrets& secrets, const std::string& master_pub,
+                                         const std::string& self_pub) {
+  crypto_->keep_cross_signing(secrets);
+  crypto_->verify_master(id_.address, master_pub);
+  // This device, signed with the self-signing key.
+  if (const auto own = crypto_->signed_device_keys()) {
+    const auto canonical = knot::to_canonical_json(own->keys);
+    const auto by_self = canonical ? crypto::detail::ed25519_sign(secrets.self_signing, *canonical) : std::nullopt;
+    if (by_self) {
+      const crypto::signed_device_part signed_one{.algorithms = own->keys.algorithms,
+                                                  .device_id = own->keys.device_id,
+                                                  .keys = own->keys.keys,
+                                                  .user_id = own->keys.user_id,
+                                                  .signatures = {{id_.address, {{"ed25519:" + self_pub, *by_self}}}}};
+      std::map<std::string, std::map<std::string, knot::raw>> signed_body;
+      signed_body[id_.address][own->keys.device_id] = knot::raw{knot::to_json_string(signed_one)};
+      (void)perform(*api_, loom::cs::upload_cross_signing_signatures{.body = std::move(signed_body)});
     }
-    const auto backup_secret = this->make_backup(secrets);
-    const auto recovery = this->store_secrets(secrets, backup_secret);
-    sink_(change::notice{
-        id_, "Cross-signing set up",
-        recovery ? std::format("This account now has its own cross-signing keys. They are kept on this device, and on "
-                               "your server sealed under this recovery key -- write it down and keep it safe: with it, "
-                               "another device takes them back; without it, they are lost with this device.\n\n{}",
-                               *recovery)
-                 : std::string("This account now has its own cross-signing keys, kept on this device only: they could "
-                               "not be put in secret storage.")});
+  }
+  const auto backup_secret = this->make_backup(secrets);
+  const auto recovery = this->store_secrets(secrets, backup_secret);
+  sink_(change::notice{
+      id_, "Cross-signing set up",
+      recovery ? std::format("This account now has its own cross-signing keys. They are kept on this device, and on "
+                             "your server sealed under this recovery key -- write it down and keep it safe: with it, "
+                             "another device takes them back; without it, they are lost with this device.\n\n{}",
+                             *recovery)
+               : std::string("This account now has its own cross-signing keys, kept on this device only: they could "
+                             "not be put in secret storage.")});
+}
+
+template <class Sink>
+auto account<Sink>::uia_answer(const loom::error& said, const std::string& given) -> uia_way_t {
+  const bool by_password = !said.auth || std::ranges::any_of(said.auth->flows, [](const std::vector<loom::auth_stage_t>& flow) {
+    return flow == std::vector<loom::auth_stage_t>{loom::auth_stage::password{}};
+  });
+  if (by_password && !given.empty())
+    return uia_password{given};
+  if (!said.auth || !said.session || said.auth->flows.empty())
+    return uia_none{};
+  if (said.auth->reset_url)
+    return uia_browser{*said.auth->reset_url};
+  const auto& flow = said.auth->flows.front();
+  const auto stage = std::ranges::find_if(flow, [&](const loom::auth_stage_t& one) { return !std::ranges::contains(said.auth->completed, one); });
+  const auto home = this->homeserver();
+  if (stage == flow.end() || !home)
+    return uia_none{};
+  return uia_browser{std::format("https://{}{}{}/_matrix/client/v3/auth/{}/fallback/web?session={}", home->host,
+                                 home->port == 443 ? std::string() : std::format(":{}", home->port), home->path,
+                                 loom::name_of(*stage), *said.session)};
+}
+
+template <class Sink>
+void account<Sink>::continue_uia() {
+  this->spawn_guarded([this] {
+    if (!api_ || !uia_)
+      return;
+    pending_uia pending = std::move(*std::exchange(uia_, std::nullopt));
+    spl::visit(
+        spl::overloaded{
+            [&](uia_sign_out& one) {
+              using body_t = loom::cs::delete_devices::body_t;
+              auto done = perform(*api_, loom::cs::delete_devices{
+                                             .body = body_t{.devices = one.devices,
+                                                            .auth = body_t::authentication_data_t{.session = pending.session}}});
+              if (!done)
+                sink_(proto::matrix::sessions_refused{id_, "Could not sign out: " + done.error().said()});
+              this->list_sessions();
+            },
+            [&](uia_cross_signing& one) {
+              using upload = loom::cs::upload_cross_signing_keys;
+              one.body.auth = upload::body_t::authentication_data_t{.session = pending.session};
+              if (auto done = perform(*api_, upload{.body = one.body}); !done) {
+                sink_(change::refused{id_, "Cross-signing not set up: " + done.error().said()});
+                return;
+              }
+              this->finish_cross_signing(one.secrets, one.master_pub, one.self_pub);
+            }},
+        pending.what);
   });
 }
 
@@ -462,13 +543,14 @@ std::optional<std::string> account<Sink>::make_backup(const crypto::cross_signin
   const auto by_master = canonical ? crypto::detail::ed25519_sign(secrets.master, *canonical) : std::nullopt;
   if (!canonical || !master_pub || !by_master)
     return std::nullopt;
-  const crypto::backup_auth_data auth{
-      .public_key = public_key,
-      .signatures = {{id_.address,
-                      {{"ed25519:" + crypto_->device_id(), crypto_->sign_as_device(*canonical)}, {"ed25519:" + *master_pub, *by_master}}}}};
   using version_t = loom::cs::post_room_keys_version;
+  const version_t::body_t::auth_data_t auth{
+      .public_key = public_key,
+      .signatures = std::map<std::string, std::map<std::string, std::string>>{
+          {id_.address,
+           {{"ed25519:" + crypto_->device_id(), crypto_->sign_as_device(*canonical)}, {"ed25519:" + *master_pub, *by_master}}}}};
   auto made = perform(*api_, version_t{.body = {.algorithm = version_t::body_t::algorithm_values::m_megolm_backup_v1_curve25519_aes_sha2{},
-                                                .auth_data = knot::raw{knot::to_json_string(auth)}}});
+                                                .auth_data = auth}});
   if (!made) {
     log(id_, "key backup not made: {}", made.error().said());
     return std::nullopt;
@@ -501,7 +583,9 @@ void account<Sink>::upload_backup() {
         one.session_id, loom::cs::def::key_backup_data_t{.first_message_index = one.first_index,
                                                           .forwarded_count = 0,
                                                           .is_verified = one.verified,
-                                                          .session_data = knot::raw{knot::to_json_string(*sealed)}});
+                                                          .session_data = {.ephemeral = sealed->ephemeral,
+                                                                           .ciphertext = sealed->ciphertext,
+                                                                           .mac = sealed->mac}});
     ids.push_back(one.session_id);
   }
   if (auto done = perform(*api_, ask); !done) {
@@ -516,10 +600,10 @@ std::size_t account<Sink>::restore_backup(const std::string& secret) {
   auto current = perform(*api_, loom::cs::get_room_keys_version_current{});
   if (!current)
     return 0;
-  const auto auth = knot::try_read<crypto::backup_auth_data>(current->auth_data.text);
   // The backup's key is the one secret storage gave: else it is not this
   // account's backup to read, nor to write to.
-  if (!auth || crypto::backup_public_of(secret) != auth->public_key)
+  const auto& public_key = current->auth_data.public_key;
+  if (!public_key || crypto::backup_public_of(secret) != *public_key)
     return 0;
   auto keys = perform(*api_, loom::cs::get_room_keys{.version = current->version});
   if (!keys)
@@ -527,8 +611,12 @@ std::size_t account<Sink>::restore_backup(const std::string& secret) {
   std::vector<crypto::exported_session> sessions;
   for (const auto& [room, backup] : keys->rooms)
     for (const auto& [id, data] : backup.sessions) {
-      const auto sealed = knot::try_read<crypto::backup_session_data>(data.session_data.text);
-      const auto plain = sealed ? crypto::open_backup(secret, *sealed) : std::nullopt;
+      const auto& said = data.session_data;
+      const auto plain = said.ephemeral && said.ciphertext && said.mac
+                             ? crypto::open_backup(secret, crypto::backup_session_data{.ephemeral = *said.ephemeral,
+                                                                                         .ciphertext = *said.ciphertext,
+                                                                                         .mac = *said.mac})
+                             : std::nullopt;
       if (!plain)
         continue;
       sessions.push_back(crypto::exported_session{.room_id = room,
@@ -543,6 +631,28 @@ std::size_t account<Sink>::restore_backup(const std::string& secret) {
   return taken;
 }
 
+// The key read mentions are sealed under, in Secret Storage under its storage
+// key: taken where it is there, put there (this device's, or a new one) where not.
+template <class Sink>
+template <class Key>
+void account<Sink>::mentions_key_in_storage(const Key& storage, const std::string& storage_id) {
+  const std::string name("net.mux.mentions_key");
+  if (const auto stored = perform(*api_, account_data_as<crypto::stored_secret>{{.user_id = id_.address, .type = name}})) {
+    if (const auto sealed = stored->encrypted.find(storage_id); sealed != stored->encrypted.end())
+      if (const auto opened = crypto::detail::open_secret(storage, name, sealed->second))
+        if (auto bytes = crypto::from_base64(*opened); bytes && bytes->size() == 32) {
+          this->keep_mentions_key(std::move(*bytes));
+          return;
+        }
+  }
+  // None there yet: this device's own, or a new one, put there.
+  std::vector<std::uint8_t> key = this->mentions_key() ? *this->mentions_key() : crypto::random_bytes(32);
+  const crypto::stored_secret sealed{
+      .encrypted = {{storage_id, crypto::detail::seal_secret(storage, name, spl::bytes::base64_text(key))}}};
+  if (perform(*api_, loom::cs::set_account_data{.user_id = id_.address, .type = name,
+                                                 .body = knot::raw{knot::to_json_string(sealed)}}))
+    this->keep_mentions_key(std::move(key));
+}
 template <class Sink>
 std::optional<std::string> account<Sink>::store_secrets(const crypto::cross_signing_secrets& secrets,
                                                         const std::optional<std::string>& backup_secret) {
@@ -561,6 +671,8 @@ std::optional<std::string> account<Sink>::store_secrets(const crypto::cross_sign
                    put("m.cross_signing.user_signing", sealed("m.cross_signing.user_signing", secrets.user_signing)) &&
                    (!backup_secret || put("m.megolm_backup.v1", sealed("m.megolm_backup.v1", *backup_secret))) &&
                    put("m.secret_storage.default_key", crypto::default_storage_key{made.id});
+  if (all)
+    this->mentions_key_in_storage(made.key, made.id);
   return all ? std::optional<std::string>(made.recovery) : std::nullopt;
 }
 
@@ -573,18 +685,17 @@ void account<Sink>::restore_cross_signing(std::string recovery) {
     const auto key = crypto::key_of_recovery(recovery);
     if (!key)
       return refused("that is not a recovery key (a letter wrong, or one missing).");
-    const auto get = [&](std::string type) { return perform(*api_, loom::cs::get_account_data{.user_id = id_.address, .type = std::move(type)}); };
-    const auto chosen = get("m.secret_storage.default_key");
-    const auto id = read_answer<crypto::default_storage_key>(chosen);
+    const auto get = [&]<class Content>(std::string type) {
+      return perform(*api_, account_data_as<Content>{{.user_id = id_.address, .type = std::move(type)}});
+    };
+    const auto id = get.template operator()<crypto::default_storage_key>("m.secret_storage.default_key");
     if (!id)
       return refused("this account keeps no secrets on its server.");
-    const auto info_raw = get("m.secret_storage.key." + id->key);
-    const auto info = read_answer<crypto::storage_key_info>(info_raw);
+    const auto info = get.template operator()<crypto::storage_key_info>("m.secret_storage.key." + id->key);
     if (!info || !crypto::is_storage_key(*key, *info))
       return refused("that is not this account's recovery key.");
     const auto secret = [&](std::string name) -> std::optional<std::string> {
-      const auto raw = get(name);
-      const auto stored = read_answer<crypto::stored_secret>(raw);
+      const auto stored = get.template operator()<crypto::stored_secret>(name);
       if (!stored)
         return std::nullopt;
       const auto sealed = stored->encrypted.find(id->key);
@@ -596,6 +707,8 @@ void account<Sink>::restore_cross_signing(std::string recovery) {
     if (!master || !self || !users)
       return refused("the keys kept there could not be opened.");
     const crypto::cross_signing_secrets secrets{.master = *master, .self_signing = *self, .user_signing = *users};
+    // The key read mentions are sealed under, as Secret Storage keeps it.
+    this->mentions_key_in_storage(*key, id->key);
     // Taken only where they are the keys the server lists for this user.
     auto got = this->keys_of(id_.address);
     const auto listed = got ? crypto::master_of(*got, id_.address) : std::nullopt;

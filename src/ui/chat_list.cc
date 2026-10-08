@@ -181,6 +181,11 @@ struct conversation_row : nodes::Stack {
   } parts;
 
   static constexpr float kHeight = 62.0f;
+  // The height its row will have, without making it: a forum's, with a
+  // message, has the topic on a line of its own.
+  [[nodiscard]] static float height_of(const conversation& one) {
+    return one.forum_topic && !one.timeline.empty() ? kHeight + 20.0f : kHeight;
+  }
   void place_view(std::nullopt_t) {}
   template <class View>
   void place_view(std::optional<View> made) {
@@ -223,7 +228,7 @@ struct conversation_row : nodes::Stack {
     std::ranges::for_each(shown.badges, [&](const proto::part::badge& one) {
       parts.lines.parts.bottom.parts.marks.emplace_back(colours, one).apply({.alignSelf = scene::align::kMiddle});
     });
-    splice::visit(
+    spl::visit(
         [&](const auto& now) {
           using row_view_defaults::make_row_view;
           this->place_view(make_row_view(now, one, type_tag<Actions>{}));

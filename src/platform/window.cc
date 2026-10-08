@@ -18,6 +18,7 @@ import splice;
 import skia;
 import skiff.paint;
 import skiff.scene;
+import mux.platform.pointing;
 import mux.platform.events;
 import mux.platform.fonts;
 import mux.platform.window_setup;
@@ -58,6 +59,7 @@ inline double now_ms() {
 //   woken()         another thread woke the window
 //   files_given(paths, dropped)  files chosen in the dialog, or dropped
 //   save_path_chosen(path)  where to save a file, chosen in the dialog
+//   dialog_failed(why)  the system's file dialog could not be shown
 //   open_link(url)  a link pressed in a text
 //   focus_changed(on)  the window given the keyboard's focus, or losing it
 //   take_toasts()   the notifications to show in windows of their own
@@ -74,7 +76,7 @@ struct x11 {};
 struct wayland {};
 struct other {};
 }  // namespace video_driver
-using video_driver_t = splice::variant<video_driver::x11, video_driver::wayland, video_driver::other>;
+using video_driver_t = spl::variant<video_driver::x11, video_driver::wayland, video_driver::other>;
 inline video_driver_t video_driver_of(const char* name) {
   const std::string_view said = name ? name : "";
   if (said == "x11")
@@ -86,6 +88,8 @@ inline video_driver_t video_driver_of(const char* name) {
 
 template <class App>
 int run(App& app, const options& how, const events::kinds& kinds) {
+  // Android's Back comes to the app as a key, instead of Android closing the app.
+  sdl::SDL_SetHint(sdl::kHintTrapBackButton, "1");
   if (!sdl::SDL_Init(sdl::kInitVideo | sdl::kInitEvents)) {
     std::println(std::cerr, "[mux] no window: {}", sdl::SDL_GetError());
     return 1;
@@ -96,7 +100,7 @@ int run(App& app, const options& how, const events::kinds& kinds) {
   // GPU, the whole window drawn again at each frame. Not on Wayland, which
   // has no such framebuffer in SDL: there the texture is the only way.
   if (how.software)
-    splice::visit(splice::overloaded{[](video_driver::x11) { sdl::SDL_SetHint(sdl::kHintFramebufferAcceleration, "0"); },
+    spl::visit(spl::overloaded{[](video_driver::x11) { sdl::SDL_SetHint(sdl::kHintFramebufferAcceleration, "0"); },
                                      [](const auto&) {}},
                   video_driver_of(sdl::SDL_GetCurrentVideoDriver()));
   // What every Text draws with: this run's.
@@ -136,7 +140,7 @@ int run(App& app, const options& how, const events::kinds& kinds) {
   {
     int touch_screens = 0;
     sdl::SDL_free(sdl::SDL_GetTouchDevices(&touch_screens));  // the list SDL made, given back: only its count is read
-    app.shared.by_touch = touch_screens > 0 && !sdl::SDL_HasMouse();
+    app.shared.by_touch = mux::platform::pointing::touch_first() || (touch_screens > 0 && !sdl::SDL_HasMouse());
   }
   int result = 0;
   {
@@ -150,14 +154,23 @@ int run(App& app, const options& how, const events::kinds& kinds) {
     const std::array layers{skiff::scene::InputRouter::Layer{scene.handle(), false}};
     router.setLayers(layers);
     // Kept here for as long as the hook is set: the hook keeps a pointer.
-    // The system's clipboard, for pasting: read now, and again whenever it
-    // changes.
-    const auto read_clipboard = [] {
+    // The system's clipboard, for pasting: read only as something is pasted
+    // -- Ctrl+V, the text menu's Paste -- and only where it
+    // changed since. Read at the start, at every change and whenever the
+    // window came back, it was read without the user pasting anything, and
+    // a phone said so ("mux pasted from your clipboard") at every start.
+    bool clipboard_stale = true;
+    const auto fresh_clipboard = [&clipboard_stale] {
+      if (!std::exchange(clipboard_stale, false))
+        return;
       char* text = sdl::SDL_GetClipboardText();
       skiff::scene::clipboardContents() = text ? text : "";
       sdl::SDL_free(text);
     };
-    read_clipboard();
+    // Whether a key pastes: Ctrl+V, with Shift too.
+    const auto pastes = [](const skiff::scene::key::down& press) {
+      return press.key == skiff::scene::keys::kV && press.modifiers.template has<skiff::scene::modifier::control>();
+    };
     bool typing = false;  // the text input, as last started or stopped
 
     bool running = true;
@@ -193,6 +206,8 @@ int run(App& app, const options& how, const events::kinds& kinds) {
     };
     std::optional<held_t> held;
     constexpr double kHoldMs = 500.0;
+    // How much taller the window grows as an on-screen keyboard goes away.
+    constexpr float kKeyboardGone = 80.0f;
     constexpr float kHoldSlop = 8.0f;
     float last_width = 0.0f, last_height = 0.0f;
     // Fingers on the screen, where they are in the scene's points: two of
@@ -252,10 +267,10 @@ int run(App& app, const options& how, const events::kinds& kinds) {
           give_motion();
         switch (event.type) {
           case sdl::SDL_EVENT_CLIPBOARD_UPDATE:
-            read_clipboard();
+            clipboard_stale = true;
             break;
           case sdl::SDL_EVENT_WINDOW_FOCUS_GAINED:
-            read_clipboard();
+            clipboard_stale = true;
             app.focus_changed(true);
             break;
           case sdl::SDL_EVENT_WINDOW_FOCUS_LOST:
@@ -388,9 +403,12 @@ int run(App& app, const options& how, const events::kinds& kinds) {
                 break;
               }
             }
-            if (event.type == sdl::SDL_EVENT_KEY_DOWN)
-              router.key(skiff::scene::key::down{key, held, event.key.repeat});
-            else
+            if (event.type == sdl::SDL_EVENT_KEY_DOWN) {
+              const skiff::scene::key::down press{key, held, event.key.repeat};
+              if (pastes(press))
+                fresh_clipboard();
+              router.key(press);
+            } else
               router.key(skiff::scene::key::up{key, held});
             break;
           }
@@ -408,9 +426,12 @@ int run(App& app, const options& how, const events::kinds& kinds) {
           default:
             if (event.type == kinds.wake)
               app.woken();
-            else if (event.type == kinds.files)
+            else if (event.type == kinds.files) {
               std::ranges::for_each(app.system_dialogs.take_files(),
                                     [&](std::vector<std::string>& paths) { app.files_given(std::move(paths), false); });
+              std::ranges::for_each(app.system_dialogs.take_failures(),
+                                    [&](std::string& why) { app.dialog_failed(std::move(why)); });
+            }
             else if (event.type == kinds.save)
               std::ranges::for_each(app.system_dialogs.take_save_paths(),
                                     [&](std::string& path) { app.save_path_chosen(std::move(path)); });
@@ -441,6 +462,19 @@ int run(App& app, const options& how, const events::kinds& kinds) {
       sdl::SDL_GetWindowSizeInPixels(window, &pixel_width, &pixel_height);
       const float width = static_cast<float>(pixel_width) / scale;
       const float height = static_cast<float>(pixel_height) / scale;
+      // The on-screen keyboard put away by the user, the field still
+      // focused: the field let go of, and with it the text input. Told where
+      // SDL stopped the text input itself (Android's Back over the
+      // keyboard), or by the window grown back as tall as before with its
+      // width the same (postmarketOS: its keyboard tells the program
+      // nothing). Left focused, the field's place was told to the system
+      // again as the window grew, and that brought the keyboard straight back
+      // up.
+      if (typing && (!sdl::SDL_TextInputActive(window) ||
+                     (app.shared.by_touch && width == last_width && height > last_height + kKeyboardGone))) {
+        scene.clearFocus();
+        redraw = true;
+      }
       last_width = width;
       last_height = height;
       // What the scene left for the host: the text input started or stopped
@@ -491,6 +525,8 @@ int run(App& app, const options& how, const events::kinds& kinds) {
       // Keys the program's own controls stand for -- a text menu's Paste is
       // Ctrl+V -- given to what has the focus, down and up, before the frame.
       for (const skiff::scene::key::down& press : std::exchange(skiff::scene::hostWork().keys, {})) {
+        if (pastes(press))
+          fresh_clipboard();
         router.key(press);
         router.key(skiff::scene::key::up{press.key, press.modifiers});
       }

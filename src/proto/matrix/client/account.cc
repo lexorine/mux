@@ -9,6 +9,7 @@ import loom.api;
 import loom.ev;
 import loom.state;
 import loom.cs.joining;
+import loom.cs.cross_signing;
 import loom.cs.keys;
 import loom.cs.to_device;
 import loom.cs.sliding_sync;
@@ -38,6 +39,23 @@ export import :names;
 
 export namespace mux::proto::matrix::client {
 
+// What mux reads of the secrets asked of it, by their names: read once,
+// where the name comes in, into a kind -- its own, or any other, passed over.
+namespace own_secret {
+struct mentions_key {};  // net.mux.mentions_key: what read mentions are sealed under
+struct other {};
+}  // namespace own_secret
+using own_secret_t = spl::variant<own_secret::mentions_key, own_secret::other>;
+[[nodiscard]] inline own_secret_t own_secret_of(std::string_view name) {
+  struct named {
+    std::string_view name;
+    own_secret_t kind;
+  };
+  static const std::array<named, 1> kKinds{{{"net.mux.mentions_key", own_secret::mentions_key{}}}};
+  const auto found = std::ranges::find(kKinds, name, &named::name);
+  return found != kKinds.end() ? found->kind : own_secret_t{own_secret::other{}};
+}
+
 struct failure {
   std::optional<loom::error> server;
   std::string network;
@@ -63,6 +81,11 @@ struct plaintext_refused : std::runtime_error {
   ~plaintext_refused() override;
 };
 plaintext_refused::~plaintext_refused() = default;
+
+// Whether an event placed so is news: come at the end, not from history.
+[[nodiscard]] bool placed_as_news(const placement_t& where) {
+  return spl::visit(spl::overloaded{[](placement::at_end) { return true; }, [](const auto&) { return false; }}, where);
+}
 
 template <class Sink>
 class account {
@@ -125,7 +148,7 @@ class account {
   void fetch_preview(std::string url);
   // A server's public directory searched -- the account's own where none is
   // named -- for what matches, all of it where nothing is asked.
-  void search_directory(std::string server, std::string query);
+  void search_directory(std::string server, std::string query, std::optional<std::string> since = std::nullopt);
   // The room being read, for the sliding sync to follow apart; none, none.
   void follow(std::optional<std::string> room) { followed_room_ = std::move(room); }
   // What a space holds -- its rooms and spaces, joined or not -- as its
@@ -134,7 +157,7 @@ class account {
   // A room made, as Element's Create room makes one: named, about
   // something, public -- with an address -- or private.
   void create_room(std::string name, std::string topic, bool open, std::string alias, bool federate = true,
-                   bool encrypted = false);
+                   bool encrypted = false, mux::room_place place = {});
   // A picture's caption edited: the picture kept, its caption the text.
   void edit_caption(std::string room, std::string event, std::string caption, mux::attachment picture);
   // Packs of custom emoji and stickers (MSC2545): a room's, or one's own
@@ -159,6 +182,11 @@ class account {
   // emoji here.
   void tell_devices(std::string user);
   void set_only_verified(bool on);
+  // Read mentions shared with this account's other sessions -- room account
+  // data, net.mux.mentions_read -- sealed or in the clear, as set.
+  void set_mentions_sharing(bool shared, bool sealed);
+  // A room's mentions seen here: shared where some are news to the server.
+  void share_marks_seen(std::string room, std::vector<std::string> seen);
   // A person's reset identity accepted: Element's "Withdraw verification".
   void accept_identity(std::string user);
   // Element's Secure Backup: the key backup made anew (the old one deleted,
@@ -232,6 +260,41 @@ class account {
   // A key backup made on the server, its auth data signed by this device and
   // the master key: its private key, for secret storage.
   std::optional<std::string> make_backup(const crypto::cross_signing_secrets& secrets);
+  // What follows cross-signing keys uploaded: kept, this device signed, the
+  // backup and secret storage made, the recovery key said.
+  void finish_cross_signing(const crypto::cross_signing_secrets& secrets, const std::string& master_pub,
+                            const std::string& self_pub);
+  // How a 401's interactive auth is answered: with the password, where a
+  // flow of it is the password alone and there is one; else on a page in
+  // the browser -- an OIDC server's page for a cross-signing reset where it
+  // names one (MSC4312), else the spec's fallback page for the first stage
+  // of the first flow not done; else not at all.
+  struct uia_password {
+    std::string given;
+  };
+  struct uia_browser {
+    std::string url;
+  };
+  struct uia_none {};
+  using uia_way_t = spl::variant<uia_password, uia_browser, uia_none>;
+  uia_way_t uia_answer(const loom::error& said, const std::string& given);
+  // What was asked while its auth is done in the browser: done again with
+  // the session once Continue is pressed -- the same request, as the
+  // server's session is for it.
+  struct uia_sign_out {
+    std::vector<std::string> devices;
+  };
+  struct uia_cross_signing {
+    crypto::cross_signing_secrets secrets;
+    loom::cs::upload_cross_signing_keys::body_t body;
+    std::string master_pub;
+    std::string self_pub;
+  };
+  struct pending_uia {
+    std::string session;
+    spl::variant<uia_sign_out, uia_cross_signing> what;
+  };
+  std::optional<pending_uia> uia_;
   // The room keys not in the backup yet, put in it: after each sync.
   void upload_backup();
   // The backup read with its private key, from secret storage: how many
@@ -249,6 +312,10 @@ class account {
   void import_room_keys(std::string path, std::string passphrase);
   void rename_session(std::string device, std::string name);
   void sign_out_sessions(std::vector<std::string> devices, std::string password);
+  // A step of interactive auth done in the browser: what it was for, done
+  // again with its session; or let go.
+  void continue_uia();
+  void cancel_uia() { uia_.reset(); }
   // The developer tools, as Element's: an event as the server has it; the
   // room's state, every event of it; and an event of any type sent.
   void view_source(std::string room, std::string event);
@@ -283,7 +350,7 @@ class account {
                  std::optional<video_look> video = std::nullopt);
 
   // A message of one's own edited (m.replace): the new text in its place.
-  void edit(std::string room, std::string event, std::string text);
+  void edit(std::string room, std::string event, std::string text, std::vector<styled_run> styles = {});
   // A message removed (redacted).
   void remove(std::string room, std::string event);
 
@@ -301,7 +368,7 @@ class account {
   // conversation at once, under its transaction id; the server's answer
   // gives it its event id, and the echo in the next sync is the same message.
   void send(std::string room, std::string body, std::optional<std::string> reply_to = std::nullopt,
-            std::vector<mention> mentions = {});
+            std::vector<mention> mentions = {}, std::vector<styled_run> styles = {});
 
   // A call's signalling sent to its room: an m.call.* event, version 1, from
   // this session's party -- encrypted where the room is, as a message is.
@@ -322,8 +389,10 @@ class account {
   }
   // A state event of a room set, its content given; and what was asked of a
   // room, logged where it failed.
-  void set_room_state(const std::string& room, std::string type, const auto& content);
-  void send_text(const conversation_id& in, const std::string& room, const std::string& txn, knot::raw body);
+  void set_room_state(const std::string& room, std::string type, const auto& content, std::string key = {});
+  [[nodiscard]] std::string server_of(const std::string& room) const;
+  void send_text(const conversation_id& in, const std::string& room, const std::string& txn, knot::raw body,
+                 std::optional<knot::raw> relates_to);
   void told_failing(const std::string& room, const char* what, const auto& done) {
     if (!done)
       log(id_, "could not {} in {}: {}", what, room, done.error().said());
@@ -388,7 +457,7 @@ class account {
   // A message, added: one that came in the clear, live, into a room known
   // to be encrypted, says so whatever its time says (review 6).
   void added(message made, placement_t where, bool sealed) {
-    const bool live = splice::visit(splice::overloaded{[](placement::at_end) { return true; }, [](const auto&) { return false; }}, where);
+    const bool live = spl::visit(spl::overloaded{[](placement::at_end) { return true; }, [](const auto&) { return false; }}, where);
     made.came_plain = !sealed && live && encrypted_rooms_.contains(made.in.id);
     sink_(change::message_added{std::move(made), where});
   }
@@ -396,6 +465,26 @@ class account {
   std::set<std::string, std::less<>> identity_changed_;
   [[nodiscard]] std::filesystem::path encrypted_rooms_file() const;
   void load_encrypted();
+  // The mentions read, as the server last said of each room: nothing is
+  // sent that it has already, so two sessions never answer each other.
+  std::map<std::string, std::set<std::string>, std::less<>> mentions_remote_;
+  // The key read mentions are sealed under: kept on this device, sealed, and
+  // in Secret Storage, from which a session restored with the recovery key
+  // takes it.
+  std::optional<std::vector<std::uint8_t>> mentions_key_;
+  bool mentions_key_read_ = false;
+  bool mentions_key_missing_told_ = false;
+  // The mentions key asked of another session of this account, by request.
+  std::set<std::string, std::less<>> mentions_key_asked_;
+  [[nodiscard]] std::filesystem::path mentions_key_file() const;
+  [[nodiscard]] const std::optional<std::vector<std::uint8_t>>& mentions_key();
+  void keep_mentions_key(std::vector<std::uint8_t> key);
+  // A room's net.mux.mentions_read, as knot read it: its mentions seen.
+  void mentions_from(const conversation_id& in, const loom::ev::net_mux_mentions_read_content_t& content);
+  // The key in Secret Storage, under the storage key there: taken where it
+  // is, put there where it is not.
+  template <class Key>
+  void mentions_key_in_storage(const Key& storage, const std::string& storage_id);
   // What was to go in the clear into an encrypted room (#12169, review 4,
   // H2): thrown where it would leave, before any of it does -- the text, the
   // file's bytes -- and caught where its fiber began: the message marked not
@@ -411,9 +500,9 @@ class account {
   // A room event sent: encrypted where the room is -- or, where it cannot
   // be, not sent at all.
   template <class Ask>
-  auto send_room_event(Ask ask) {
+  auto send_room_event(Ask ask, std::optional<knot::raw> relates_to = std::nullopt) {
     if (this->encrypted_room(ask.room_id))
-      return this->send_encrypted(std::move(ask));
+      return this->send_encrypted(std::move(ask), std::move(relates_to));
     return perform(*api_, ask);
   }
   // Into an encrypted room: the room's key given to its readers' devices
@@ -421,7 +510,7 @@ class account {
   // under the same transaction. Anything that fails on the way refuses it,
   // with what failed: it never goes in the clear.
   template <class Ask>
-  auto send_encrypted(Ask ask) {
+  auto send_encrypted(Ask ask, std::optional<knot::raw> relates_to) {
     const conversation_id in{id_, ask.room_id};
     constexpr std::string_view kNot = "Not sent: it could not be encrypted -- ";
     if (!crypto_)
@@ -429,13 +518,12 @@ class account {
     try {
       // Shared, then sealed with that very session: where another send
       // rotated it in between, shared and sealed again.
-      const auto relation = knot::try_read<crypto::relation_part>(ask.body.text);
       std::optional<crypto::megolm_content> sealed;
       for (int attempt = 0; attempt < 3 && !sealed; ++attempt) {
         const auto session = this->share_room_key(ask.room_id);
         if (!session)
           throw plaintext_refused(in, ask.txn_id, std::string(kNot) + "the room's key could not be given to its members.");
-        sealed = crypto_->encrypt(ask.room_id, *session, ask.event_type, ask.body, relation ? relation->relates_to : std::nullopt);
+        sealed = crypto_->encrypt(ask.room_id, *session, ask.event_type, ask.body, relates_to);
       }
       if (!sealed)
         throw plaintext_refused(in, ask.txn_id, std::string(kNot) + "the room's session failed.");
@@ -513,7 +601,8 @@ class account {
   }
   template <class Content>
   void send_step(const crypto::sas_state& state, std::string type, const Content& content) {
-    const knot::raw body{knot::to_json_string(this->stamped(state, content))};
+    const auto step = this->stamped(state, content);
+    const knot::raw body{knot::to_json_string(step)};
     if (!state.room) {
       (void)this->send_plain(std::move(type), state.their_user, state.their_device.empty() ? std::string("*") : state.their_device,
                              body);
@@ -521,7 +610,8 @@ class account {
     }
     try {
       (void)this->send_room_event(
-          loom::cs::send_message{.room_id = *state.room, .event_type = std::move(type), .txn_id = this->transaction(), .body = body});
+          loom::cs::send_message{.room_id = *state.room, .event_type = std::move(type), .txn_id = this->transaction(), .body = body},
+          relates_to_of(step));
     } catch (const plaintext_refused& refused) {
       log(id_, "verification step not sent: {}", refused.what());
     }
@@ -530,8 +620,7 @@ class account {
   // steps, by their events -- live ones only, and never this side's own.
   void verification_request_in_room(const conversation_id& in, const loom::ev::timeline_event& one,
                                      const crypto::room_request_fields& fields);
-  [[nodiscard]] bool verification_in_room(const conversation_id& in, const loom::ev::timeline_event& one, const knot::raw& raw,
-                                          placement_t where);
+  [[nodiscard]] bool verification_in_room(const conversation_id& in, const loom::ev::timeline_event& one, placement_t where);
   // While a decrypted event is read: the event its cleartext relation
   // refers to, where its content does not say.
   std::optional<std::string> outer_reference_;
@@ -615,6 +704,16 @@ class account {
   // rest where it is history paged back to.
   // `sealed`: it came end-to-end encrypted, and was read here -- an edit
   // so is one an encrypted message may take (review 4, H3).
+  // What a sync tells is history, not news, while this is set: the first
+  // sync of a login, and the sync kept on disk told again at a start. Its
+  // events are shown, but mark no mention or reaction as unseen and ring
+  // no call -- a login showed every old mention as new.
+  bool telling_history_ = false;
+  // Whether an event placed so is news: come at the end, not from history.
+  // (Whether an event so placed is news is placed_as_news(), a plain
+  // function, with telling_history_: an inline member of this template
+  // called where the account is explicitly instantiated was not emitted
+  // anywhere, and the link failed on it.)
   void event(const conversation_id& in, const loom::ev::timeline_event& one, placement_t where = placement::at_end{},
              bool sealed = false);
 

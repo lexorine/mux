@@ -110,6 +110,14 @@ struct app : kept_settings {
   }
   // Where Save As… was asked to put what it saves: to the pictures part.
   void save_path_chosen(std::string path) { pictures.save_to(std::move(path)); }
+  // The file dialog not shown -- on Linux, SDL asks xdg-desktop-portal for
+  // it, else zenity: with neither, the paperclip did nothing at all.
+  void dialog_failed(std::string why) {
+    root().show_message("The file dialog could not be opened",
+                        "The system gave no file dialog (" + why +
+                            "). On Linux it comes from xdg-desktop-portal with a backend (-gtk, -gnome, -kde or -wlr), or "
+                            "from zenity: install one of them. Meanwhile files can be dropped on the window, and pictures pasted.");
+  }
   // What the parts share, pointed at the program's own: once the program
   // is given its model, network and mailbox.
   void wire();
@@ -220,9 +228,7 @@ struct app : kept_settings {
   void show_chat_choices();
   // Every chat of every account.
   [[nodiscard]] auto all_chats() const {
-    return model->accounts() | std::views::values |
-           std::views::transform([](const auto& account) -> const auto& { return account.conversations; }) | std::views::join |
-           std::views::values;
+    return std::views::values(std::views::join(std::views::transform(std::views::values(model->accounts()), [](const auto& account) -> const auto& { return account.conversations; })));
   }
   // What is kept, applied: the settings read at the start -- or, where local
   // data is encrypted, once it is unlocked -- and the accounts started.
@@ -241,6 +247,9 @@ struct app : kept_settings {
 
   // The chosen chat left: a Matrix room here; XMPP rooms are not there yet.
   void apply(const request::leave_chat&);
+  void apply(const request::open_leave_space&);
+  void apply(const request::leave_space&);
+  void apply(const request::close_leave_space&);
   // Out of the chat open, back to the chats: what was written kept as its draft.
   void apply(const request::close_chat&);
   void apply(const request::back&);

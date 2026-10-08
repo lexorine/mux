@@ -79,9 +79,17 @@ class marks_part {
     for (const auto& [id, chat] : saved_)
       if (!now.contains(id) && !not_here_.contains(id))
         this->hold(id, chat);
+    // Each chat's mentions seen, to its account: shared with its other
+    // sessions where it shares them (Matrix's, as set), where they changed.
+    for (const auto& [id, chat] : now)
+      if (chat.seen && chat.seen != shared_[id]) {
+        shared_[id] = chat.seen;
+        s_->net->on_account_of(id, [room = id.id, seen = *chat.seen](auto& account)
+                                       -> decltype(void(account.share_marks_seen(room, seen))) { account.share_marks_seen(room, seen); });
+      }
     saved_ = now;
-    std::ranges::copy(now | std::views::values, std::back_inserter(out.chats));
-    std::ranges::copy(not_here_ | std::views::values, std::back_inserter(out.chats));
+    std::ranges::copy(std::views::values(now), std::back_inserter(out.chats));
+    std::ranges::copy(std::views::values(not_here_), std::back_inserter(out.chats));
     (void)s_->vault->write_file(mux::config::state_path("marks.json"), knot::to_json_string(out));
   }
 
@@ -98,7 +106,7 @@ class marks_part {
       return true;
     });
     const bool changed = std::ranges::any_of(changes, [](const mux::change_t& one) {
-      return splice::visit(splice::overloaded{[](const mux::change::mentioned&) { return true; },
+      return spl::visit(spl::overloaded{[](const mux::change::mentioned&) { return true; },
                                               [](const mux::change::reacted_to_mine&) { return true; },
                                               [](const mux::change::reaction_changed& c) { return c.live; },
                                               [](const auto&) { return false; }},
@@ -109,7 +117,7 @@ class marks_part {
     if (s_->demo())
       return;
     for (const mux::change_t& one : changes)
-      splice::visit(splice::overloaded{[&](const mux::change::mentioned& m) { this->keep_marked(m.in, m.event); },
+      spl::visit(spl::overloaded{[&](const mux::change::mentioned& m) { this->keep_marked(m.in, m.event); },
                                        [&](const mux::change::reacted_to_mine& r) { this->keep_marked(r.in, r.target); },
                                        [](const auto&) {}},
                     one);
@@ -135,8 +143,8 @@ class marks_part {
       return;
     }
     const bool waited = std::ranges::any_of(changes, [](const mux::change_t& one) {
-      return splice::visit(splice::overloaded{[](const mux::change::message_added& c) {
-                                                return splice::visit(splice::overloaded{[](mux::placement::aside) { return true; },
+      return spl::visit(spl::overloaded{[](const mux::change::message_added& c) {
+                                                return spl::visit(spl::overloaded{[](mux::placement::aside) { return true; },
                                                                                         [](const auto&) { return false; }},
                                                                      c.where);
                                               },
@@ -192,7 +200,7 @@ class marks_part {
       }
       return entry;
     };
-    const auto entries = marks_of(*chat, one.kind) | std::views::transform(entry_of) | std::ranges::to<std::vector>();
+    const auto entries = std::ranges::to<std::vector>(std::views::transform(marks_of(*chat, one.kind), entry_of));
     s_->root().open_marks(one.kind, *chat, entries, s_->model);
     listed_ = one.kind;
   }
@@ -219,8 +227,8 @@ class marks_part {
     return chosen ? s_->model->find(*chosen) : nullptr;
   }
   [[nodiscard]] static const std::vector<mux::unread_mark>& marks_of(const mux::conversation& chat, mux::mark_kind_t kind) {
-    return splice::visit(
-        splice::overloaded{[&](mux::mark_kind::mention) -> const std::vector<mux::unread_mark>& { return chat.unread_mentions; },
+    return spl::visit(
+        spl::overloaded{[&](mux::mark_kind::mention) -> const std::vector<mux::unread_mark>& { return chat.unread_mentions; },
                            [&](mux::mark_kind::reaction) -> const std::vector<mux::unread_mark>& { return chat.unread_reactions; }},
         kind);
   }
@@ -258,7 +266,7 @@ class marks_part {
       }
     auto on_disk = on_disk_.find(in);
     if (on_disk == on_disk_.end())
-      on_disk = on_disk_.emplace(in, s_->store->marked(in) | std::views::keys | std::ranges::to<std::set<std::string>>()).first;
+      on_disk = on_disk_.emplace(in, std::ranges::to<std::set<std::string>>(std::views::keys(s_->store->marked(in)))).first;
     if (on_disk->second.contains(id))
       return;
     kept_.erase(id);
@@ -283,6 +291,8 @@ class marks_part {
   // What the last save wrote of the chats the model had: carried where one
   // has gone since.
   std::map<mux::conversation_id, mux::config::chat_marks> saved_;
+  // Each chat's mentions seen, as last given to its account to share.
+  std::map<mux::conversation_id, std::optional<std::vector<std::string>>> shared_;
 };
 
 }  // namespace mux::app

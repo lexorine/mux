@@ -40,10 +40,17 @@ struct set_event_need {
   std::string event;
   std::int64_t level = 0;
 };
+// A space's room or space: listed in it (m.space.child), or no longer.
+struct add_child {
+  std::string room;
+};
+struct remove_child {
+  std::string room;
+};
 }  // namespace room_change
-using room_change_t = splice::variant<room_change::set_join_rule, room_change::set_history, room_change::set_power,
+using room_change_t = spl::variant<room_change::set_join_rule, room_change::set_history, room_change::set_power,
                                       room_change::encrypt, room_change::set_need, room_change::upgrade,
-                                      room_change::set_event_need>;
+                                      room_change::set_event_need, room_change::add_child, room_change::remove_child>;
 
 namespace request {
 // A room changed, as Matrix changes one: the room being managed.
@@ -67,6 +74,10 @@ struct import_room_keys {};
 struct verify_session {
   std::string device;
 };
+// A step of interactive auth done in the browser: what it was for, done
+// again; or let go.
+struct continue_uia {};
+struct cancel_uia {};
 struct sign_out_sessions {
   std::vector<std::string> devices;
   std::string password;
@@ -164,7 +175,8 @@ constexpr request_list<request::setup_cross_signing, request::restore_cross_sign
                        request::sign_out_unverified, request::reset_backup, request::delete_backup, request::export_room_keys,
                        request::import_room_keys, request::verify_session, request::sign_out_sessions, request::rename_session,
                        request::refresh_sessions, request::verify_them, request::explore_state,
-                       request::open_send_custom, request::send_custom, request::change_room>
+                       request::open_send_custom, request::send_custom, request::change_room, request::continue_uia,
+                       request::cancel_uia>
 requests_of(const state&) {
   return {};
 }

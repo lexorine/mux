@@ -126,7 +126,7 @@ struct kept_settings {
       levels.push_back(*everywhere);
     if (levels.empty())
       return mux::config::bubble_look{};
-    return std::ranges::fold_left(levels | std::views::drop(1), levels.front(),
+    return std::ranges::fold_left(std::views::drop(levels, 1), levels.front(),
                                   [](mux::config::bubble_look below, const mux::config::bubble_look& above) {
                                     return mux::config::filled_from(std::move(below), above);
                                   });
@@ -315,11 +315,10 @@ struct kept_settings {
     // The emoji picked lately, the stickers sent lately, and the favourites.
     this->recent_emoji = saved.recent_emoji.value_or(std::vector<std::string>{});
     const auto emotes_of = [](const std::optional<std::vector<mux::config::sticker_kept>>& kept) {
-      return kept.value_or(std::vector<mux::config::sticker_kept>{}) | std::views::transform([](const mux::config::sticker_kept& one) {
+      return std::ranges::to<std::vector>(std::views::transform(kept.value_or(std::vector<mux::config::sticker_kept>{}), [](const mux::config::sticker_kept& one) {
                return mux::emote{.shortcode = one.shortcode, .url = one.url, .body = one.body, .w = one.w, .h = one.h, .size = one.size,
                                  .mimetype = one.mimetype};
-             }) |
-             std::ranges::to<std::vector>();
+             }));
     };
     this->recent_stickers = emotes_of(saved.recent_stickers);
     this->favourite_stickers = emotes_of(saved.favourite_stickers);
@@ -341,11 +340,10 @@ struct kept_settings {
     this->home_hides_spaced = saved.home_hides_spaced.value_or(false);
     this->home_hides_direct = saved.home_hides_direct.value_or(false);
     if (saved.space_places)
-      this->space_places = *saved.space_places | std::views::transform([](const mux::config::space_place& one) {
+      this->space_places = std::ranges::to<std::vector>(std::views::transform(*saved.space_places, [](const mux::config::space_place& one) {
                                return mux::config::space_placed{one.account, mux::config::space_item_of(one.item),
                                                                 mux::config::space_bar_of(one.bar)};
-                             }) |
-                             std::ranges::to<std::vector>();
+                             }));
     this->show_fps = saved.show_fps.value_or(false);
     this->interface_scale = saved.interface_scale.value_or(100);
     this->limits = saved.cache.value_or(mux::config::cache_limits{});
@@ -358,7 +356,7 @@ struct kept_settings {
           chat_of(one.account, one.conversation),
           mux::config::notify_choices{
               .on = one.on,
-              .mentions = splice::visit(splice::overloaded{[](mux::config::notify_mode::mentions) { return std::optional<bool>(true); },
+              .mentions = spl::visit(spl::overloaded{[](mux::config::notify_mode::mentions) { return std::optional<bool>(true); },
                                                            [](mux::config::notify_mode::all) { return std::optional<bool>(false); },
                                                            [](const auto&) { return std::optional<bool>(); }},
                                         mux::config::notify_mode_of(one.mode)),
@@ -403,10 +401,9 @@ struct kept_settings {
     if (!recent_emoji.empty())
       out.recent_emoji = recent_emoji;
     const auto kept_of = [](const std::vector<mux::emote>& all) {
-      return all | std::views::transform([](const mux::emote& one) {
+      return std::ranges::to<std::vector>(std::views::transform(all, [](const mux::emote& one) {
                return mux::config::sticker_kept{one.shortcode, one.url, one.body, one.w, one.h, one.size, one.mimetype};
-             }) |
-             std::ranges::to<std::vector>();
+             }));
     };
     if (!recent_stickers.empty())
       out.recent_stickers = kept_of(recent_stickers);
@@ -447,11 +444,10 @@ struct kept_settings {
     if (home_hides_direct)
       out.home_hides_direct = true;
     if (!space_places.empty())
-      out.space_places = space_places | std::views::transform([](const mux::config::space_placed& one) {
+      out.space_places = std::ranges::to<std::vector>(std::views::transform(space_places, [](const mux::config::space_placed& one) {
                            return mux::config::space_place{one.account, mux::config::word_of(one.item),
                                                            std::string(mux::config::word_of(one.bar))};
-                         }) |
-                         std::ranges::to<std::vector>();
+                         }));
     if (show_fps)
       out.show_fps = true;
     if (interface_scale != 100)
@@ -461,7 +457,7 @@ struct kept_settings {
     out.history = history;
     out.notifications = notifications;
     if (!notify_in.empty())
-      out.chat_notify = notify_in | std::views::transform([](const auto& one) {
+      out.chat_notify = std::ranges::to<std::vector<mux::config::chat_notify>>(std::views::transform(notify_in, [](const auto& one) {
                           const auto& [chat, chosen] = one;
                           return mux::config::chat_notify{
                               .account = chat.account.address,
@@ -471,8 +467,7 @@ struct kept_settings {
                               .name = chosen.name,
                               .text = chosen.text,
                               .sound = chosen.sound};
-                        }) |
-                        std::ranges::to<std::vector<mux::config::chat_notify>>();
+                        }));
     if (!room_events.empty() || !room_event_kinds.empty() || !receipts_shown_in.empty() || !jump_search_in.empty() ||
         !previews_shown_in.empty() || !typing_sent_in.empty() || !previews_direct_in.empty() || !wallpaper_in.empty() || !bubbles_in.empty() ||
         !panels_in.empty() || !forums.empty() || !hidden_from_home.empty()) {

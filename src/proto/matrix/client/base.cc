@@ -72,13 +72,12 @@ inline constexpr auto kPercentEscapes = [] {
   return out;
 }();
 [[nodiscard]] inline auto percent_encoded(std::string_view text) {
-  return text | std::views::transform([](const char& c) -> std::string_view {
+  return std::views::join(std::views::transform(text, [](const char& c) -> std::string_view {
            if (std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-' || c == '_')
              return std::string_view(&c, 1);
            const auto& escape = kPercentEscapes[static_cast<unsigned char>(c)];
            return std::string_view(escape.data(), escape.size());
-         }) |
-         std::views::join;
+         }));
 }
 
 struct settings {
@@ -103,6 +102,9 @@ struct settings {
   // by emoji here: Element's "Never send encrypted messages to unverified
   // sessions".
   bool only_verified = false;
+  // Read mentions shared with the account's other sessions, and sealed.
+  bool mentions_shared = false;
+  bool mentions_sealed = false;
   // What is kept on disk is read and written through: the program's.
   mux::vault::vault* vault = nullptr;
   // A new account, registered before anything else (POST /register, its
@@ -121,6 +123,15 @@ struct settings {
 
 // A typed content as a request's body: its JSON text.
 inline knot::raw as_body(const auto& content) { return knot::raw{knot::to_json_string(content)}; }
+
+// A typed content's relation, written out for the encrypted envelope, which
+// carries it in the clear: none where the content has none.
+inline std::optional<knot::raw> relates_to_of(const auto& content) {
+  if constexpr (requires { content.m_relates_to; })
+    if (content.m_relates_to)
+      return knot::raw{knot::to_json_string(*content.m_relates_to)};
+  return std::nullopt;
+}
 
 
 }  // namespace mux::proto::matrix::client

@@ -89,12 +89,12 @@ void account<Sink>::fetch_media(std::string source, media_use_t use, int size, b
               sink_(change::avatar_loaded{use, source, got.body});
               return;
             }
-            const auto opened = crypto::open_file(splice::bytes::of(got.body), sealed->second);
+            const auto opened = crypto::open_file(spl::bytes::of(got.body), sealed->second);
             if (!opened) {
               log(id_, "{} is not what its event says: not shown", source);
               return;
             }
-            sink_(change::avatar_loaded{use, source, splice::bytes::text_of(*opened)});
+            sink_(change::avatar_loaded{use, source, spl::bytes::text_of(*opened)});
             return;
           }
         } catch (const net::failure&) {
@@ -178,9 +178,9 @@ void account<Sink>::send_file(std::string room, std::string local, std::string b
     if (this->encrypted_room(room)) {
       if (!crypto_)
         throw plaintext_refused(in, local, "Not sent: it could not be encrypted -- encryption is not running for this account.");
-      sealed = crypto::seal_file(splice::bytes::of(bytes));
+      sealed = crypto::seal_file(spl::bytes::of(bytes));
     }
-    const std::string ciphertext = sealed ? splice::bytes::text_of(sealed->bytes) : std::string();
+    const std::string ciphertext = sealed ? spl::bytes::text_of(sealed->bytes) : std::string();
     const std::string_view uploaded = sealed ? std::string_view(ciphertext) : std::string_view(bytes);
     if (!api_) {
       sink_(change::delivery_changed{in, local, delivery::failed{}});
@@ -193,8 +193,8 @@ void account<Sink>::send_file(std::string room, std::string local, std::string b
     std::optional<crypto::sealed_file> sealed_thumbnail;
     if (video && !video->thumbnail.empty()) {
       if (sealed)
-        sealed_thumbnail = crypto::seal_file(splice::bytes::of(video->thumbnail));
-      const std::string thumbnail_cipher = sealed_thumbnail ? splice::bytes::text_of(sealed_thumbnail->bytes) : std::string();
+        sealed_thumbnail = crypto::seal_file(spl::bytes::of(video->thumbnail));
+      const std::string thumbnail_cipher = sealed_thumbnail ? spl::bytes::text_of(sealed_thumbnail->bytes) : std::string();
       try {
         const auto got = api_->request(
             "POST", sealed_thumbnail ? "/_matrix/media/v3/upload" : "/_matrix/media/v3/upload?filename=thumbnail.png",
@@ -246,7 +246,7 @@ void account<Sink>::send_file(std::string room, std::string local, std::string b
         content.rest = knot::raw{knot::to_json_string(crypto::file_part{sealed->info})};
         encrypted_media_.insert_or_assign(*uri, sealed->info);
       }
-      return as_body(content);
+      return std::pair{as_body(content), relates_to_of(content)};
     };
     // A video: m.video, its size, length and thumbnail said -- as a file,
     // every client showed it as one. Its thumbnail sealed where the room is
@@ -273,7 +273,7 @@ void account<Sink>::send_file(std::string room, std::string local, std::string b
       }
       return content;
     };
-    knot::raw message = video   ? with_file(video_message())
+    auto [message, relates_to] = video   ? with_file(video_message())
                         : image ? with_file(loom::client::picture_message(said, width, height))
                                 : with_file(loom::client::file_message(said));
     // Seed the server URI before sending the event: its echo may arrive
@@ -286,7 +286,8 @@ void account<Sink>::send_file(std::string room, std::string local, std::string b
     auto sent = this->send_room_event(loom::cs::send_message{.room_id = room,
                                                       .event_type = "m.room.message",
                                                       .txn_id = local,
-                                                      .body = std::move(message)});
+                                                      .body = std::move(message)},
+                                      std::move(relates_to));
     if (!sent) {
       sink_(change::delivery_changed{in, local, delivery::failed{}});
       return;

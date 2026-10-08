@@ -22,7 +22,7 @@ export namespace mux::ui {
 
 // What a presence says, in a word or two.
 [[nodiscard]] inline std::string presence_text(const availability_t& state) {
-  return splice::visit(splice::overloaded{[](const availability::online&) { return std::string("online"); },
+  return spl::visit(spl::overloaded{[](const availability::online&) { return std::string("online"); },
                                [](const availability::chat&) { return std::string("online"); },
                                [](const availability::away&) { return std::string("away"); },
                                [](const availability::extended_away&) { return std::string("away for a while"); },
@@ -46,7 +46,7 @@ export namespace mux::ui {
 }
 
 [[nodiscard]] inline bool is_group(const conversation& one) {
-  return splice::visit(splice::overloaded{[](const conversation_kind::direct&) { return false; }, [](const auto&) { return true; }},
+  return spl::visit(spl::overloaded{[](const conversation_kind::direct&) { return false; }, [](const auto&) { return true; }},
                     one.kind);
 }
 
@@ -77,10 +77,8 @@ export namespace mux::ui {
   const auto pictured = [](std::uint32_t code) {
     return code >= 0x1F000 || (code >= 0x2600 && code <= 0x27BF) || code == 0xFE0F;
   };
-  const auto characters = name | std::views::chunk_by([](char, char next) { return (static_cast<unsigned char>(next) & 0xC0) == 0x80; }) |
-                          std::views::transform([](auto&& each) { return std::string_view(each.begin(), each.end()); }) |
-                          std::ranges::to<std::vector>();
-  const auto codes = characters | std::views::transform(code_of) | std::ranges::to<std::vector>();
+  const auto characters = std::ranges::to<std::vector>(std::views::transform(std::views::chunk_by(name, [](char, char next) { return (static_cast<unsigned char>(next) & 0xC0) == 0x80; }), [](auto&& each) { return std::string_view(each.begin(), each.end()); }));
+  const auto codes = std::ranges::to<std::vector>(std::views::transform(characters, code_of));
   // A zero-width joiner between two emoji makes them one (a family, a
   // rainbow flag): kept there, and stripped anywhere else, as before.
   const auto kept = [&](std::size_t i) {
@@ -88,8 +86,7 @@ export namespace mux::ui {
       return i > 0 && i + 1 < codes.size() && pictured(codes[i - 1]) && pictured(codes[i + 1]);
     return !hidden(codes[i]);
   };
-  return std::views::iota(std::size_t{0}, characters.size()) | std::views::filter(kept) |
-         std::views::transform([&](std::size_t i) { return characters[i]; }) | std::views::join | std::ranges::to<std::string>();
+  return std::ranges::to<std::string>(std::views::join(std::views::transform(std::views::filter(std::views::iota(std::size_t{0}, characters.size()), kept), [&](std::size_t i) { return characters[i]; })));
 }
 // What someone is called in a chat, before telling them apart: their name
 // there, shown plainly, or their ID's local part.
@@ -100,22 +97,59 @@ export namespace mux::ui {
   std::string name = shown_plainly(one.name);
   return name.empty() ? local_part(one.id) : name;
 }
+// What a chat's members are called, made once for each version of its
+// member list (members_revision): each one's name by their ID, and how many
+// go by each name, folded. Asked for every message shown, it walked the
+// whole list for the sender and again, folding every name, to see who else
+// shared it -- in a room of thousands, millions of strings at each switch,
+// on the UI's thread.
+struct member_names {
+  bool built = false;
+  std::uint64_t revision = 0;
+  std::unordered_map<std::string, std::string> called;
+  std::unordered_map<std::string, std::size_t> folded_count;
+  // Where each member is in the chat's list, by their ID: one found
+  // without a walk of it -- a sender's picture, a forward's.
+  std::unordered_map<std::string, std::size_t> at;
+};
+[[nodiscard]] inline const member_names& names_of(const conversation& in) {
+  // The UI's thread alone asks; one entry for each chat shown.
+  static std::map<conversation_id, member_names> kept;
+  member_names& names = kept[in.id];
+  if (!names.built || names.revision != in.members_revision) {
+    names.built = true;
+    names.revision = in.members_revision;
+    names.called.clear();
+    names.folded_count.clear();
+    names.at.clear();
+    for (const member& one : in.members) {
+      names.at.insert_or_assign(one.id, static_cast<std::size_t>(&one - in.members.data()));
+      std::string name = called(one);
+      ++names.folded_count[mux::logic::folded(name)];
+      names.called.insert_or_assign(one.id, std::move(name));
+    }
+  }
+  return names;
+}
 [[nodiscard]] inline std::string called(const conversation& in, std::string_view who) {
-  const auto found = std::ranges::find(in.members, who, &member::id);
-  return found != in.members.end() ? called(*found) : local_part(who);
+  const member_names& names = names_of(in);
+  const auto found = names.called.find(std::string(who));
+  return found != names.called.end() ? found->second : local_part(who);
 }
 // What a sender is called in a chat -- with their whole ID after it where
 // someone else there is called the same, in any case: a display name, or a
 // local part on another server, is anyone's to take, and "Alice" written by
 // someone else looked like Alice's (as Element tells them apart).
 [[nodiscard]] inline std::string sender_name(const conversation& in, std::string_view sender) {
-  const std::string name = called(in, sender);
-  constexpr auto folded = mux::logic::folded;
-  const std::string mine = folded(name);
-  const bool shared = std::ranges::any_of(in.members, [&](const member& one) {
-    return one.id != sender && folded(called(one)) == mine;
-  });
-  return shared ? std::format("{} ({})", name, sender) : name;
+  const member_names& names = names_of(in);
+  const auto found = names.called.find(std::string(sender));
+  const bool member = found != names.called.end();
+  const std::string name = member ? found->second : local_part(sender);
+  // How many others go by the same name: all of them, less the sender where
+  // the sender is one of them.
+  const auto same = names.folded_count.find(mux::logic::folded(name));
+  const std::size_t others = same == names.folded_count.end() ? 0 : same->second - (member ? 1 : 0);
+  return others > 0 ? std::format("{} ({})", name, sender) : name;
 }
 
 // A time of day, as the clock on the wall says it.

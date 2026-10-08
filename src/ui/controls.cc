@@ -128,7 +128,7 @@ struct row_item : pressable<nodes::Stack> {
     this->setHorizontal();
     this->setGap(16.0f);
     fState.apply({.fillX = true, .height = kHeight, .padding = {0.0f, 20.0f, 0.0f, 20.0f}, .hoverBackground = colours.chosen, .selectedBackground = colours.chosen, .focusBackground = colours.chosen});
-    mark.setVisible(splice::visit([](auto one) { return drawn(one); }, icon));
+    mark.setVisible(spl::visit([](auto one) { return drawn(one); }, icon));
     label.setElided(true);
     label.apply({.grow = scene::axes::kX, .alignSelf = scene::align::kMiddle});
     dot.set_on(choice.value_or(false));
@@ -230,6 +230,14 @@ struct page_header : nodes::Stack {
     title.setElided(true);
     title.apply({.grow = scene::axes::kX, .alignSelf = scene::align::kMiddle,
                  .margin = {0.0f, 0.0f, 0.0f, has_back ? 0.0f : 10.0f}});
+  }
+  // Esc, as its ← is pressed: a step back where it has one -- false where
+  // it has none, for what holds it to close instead.
+  bool step_back() {
+    if (!parts.back.visible())
+      return false;
+    parts.back.act();
+    return true;
   }
 };
 
@@ -461,7 +469,7 @@ struct room_events_held {
 };
 inline room_events_held& room_events_at(const choice_level_t& level) {
   static room_events_held everywhere, account, chat;
-  return splice::visit(splice::overloaded{[](choice_level::everywhere) -> room_events_held& { return everywhere; },
+  return spl::visit(spl::overloaded{[](choice_level::everywhere) -> room_events_held& { return everywhere; },
                                           [](choice_level::account) -> room_events_held& { return account; },
                                           [](choice_level::chat) -> room_events_held& { return chat; }},
                        level);
@@ -471,8 +479,8 @@ inline room_events_held& room_events_at(const choice_level_t& level) {
   const room_events_held& every = room_events_at(choice_level::everywhere{});
   const room_events_held& account = room_events_at(choice_level::account{});
   const room_events_held& chat = room_events_at(choice_level::chat{});
-  return splice::visit(
-      splice::overloaded{[&](choice_level::everywhere) {
+  return spl::visit(
+      spl::overloaded{[&](choice_level::everywhere) {
                            return logic::filter_of(std::nullopt, std::nullopt, std::nullopt, std::nullopt, every.kinds, every.all.value_or(true));
                          },
                          [&](choice_level::account) {
@@ -485,7 +493,7 @@ inline room_events_held& room_events_at(const choice_level_t& level) {
 }
 // And with the level as the one over it: what "As above" shows.
 [[nodiscard]] inline room_event_filter events_above(const choice_level_t& level) {
-  return splice::visit(splice::overloaded{[](choice_level::chat) { return events_in_effect(choice_level::account{}); },
+  return spl::visit(spl::overloaded{[](choice_level::chat) { return events_in_effect(choice_level::account{}); },
                                           [](const auto&) { return events_in_effect(choice_level::everywhere{}); }},
                        level);
 }
@@ -613,7 +621,7 @@ struct event_kind_list : nodes::Stack {
                                                          return one;
                                                        }();
     for (const room_event_t& kind : all_room_events) {
-      parts.rows.emplace_back(a, colours, level, kind, splice::visit([](auto one) { return label_of(one); }, kind));
+      parts.rows.emplace_back(a, colours, level, kind, spl::visit([](auto one) { return label_of(one); }, kind));
       parts.rows.back().show_value(shown.shows(kind));
       parts.rows.back().set_live(way == kCustom);
     }
@@ -1131,5 +1139,140 @@ struct accent_circles : nodes::Stack {
       circle.set_chosen(circle.accent == now);
   }
 };
+
+// A row longer than its room, moved sideways -- by a finger or a mouse
+// dragged along it, flicked to glide on, or a sideways wheel -- and cut to
+// its room. Up and down are left to the page round it: a gesture going more
+// that way than along is not taken, nor is an upright wheel.
+template <class Line>
+struct side_scroll : nodes::Stack {
+  struct parts_t {
+    Line line;
+  } parts;
+  explicit side_scroll(Line line) : parts{.line = std::move(line)} {
+    this->setHorizontal();
+    fState.apply({.masking = true});
+  }
+  // How far it goes along: what of the line is past its room.
+  [[nodiscard]] float most() const {
+    return std::max(0.0f, parts.line.bounds().width() - fState.contentBox().width());
+  }
+  [[nodiscard]] float offset() const noexcept { return gesture.offset(); }
+  // Where the line is put: at the gesture's offset, its ends held to.
+  void place() {
+    const float at = scene::snapToPixel(gesture.offset());
+    if (at == shown)
+      return;
+    shown = at;
+    parts.line.apply({.shiftX = -at});
+    this->markDamaged();
+  }
+  void scroll_by(float delta) {
+    gesture.setBounds(0.0f, this->most());
+    gesture.glideTo(gesture.target() + delta);
+    scene::work::mark(fState.fId);
+  }
+
+  using Node::onPointer;
+  template <class Phase>
+  void onPointer(const Phase&, const scene::pointer::scroll& wheel, scene::PointerReply& reply)
+    requires(std::same_as<Phase, scene::phase::bubble> || std::same_as<Phase, scene::phase::target>)
+  {
+    if (wheel.dx == 0.0f || this->most() <= 0.0f)
+      return;
+    this->scroll_by(-wheel.dx * 40.0f);
+    reply.handle();
+  }
+  // The press is only noted, and what is under it clicked later: a press
+  // that goes along is a drag of the row, not a choice.
+  template <class Phase>
+  void onPointer(const Phase&, const scene::pointer::down& press, scene::PointerReply& reply)
+    requires(std::same_as<Phase, scene::phase::capture> || std::same_as<Phase, scene::phase::target>)
+  {
+    if (press.button > 1 || this->most() <= 0.0f)
+      return;
+    gesture.setBounds(0.0f, this->most());
+    armed = true;
+    press_x = press.x;
+    press_y = press.y;
+    if constexpr (std::same_as<Phase, scene::phase::capture>)
+      reply.deferClick();
+    if (gesture.press(press.x))
+      reply.handle();  // the press was spent catching a glide
+  }
+  template <class Phase>
+  void onPointer(const Phase&, const scene::pointer::move& move, scene::PointerReply& reply)
+    requires(std::same_as<Phase, scene::phase::capture> || std::same_as<Phase, scene::phase::target>)
+  {
+    if (!armed)
+      return;
+    if (!gesture.dragging()) {
+      const float dx = move.x - press_x;
+      const float dy = move.y - press_y;
+      // Going more up or down than along: the page's, from here on.
+      if (std::abs(dy) >= scene::ScrollGesture::kSlop && std::abs(dy) > std::abs(dx)) {
+        armed = false;
+        return;
+      }
+    }
+    const bool was = gesture.dragging();
+    if (!gesture.drag(move.x, now_ms()))
+      return;
+    if (!was) {
+      if (reply.fCaptured) {
+        armed = false;  // something else is dragged already
+        return;
+      }
+      reply.capturePointer();
+    }
+    reply.suppressHover();
+    this->place();
+    reply.handle();
+  }
+  template <class Phase>
+  void onPointer(const Phase&, const scene::pointer::up&, scene::PointerReply& reply)
+    requires(std::same_as<Phase, scene::phase::capture> || std::same_as<Phase, scene::phase::target>)
+  {
+    this->finish(reply);
+  }
+  template <class Phase>
+  void onPointer(const Phase&, const scene::pointer::cancel&, scene::PointerReply& reply)
+    requires(std::same_as<Phase, scene::phase::capture> || std::same_as<Phase, scene::phase::target>)
+  {
+    this->finish(reply);
+  }
+  void finish(scene::PointerReply& reply) {
+    armed = false;
+    if (!gesture.dragging())
+      return;
+    gesture.release();
+    scene::work::mark(fState.fId);  // to glide on, or spring back
+    reply.releasePointer();
+    reply.suppressHover();
+    reply.handle();
+  }
+  [[nodiscard]] bool acceptsInput() const { return true; }
+
+  // Gliding: a frame at a time, until it rests.
+  void update(double now) {
+    const double dt = last_ms > 0.0 ? now - last_ms : 16.0;
+    last_ms = now;
+    gesture.setBounds(0.0f, this->most());
+    if (gesture.advance(dt))
+      this->place();
+  }
+  [[nodiscard]] bool wantsTick() const { return gesture.moving() || gesture.dragging(); }
+
+ private:
+  [[nodiscard]] static double now_ms() {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  }
+  scene::ScrollGesture gesture;
+  float shown = 0.0f;
+  bool armed = false;
+  float press_x = 0.0f, press_y = 0.0f;
+  double last_ms = 0.0;
+};
+
 
 }  // namespace mux::ui

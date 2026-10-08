@@ -57,6 +57,18 @@ struct room_settings_facts {
   std::optional<config::room_event_kinds> event_kinds;
   // The user's own level, as the protocol fills it (manage_facts).
   std::int64_t mine = 0;
+  // A room by its ID and name.
+  struct named_room {
+    std::string id;
+    std::string name;
+  };
+  // The spaces it is in, as theirs list it: what a rule for their members
+  // names.
+  std::vector<named_room> parents;
+  // A space's: the rooms and spaces it holds, and the account's others --
+  // those that may be added to it.
+  std::vector<named_room> children;
+  std::vector<named_room> addable;
   // A space: whether it holds spaces, and whether it is shown as a forum.
   bool space = false;
   bool holds_spaces = false;
@@ -132,7 +144,7 @@ struct tab_types<manage_tab_list<Tabs...>> {
 };
 template <class Rule, class Variant>
 [[nodiscard]] bool is_rule(const Variant& now) {
-  return splice::visit(splice::overloaded{[](const Rule&) { return true; }, [](const auto&) { return false; }}, now);
+  return spl::visit(spl::overloaded{[](const Rule&) { return true; }, [](const auto&) { return false; }}, now);
 }
 
 // A heading over a tab, and over a part of one, as Element's.
@@ -211,6 +223,102 @@ struct toggle_line : nodes::Stack {
     parts.toggle.setOnNow(on);
     if (!allowed)
       fState.setAlpha(0.55f);
+  }
+};
+
+// Leaving a space, as Element's LeaveSpaceDialog: the rooms of it one is in
+// left with it -- none of them, all, or those chosen, each by a switch.
+struct leave_space_facts {
+  conversation_id space;
+  std::string name;
+  std::vector<room_settings_facts::named_room> rooms;  // its rooms one is in
+};
+namespace leave_choice {
+struct none {};
+struct all {};
+struct some {};
+}  // namespace leave_choice
+using leave_choice_t = spl::variant<leave_choice::none, leave_choice::all, leave_choice::some>;
+template <class Actions>
+struct leave_space_box : nodes::Stack {
+  // The dialog it is shown in.
+  [[nodiscard]] static dialog_look look_of_dialog() { return {.size = dialog_size::fitting{440.0f}}; }
+  Actions* actions = nullptr;
+  leave_space_facts facts;
+  leave_choice_t choice = leave_choice::none{};
+  std::set<std::string> chosen;  // the rooms to leave, where some are
+  struct pick {
+    leave_space_box* box;
+    leave_choice_t to;
+    void operator()() const {
+      box->choice = to;
+      box->show();
+    }
+  };
+  struct flip_room {
+    leave_space_box* box;
+    std::string room;
+    void operator()() const {
+      if (!box->chosen.erase(room))
+        box->chosen.insert(room);
+    }
+  };
+  struct go {
+    leave_space_box* box;
+    void operator()() const { box->actions->leave_space(box->facts.space, box->leaving()); }
+  };
+  struct cancel {
+    Actions* actions;
+    void operator()() const { actions->close_leave_space(); }
+  };
+  struct parts_t {
+    nodes::Text title;
+    nodes::Text about;
+    radio_choice<pick> none, all, some;
+    std::vector<toggle_line<flip_room>> rooms;
+    dialog_buttons<cancel, go> buttons;
+  } parts;
+  leave_space_box(const ui_needs<Actions>& n, leave_space_facts what)
+      : actions(n.actions), facts(std::move(what)),
+        parts{.title = nodes::Text("Leave " + facts.name, 17.0f, n.colours->text, true),
+              .about = explained(*n.colours, facts.rooms.empty()
+                                                 ? "You are in none of its rooms."
+                                                 : "Would you like to leave the rooms in this space too?"),
+              .none = radio_choice<pick>(*n.colours, "Don't leave any rooms", "", {this, leave_choice::none{}}, true, true),
+              .all = radio_choice<pick>(*n.colours, "Leave all rooms", "", {this, leave_choice::all{}}, false, true),
+              .some = radio_choice<pick>(*n.colours, "Leave some rooms", "", {this, leave_choice::some{}}, false, true),
+              .buttons = dialog_buttons<cancel, go>(*n.colours, "Leave space", {n.actions}, {this}, 130.0f)} {
+    for (const auto& one : facts.rooms)
+      parts.rooms.emplace_back(*n.colours, one.name, flip_room{this, one.id}, false, true);
+    fState.apply({.fillX = true, .autoSize = scene::axes::kY, .padding = {20.0f, 22.0f, 20.0f, 22.0f}});
+    this->setGap(8.0f);
+    for (scene::Node* each : std::initializer_list<scene::Node*>{&parts.none, &parts.all, &parts.some})
+      each->setVisible(!facts.rooms.empty());
+    this->show();
+  }
+  // The choice made shown: its ring lit, the rooms' switches where some.
+  void show() {
+    const auto is = [&](auto which) {
+      return spl::visit(spl::overloaded{[](decltype(which)) { return true; }, [](const auto&) { return false; }}, choice);
+    };
+    parts.none.parts.ring.set_on(is(leave_choice::none{}));
+    parts.all.parts.ring.set_on(is(leave_choice::all{}));
+    parts.some.parts.ring.set_on(is(leave_choice::some{}));
+    for (auto& one : parts.rooms)
+      one.setVisible(is(leave_choice::some{}));
+    this->invalidateLayout();
+    this->markDamaged();
+  }
+  // The rooms to leave with it, as chosen.
+  [[nodiscard]] std::vector<std::string> leaving() const {
+    return spl::visit(
+        spl::overloaded{[](const leave_choice::none&) { return std::vector<std::string>{}; },
+                        [&](const leave_choice::all&) {
+                          return std::ranges::to<std::vector<std::string>>(
+                              std::views::transform(facts.rooms, [](const room_settings_facts::named_room& one) { return one.id; }));
+                        },
+                        [&](const leave_choice::some&) { return std::vector<std::string>(chosen.begin(), chosen.end()); }},
+        choice);
   }
 };
 
@@ -318,7 +426,7 @@ struct room_settings : nodes::Stack {
         : parts{.general = tab_row(*box->colours_, "General", icon::gear{}, {box, settings_tab::general{}}),
                 .notifications = tab_row(*box->colours_, "Notifications", icon::bell{}, {box, settings_tab::notifications{}}),
                 .looks = tab_row(*box->colours_, "Appearance", icon::eye{}, {box, settings_tab::looks{}})} {
-      splice::visit([&](auto of) { this->add(box, tabs_of_t<decltype(of)>{}); }, box->facts.speaks);
+      spl::visit([&](auto of) { this->add(box, tabs_of_t<decltype(of)>{}); }, box->facts.speaks);
       this->setGap(2.0f);
       fState.apply({.fillY = true, .width = 220.0f, .padding = {4.0f, 12.0f, 12.0f, 12.0f}});
     }
@@ -535,7 +643,7 @@ struct room_settings : nodes::Stack {
   void rebuild() {
     const settings_tab_t to = tab;
     auto& page = holder().parts.page;
-    splice::visit(splice::overloaded{
+    spl::visit(spl::overloaded{
                       [&](settings_tab::general) { page.template emplace<general_page>(actions, this, facts); },
                       [&](settings_tab::notifications) { page.template emplace<notifications_page>(actions, this, facts); },
                       [&](settings_tab::looks) { page.template emplace<looks_page>(actions, this, facts); },

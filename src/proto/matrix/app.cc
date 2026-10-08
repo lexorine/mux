@@ -55,6 +55,15 @@ void delete_backup(Net& net, const account_id& by) {
 }
 
 template <class Net>
+void continue_uia(Net& net, const account_id& by) {
+  net.on_account(by, [](auto& account) -> decltype(void(account.continue_uia())) { account.continue_uia(); });
+}
+template <class Net>
+void cancel_uia(Net& net, const account_id& by) {
+  net.on_account(by, [](auto& account) -> decltype(void(account.cancel_uia())) { account.cancel_uia(); });
+}
+
+template <class Net>
 void sign_out_unverified(Net& net, const account_id& by, std::string password) {
   net.on_account(by, [password = std::move(password)](auto& account) -> decltype(void(account.sign_out_unverified(password))) { account.sign_out_unverified(password); });
 }
@@ -92,7 +101,7 @@ void program_told(App& app, const session_given& given) {
   const auto found = app.find(given.account.address);
   if (found == app.saved.end())
     return;
-  splice::visit([&](auto& one) {
+  spl::visit([&](auto& one) {
                   using kept_defaults::take_session;
                   take_session(one, given);
                 },
@@ -116,6 +125,13 @@ void program_told(App& app, const sign_in_page& page) {
   app.root().show_message("Sign in in your browser",
                           "The server's sign-in page is open in your browser. Once you have signed in there, the "
                           "browser comes back to mux, and the account carries on by itself.");
+}
+// A step of interactive auth for the browser: its page opened there, and a
+// box to say when it is done.
+template <class App>
+void program_told(App& app, const uia_in_browser& asked) {
+  app.ask.open_url(asked.url);
+  app.root().template open_dialog<uia_page<typename App::accounts::actions_type>>(asked.what, asked.url);
 }
 // What the developer tools asked, shown.
 template <class App>
@@ -152,7 +168,7 @@ template <class App, class Then>
 void on_sessions_page(App& app, const account_id& by, Then then) {
   using accounts = typename App::accounts;
   if (auto* up = app.root().open_panel())
-    splice::visit([&](accounts& panel) {
+    spl::visit([&](accounts& panel) {
                     if (auto* page = panel.template shown_page<sessions_page<typename accounts::actions_type>>();
                         page && panel.selected == by.address)
                       then(*page);
@@ -284,6 +300,18 @@ void program_asked(App& app, const refresh_sessions&) {
   app.shared.with_chosen_account([&](auto&, config::account_t& account) { ops::list_sessions(*app.net, App::id_of(account)); });
 }
 
+// A step of interactive auth done in the browser: the request sent again,
+// or let go; the box closed either way.
+template <class App>
+void program_asked(App& app, const continue_uia&) {
+  app.root().close_dialog();
+  app.shared.with_chosen_account([&](auto&, config::account_t& account) { ops::continue_uia(*app.net, App::id_of(account)); });
+}
+template <class App>
+void program_asked(App& app, const cancel_uia&) {
+  app.root().close_dialog();
+  app.shared.with_chosen_account([&](auto&, config::account_t& account) { ops::cancel_uia(*app.net, App::id_of(account)); });
+}
 }  // namespace mux::proto::matrix::request
 
 // A passphrase or a password given, for what Matrix asked it for: for the

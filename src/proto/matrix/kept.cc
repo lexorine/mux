@@ -16,6 +16,11 @@ struct kept {
   std::optional<std::string> homeserver;
   std::string device_name = "mux";
   std::optional<bool> only_verified;  // room keys to verified sessions alone
+  // Which mentions are read, shared with the account's other sessions in
+  // room account data (net.mux.mentions_read); and sealed there, under a key
+  // kept in Secret Storage, or in the clear.
+  std::optional<bool> mentions_shared;
+  std::optional<bool> mentions_sealed;
   std::optional<std::string> access_token;
   std::optional<std::string> device_id;
   // A new account, to be registered on its homeserver before it is logged
@@ -69,6 +74,12 @@ inline kept kept_from(const state&, std::string address, std::string password) {
 // Whether its room keys go to verified sessions alone: Matrix's alone.
 [[nodiscard]] inline std::optional<bool>* only_verified_in(kept& one) { return &one.only_verified; }
 [[nodiscard]] inline const std::optional<bool>* only_verified_in(const kept& one) { return &one.only_verified; }
+// Whether its read mentions are shared with its other sessions, and sealed
+// there: Matrix's alone.
+[[nodiscard]] inline std::optional<bool>* mentions_shared_in(kept& one) { return &one.mentions_shared; }
+[[nodiscard]] inline const std::optional<bool>* mentions_shared_in(const kept& one) { return &one.mentions_shared; }
+[[nodiscard]] inline std::optional<bool>* mentions_sealed_in(kept& one) { return &one.mentions_sealed; }
+[[nodiscard]] inline const std::optional<bool>* mentions_sealed_in(const kept& one) { return &one.mentions_sealed; }
 
 inline std::optional<std::string> check(const kept& one) {
   const std::string_view user = one.user_id;
@@ -88,15 +99,20 @@ inline std::optional<std::string> check(const kept& one) {
   return std::nullopt;
 }
 
-// An account edited: the same user on the same homeserver, with the same
-// password, goes on with the device it has, rather than logging in as a
-// new one at every Save.
+// An account edited: the same user goes on as the device it is -- its
+// session too, where it signs in the same way -- whatever else changed.
+// Its homeserver written otherwise (another spelling, its delegated host)
+// made a new device at every Save; one that is really another server
+// refuses the session, and the login that follows asks for the same device
+// ID there.
 inline void carry_over(kept& now, const kept& before) {
+  if (before.user_id != now.user_id)
+    return;
+  now.device_id = before.device_id;
   const bool same_way = before.oauth.value_or(false) == now.oauth.value_or(false) &&
                         (now.oauth.value_or(false) || before.password == now.password);
-  if (before.user_id == now.user_id && before.homeserver == now.homeserver && same_way) {
+  if (same_way) {
     now.access_token = before.access_token;
-    now.device_id = before.device_id;
     now.refresh_token = before.refresh_token;
     now.oauth_client_id = before.oauth_client_id;
   }

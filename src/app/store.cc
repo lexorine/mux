@@ -140,27 +140,57 @@ class message_store {
     out.me = std::move(parsed->me);
     return out;
   }
-  // A message deleted: marked where it is kept, and kept whole in the
-  // archive of deleted messages, which the cache's limit does not reach --
-  // as it was where that is given, else as the disk has it.
-  void mark_deleted(const mux::conversation_id& in, const std::string& id, std::optional<mux::message> whole) {
+  // A message deleted that is held in memory: marked where it is kept, and
+  // kept whole, as it was, in the archive of deleted messages, which the
+  // cache's limit does not reach.
+  void mark_deleted(const mux::conversation_id& in, const std::string& id, mux::message whole) {
     append(in, knot::to_json_string(store_file::message_line{.id = id, .deleted = true}));
-    if (!whole) {
-      auto all = read(in);
-      if (const auto found = all.find(id); found != all.end())
-        whole = std::move(found->second);
-    }
-    if (!whole)
-      return;
-    whole->redacted = true;
+    whole.redacted = true;
     const auto where = deleted_file_of(in);
     std::error_code failed;
     std::filesystem::create_directories(where.parent_path(), failed);
     {
       std::lock_guard held(file_lock());
-      (void)vault->append_line(where, line_of(*whole));
+      (void)vault->append_line(where, line_of(whole));
     }
     prune(mux::config::state_path("deleted"), deleted_budget, where);
+  }
+  // Messages deleted that are not held in memory -- older than what is, or
+  // told again from the sync kept at every start: each found in the chat's
+  // file, marked there and kept whole in the archive, the file and the
+  // archive read once for all of them. What is marked and archived already
+  // is passed over, and what the file does not have is not marked. From any
+  // thread: a worker's -- read on the UI's, once for each deletion, the
+  // whole file of a big room was parsed again and again, and a start with
+  // many deletions in what came stood still for minutes.
+  void mark_deleted_on_disk(const mux::conversation_id& in, const std::vector<std::string>& ids) {
+    std::map<std::string, mux::message> kept;
+    read_lines(file_of(in), in, kept);
+    std::map<std::string, mux::message> archived;
+    read_lines(deleted_file_of(in), in, archived);
+    const auto where = deleted_file_of(in);
+    bool archiving = false;
+    for (const std::string& id : ids) {
+      const auto found = kept.find(id);
+      if (found == kept.end())
+        continue;
+      if (!found->second.redacted) {
+        append(in, knot::to_json_string(store_file::message_line{.id = id, .deleted = true}));
+        found->second.redacted = true;
+      }
+      if (archived.contains(id))
+        continue;
+      if (!archiving) {
+        std::error_code failed;
+        std::filesystem::create_directories(where.parent_path(), failed);
+        archiving = true;
+      }
+      std::lock_guard held(file_lock());
+      (void)vault->append_line(where, line_of(found->second));
+      archived.insert_or_assign(id, found->second);
+    }
+    if (archiving)
+      prune(mux::config::state_path("deleted"), deleted_budget, where);
   }
   void forget(const mux::conversation_id& in, const std::string& id) {
     append(in, knot::to_json_string(store_file::message_line{.id = id, .gone = true}));
@@ -180,7 +210,7 @@ class message_store {
   // Nothing where no file was kept: the history before gaps were kept is
   // not known to be whole.
   std::optional<gaps_t> gaps(const mux::conversation_id& in) const {
-    auto text_read = splice::bytes::file_text(gaps_file_of(in));
+    auto text_read = spl::bytes::file_text(gaps_file_of(in));
     if (!text_read)
       return std::nullopt;
     const std::string text = std::move(*text_read);
@@ -295,7 +325,7 @@ class message_store {
         total -= size;
     }
   }
-  std::size_t appended_ = 0;
+  std::atomic<std::size_t> appended_ = 0;
   // The chat's messages as its file says, each as its last line says; the
   // file written again with one line each where most of its lines were old.
   // The chat's messages as its file says, each as its last line says -- the
@@ -373,12 +403,10 @@ class message_store {
       one.replies_to = std::move(o.reply);
       one.thread = std::move(o.thread);
       one.edited = o.edited.value_or(false);
-      one.versions = o.versions.value_or(std::vector<store_file::message_line::version_line>{}) |
-                     std::views::transform([&](const store_file::message_line::version_line& v) {
+      one.versions = std::ranges::to<std::vector>(std::views::transform(o.versions.value_or(std::vector<store_file::message_line::version_line>{}), [&](const store_file::message_line::version_line& v) {
                        return mux::message::version{mux::body{v.plain.value_or(""), v.html},
                                                     time_point(std::chrono::milliseconds(v.until.value_or(0)))};
-                     }) |
-                     std::ranges::to<std::vector>();
+                     }));
       one.encrypted = o.encrypted.value_or(false);
       one.unverified = o.unverified.value_or(false);
       one.came_plain = o.came_plain.value_or(false);
@@ -450,11 +478,10 @@ class message_store {
         .edited = store_file::flag(one.edited),
         .versions = one.versions.empty()
                         ? std::nullopt
-                        : std::optional(one.versions | std::views::transform([](const mux::message::version& v) {
+                        : std::optional(std::ranges::to<std::vector>(std::views::transform(one.versions, [](const mux::message::version& v) {
                                           return store_file::message_line::version_line{
                                               v.body.plain, v.body.html, static_cast<std::int64_t>(v.until.time_since_epoch().count())};
-                                        }) |
-                                        std::ranges::to<std::vector>()),
+                                        }))),
         .redacted = store_file::flag(one.redacted),
         .out = store_file::flag(one.outgoing),
         // Something done, not said: read back as a line of its own again,

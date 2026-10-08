@@ -58,7 +58,7 @@ template void account<mux::app::post_change>::verification_in(const std::string&
 template void account<mux::app::post_change>::sas_check_mac(crypto::sas_state& state);
 template void account<mux::app::post_change>::verification_in(const std::string& sender, const loom::ev::m_key_verification_cancel_content_t& content);
 template void account<mux::app::post_change>::verification_request_in_room(const conversation_id& in, const loom::ev::timeline_event& one, const crypto::room_request_fields& fields);
-template bool account<mux::app::post_change>::verification_in_room(const conversation_id& in, const loom::ev::timeline_event& one, const knot::raw& raw, placement_t where);
+template bool account<mux::app::post_change>::verification_in_room(const conversation_id& in, const loom::ev::timeline_event& one, placement_t where);
 template void account<mux::app::post_change>::verify_cancel(std::string txn);
 template void account<mux::app::post_change>::mend_session(const std::string& user, const std::string& curve25519);
 template void account<mux::app::post_change>::upload_fallback_key();
@@ -80,9 +80,20 @@ template void account<mux::app::post_change>::tell_devices(std::string user);
 template void account<mux::app::post_change>::check_own_sessions();
 template auto account<mux::app::post_change>::own_sessions_now() -> std::optional<std::vector<own_session>>;
 template void account<mux::app::post_change>::set_only_verified(bool on);
+template void account<mux::app::post_change>::set_mentions_sharing(bool shared, bool sealed);
+template void account<mux::app::post_change>::share_marks_seen(std::string room, std::vector<std::string> seen);
+template std::filesystem::path account<mux::app::post_change>::mentions_key_file() const;
+template const std::optional<std::vector<std::uint8_t>>& account<mux::app::post_change>::mentions_key();
+template void account<mux::app::post_change>::keep_mentions_key(std::vector<std::uint8_t> key);
+template void account<mux::app::post_change>::mentions_from(const conversation_id& in, const loom::ev::net_mux_mentions_read_content_t& content);
 template void account<mux::app::post_change>::accept_identity(std::string user);
 template void account<mux::app::post_change>::withheld_in(const loom::ev::m_room_key_withheld_content_t& content);
 template void account<mux::app::post_change>::request_secrets(const std::string& device);
 template void account<mux::app::post_change>::secret_in(const crypto::secret_got& got);
 template void account<mux::app::post_change>::secret_request_in(const std::string& sender, const loom::ev::m_secret_request_content_t& content);
 }  // namespace mux::proto::matrix::client
+
+#if defined(MUX_SPLIT_ACCOUNTS)
+// Let go here, among its members made here: see app/sink.cc.
+void mux::app::destroy_account(mux::proto::matrix::client::account<mux::app::post_change>* one) { delete one; }
+#endif

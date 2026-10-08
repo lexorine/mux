@@ -57,20 +57,22 @@ import :requests_more;
 namespace mux::proto::matrix::client {
 
 // Defined further down, beside send: a message made HTML.
-[[nodiscard]] inline std::optional<std::string> html_of(std::string_view body, const std::vector<mux::emote>& emotes);
+[[nodiscard]] inline std::optional<std::string> html_of(std::string_view body, const std::vector<mux::emote>& emotes,
+                                                        const std::vector<styled_run>& styles = {});
 
 template <class Sink>
-void account<Sink>::edit(std::string room, std::string event, std::string text) {
-  this->spawn_sending([this, room = std::move(room), event = std::move(event), text = std::move(text)] {
+void account<Sink>::edit(std::string room, std::string event, std::string text, std::vector<styled_run> styles) {
+  this->spawn_sending([this, room = std::move(room), event = std::move(event), text = std::move(text), styles = std::move(styles)] {
     if (!api_)
       return;
-    // Made HTML as a message sent is: its Markdown, the room's emoji.
-    const auto html = html_of(text, emotes_in(room));
+    // Made HTML as a message sent is: its runs and its Markdown, the room's emoji.
+    const auto html = html_of(text, emotes_in(room), styles);
     const auto content = loom::client::edit_message(event, text, html);
     if (this->send_room_event(loom::cs::send_message{.room_id = room,
                                               .event_type = "m.room.message",
                                               .txn_id = this->transaction(),
-                                              .body = as_body(content)}))
+                                              .body = as_body(content)},
+                              relates_to_of(content)))
       sink_(change::message_edited{{id_, room}, event, body{text, html}});
   });
 }
@@ -88,7 +90,8 @@ void account<Sink>::edit_caption(std::string room, std::string event, std::strin
     if (this->send_room_event(loom::cs::send_message{.room_id = room,
                                               .event_type = "m.room.message",
                                               .txn_id = this->transaction(),
-                                              .body = as_body(content)}))
+                                              .body = as_body(content)},
+                              relates_to_of(content)))
       sink_(change::message_edited{{id_, room}, event, body{caption.empty() ? picture.name : caption, std::nullopt}});
   });
 }
@@ -123,7 +126,8 @@ void account<Sink>::react(std::string room, std::string target, std::string key,
       (void)this->send_room_event(loom::cs::send_message{.room_id = room,
                                                   .event_type = "m.reaction",
                                                   .txn_id = this->transaction(),
-                                                  .body = as_body(content)});
+                                                  .body = as_body(content)},
+                                relates_to_of(content));
       return;
     }
     for (const auto& [event, one] : reactions_)
@@ -234,17 +238,36 @@ void account<Sink>::leave(std::string room) {
 // What a message is sent as: its Markdown made HTML, as Element sends it,
 // and the room's custom emoji in that; else the emoji alone, where it names
 // any; else nothing -- the text as it is.
-[[nodiscard]] inline std::optional<std::string> html_of(std::string_view body, const std::vector<mux::emote>& emotes) {
-  if (auto marked = mux::logic::markdown_html(body))
+// A run's tags in Matrix's HTML: what each style is written as.
+[[nodiscard]] inline mux::logic::html_run html_run_of(const styled_run& run) {
+  const auto tags = [&](std::string open, std::string close) {
+    return mux::logic::html_run{run.first, run.last, std::move(open), std::move(close)};
+  };
+  return spl::visit(spl::overloaded{[&](const run_style::bold&) { return tags("<strong>", "</strong>"); },
+                                    [&](const run_style::italic&) { return tags("<em>", "</em>"); },
+                                    [&](const run_style::underline&) { return tags("<u>", "</u>"); },
+                                    [&](const run_style::strike&) { return tags("<del>", "</del>"); },
+                                    [&](const run_style::spoiler&) { return tags("<span data-mx-spoiler>", "</span>"); },
+                                    [&](const run_style::code&) { return tags("<code>", "</code>"); },
+                                    [&](const run_style::link& one) {
+                                      return tags("<a href=\"" + chevron::escaped(one.url) + "\">", "</a>");
+                                    }},
+                    run.style);
+}
+[[nodiscard]] inline std::optional<std::string> html_of(std::string_view body, const std::vector<mux::emote>& emotes,
+                                                        const std::vector<styled_run>& styles) {
+  const std::vector<mux::logic::html_run> runs =
+      std::ranges::to<std::vector<mux::logic::html_run>>(std::views::transform(styles, html_run_of));
+  if (auto marked = mux::logic::markdown_html(body, runs))
     return emotes.empty() ? *marked : emotes_in_html(*marked, emotes);
   return with_emotes(body, emotes);
 }
 
 template <class Sink>
 void account<Sink>::send(std::string room, std::string body, std::optional<std::string> reply_to,
-                         std::vector<mention> mentions) {
+                         std::vector<mention> mentions, std::vector<styled_run> styles) {
   this->spawn_sending([this, room = std::move(room), body = std::move(body), reply_to = std::move(reply_to),
-                mentions = std::move(mentions)] {
+                mentions = std::move(mentions), styles = std::move(styles)]() mutable {
     const std::string txn = this->transaction();
     const conversation_id in{id_, room};
     // Each mention a link to its person in the Markdown, as Element sends a
@@ -264,8 +287,14 @@ void account<Sink>::send(std::string room, std::string body, std::optional<std::
       const std::string link = std::format("[{}](https://matrix.to/#/{})", label, one.user);
       marked.replace(at, one.name.size(), link);
       from = at + link.size();
+      // The runs moved with it: past it by what it grew, over it to its end.
+      const std::size_t grown = link.size() - one.name.size();
+      for (styled_run& run : styles) {
+        run.first += run.first > at ? grown : 0;
+        run.last += run.last > at ? grown : 0;
+      }
     }
-    const auto html = html_of(marked, emotes_in(room));
+    const auto html = html_of(marked, emotes_in(room), styles);
     sink_(change::message_added{message{
         .in = in,
         .id = txn,
@@ -284,16 +313,18 @@ void account<Sink>::send(std::string room, std::string body, std::optional<std::
     for (const mention& one : mentions)
       said.mentions.push_back(one.user);
     const auto content = loom::client::text_message(said);
-    this->send_text(in, room, txn, as_body(content));
+    this->send_text(in, room, txn, as_body(content), relates_to_of(content));
   });
 }
 
 // A text message sent under its transaction ID: acknowledged with the
 // event ID the server gave it, or marked failed.
 template <class Sink>
-void account<Sink>::send_text(const conversation_id& in, const std::string& room, const std::string& txn, knot::raw body) {
+void account<Sink>::send_text(const conversation_id& in, const std::string& room, const std::string& txn, knot::raw body,
+                              std::optional<knot::raw> relates_to) {
   auto sent = this->send_room_event(
-      loom::cs::send_message{.room_id = room, .event_type = "m.room.message", .txn_id = txn, .body = std::move(body)});
+      loom::cs::send_message{.room_id = room, .event_type = "m.room.message", .txn_id = txn, .body = std::move(body)},
+      std::move(relates_to));
   if (!sent) {
     sink_(change::delivery_changed{in, txn, delivery::failed{}});
     return;
@@ -364,8 +395,8 @@ void account<Sink>::call(std::string room, std::string call_id, change::call_sai
     const std::string party = how_.device_id.value_or("mux");
     const std::string version = "1";
     // Each kind of signal, as its event: its type, and its content.
-    const auto [type, body] = splice::visit(
-        splice::overloaded{
+    const auto [type, body] = spl::visit(
+        spl::overloaded{
             [&](const change::call_said::invite& one) {
               loom::ev::m_call_invite_content_t content{};
               content.offer.type = loom::ev::m_call_invite_content_t::offer_t::type_values::offer{};
@@ -387,14 +418,13 @@ void account<Sink>::call(std::string room, std::string call_id, change::call_sai
             },
             [&](const change::call_said::candidates& one) {
               loom::ev::m_call_candidates_content_t content{};
-              content.candidates = one.them | std::views::transform([](const calls::ice_candidate& each) {
+              content.candidates = std::ranges::to<std::vector>(std::views::transform(one.them, [](const calls::ice_candidate& each) {
                                      loom::ev::m_call_candidates_content_t::candidate_t made{};
                                      made.candidate = each.line;
                                      made.sdp_mid = each.mid;
                                      made.sdp_m_line_index = 0;
                                      return made;
-                                   }) |
-                                   std::ranges::to<std::vector>();
+                                   }));
               content.call_id = call_id;
               content.version = version;
               content.party_id = party;
@@ -403,8 +433,8 @@ void account<Sink>::call(std::string room, std::string call_id, change::call_sai
             [&](const change::call_said::hangup& one) {
               using reasons = loom::ev::m_call_hangup_content_t::reason_values;
               loom::ev::m_call_hangup_content_t content{};
-              content.reason = splice::visit(
-                  splice::overloaded{
+              content.reason = spl::visit(
+                  spl::overloaded{
                       [](change::call_end::hung_up) -> loom::ev::m_call_hangup_content_t::reason_t { return reasons::user_hangup{}; },
                       [](change::call_end::busy) -> loom::ev::m_call_hangup_content_t::reason_t { return reasons::user_busy{}; },
                       [](change::call_end::timed_out) -> loom::ev::m_call_hangup_content_t::reason_t { return reasons::invite_timeout{}; },
@@ -447,11 +477,9 @@ void account<Sink>::call_servers() {
     auto got = perform(*api_, loom::cs::get_turn_server{});
     std::vector<calls::ice_server> servers;
     if (got)
-      servers = got->uris | std::views::transform([&](const std::string& uri) {
+      servers = std::ranges::to<std::vector>(std::views::transform(std::views::filter(std::views::transform(got->uris, [&](const std::string& uri) {
                   return ice_server_of(uri, got->username, got->password);
-                }) |
-                std::views::filter([](const auto& one) { return one.has_value(); }) |
-                std::views::transform([](const auto& one) { return *one; }) | std::ranges::to<std::vector>();
+                }), [](const auto& one) { return one.has_value(); }), [](const auto& one) { return *one; }));
     else
       log(id_, "no TURN servers: {}", got.error().said());
     sink_(change::call_servers{id_, std::move(servers)});
@@ -528,7 +556,7 @@ void account<Sink>::send_in_thread(std::string room, std::string body, std::stri
     }
     const auto content = loom::client::text_message(
         loom::client::text_said{.body = body, .html = html, .reply_to = reply_to, .thread = root, .thread_latest = latest});
-    this->send_text(in, room, txn, as_body(content));
+    this->send_text(in, room, txn, as_body(content), relates_to_of(content));
   });
 }
 
@@ -632,8 +660,7 @@ void account<Sink>::sign_out_unverified(std::string password) {
     if (!all)
       return;
     std::vector<std::string> unverified =
-        *all | std::views::filter([&](const own_session& one) { return one.id != crypto_->device_id() && !one.trusted; }) |
-        std::views::transform(&own_session::id) | std::ranges::to<std::vector>();
+        std::ranges::to<std::vector>(std::views::transform(std::views::filter(*all, [&](const own_session& one) { return one.id != crypto_->device_id() && !one.trusted; }), &own_session::id));
     if (unverified.empty()) {
       sink_(change::notice{id_, "Sign out unverified sessions", "Every other session of yours is verified."});
       return;

@@ -200,20 +200,24 @@ struct link_facts {
   std::optional<std::string> title;
   std::optional<std::string> description;
   std::optional<std::string> image;
-  friend consteval auto json_schema(knot::type<link_facts>) {
-    return knot::schema<link_facts>()
-    .member<"site">(knot::key("og:site_name"))
-    .member<"title">(knot::key("og:title"))
-    .member<"description">(knot::key("og:description"))
-    .member<"image">(knot::key("og:image"));
-  }
 };
 
 using power_levels_content = loom::ev::m_room_power_levels_content_t;
 
+// The server a room is reached through: the one its ID names (rooms before
+// version 12 have one), else this account's own.
 template <class Sink>
-void account<Sink>::set_room_state(const std::string& room, std::string type, const auto& content) {
-  auto done = this->perform(*api_, loom::cs::set_room_state_with_key{.room_id = room, .event_type = type, .state_key = "", .body = as_body(content)});
+std::string account<Sink>::server_of(const std::string& room) const {
+  const auto colon = room.find(':');
+  if (colon != std::string::npos)
+    return room.substr(colon + 1);
+  const auto own = id_.address.find(':');
+  return own == std::string::npos ? std::string() : id_.address.substr(own + 1);
+}
+
+template <class Sink>
+void account<Sink>::set_room_state(const std::string& room, std::string type, const auto& content, std::string key) {
+  auto done = this->perform(*api_, loom::cs::set_room_state_with_key{.room_id = room, .event_type = type, .state_key = std::move(key), .body = as_body(content)});
   if (!done)
     log(id_, "could not set {} in {}: {}", type, room, done.error().said());
 }
@@ -225,8 +229,8 @@ void account<Sink>::manage(std::string room, room_action_t action) {
       return;
     const auto set = [&](std::string type, const auto& content) { this->set_room_state(room, std::move(type), content); };
     const auto told = [&](const char* what, auto done) { this->told_failing(room, what, done); };
-    splice::visit(
-        splice::overloaded{
+    spl::visit(
+        spl::overloaded{
             [&](const room_action::rename& one) {
               loom::ev::m_room_name_content_t content;
               content.name = one.name;
@@ -268,16 +272,17 @@ void account<Sink>::change_room(std::string room, proto::matrix::room_change_t c
       return power_levels_content{};
     };
     const auto told = [&](const char* what, auto done) { this->told_failing(room, what, done); };
-    splice::visit(
-        splice::overloaded{
+    spl::visit(
+        spl::overloaded{
             [&](const proto::matrix::room_change::set_join_rule& one) {
               loom::ev::m_room_join_rules_content_t content;
-              content.join_rule = std::string(splice::visit([](auto of) { return word_of(of); }, one.rule));
+              content.join_rule = std::string(spl::visit([](const auto& of) { return word_of(of); }, one.rule));
+              content.allow = allow_of(one.rule);
               set("m.room.join_rules", content);
             },
             [&](const proto::matrix::room_change::set_history& one) {
               loom::ev::m_room_history_visibility_content_t content;
-              content.history_visibility = std::string(splice::visit([](auto of) { return word_of(of); }, one.rule));
+              content.history_visibility = std::string(spl::visit([](auto of) { return word_of(of); }, one.rule));
               set("m.room.history_visibility", content);
             },
             // A say given: the room's power levels as they are, with it.
@@ -300,7 +305,7 @@ void account<Sink>::change_room(std::string room, proto::matrix::room_change_t c
               const auto top = [&](std::optional<std::int64_t> power_levels_content::* member) {
                 content.*member = static_cast<std::int64_t>(one.level);
               };
-              splice::visit(splice::overloaded{[&](power_need::default_role) { top(&power_levels_content::users_default); },
+              spl::visit(spl::overloaded{[&](power_need::default_role) { top(&power_levels_content::users_default); },
                                     [&](power_need::send_messages) { top(&power_levels_content::events_default); },
                                     [&](power_need::change_settings) { top(&power_levels_content::state_default); },
                                     [&](power_need::invite) { top(&power_levels_content::invite); },
@@ -332,6 +337,17 @@ void account<Sink>::change_room(std::string room, proto::matrix::room_change_t c
                 content.events.emplace();
               content.events->insert_or_assign(one.event, static_cast<std::int64_t>(one.level));
               set("m.room.power_levels", content);
+            },
+            // Listed in the space, keyed by the room: through its own
+            // server where its ID names one, else through this account's.
+            [&](const proto::matrix::room_change::add_child& one) {
+              loom::ev::m_space_child_content_t content;
+              content.via = {this->server_of(one.room)};
+              this->set_room_state(room, "m.space.child", content, one.room);
+            },
+            // No longer: its entry with no via, which the spec reads as none.
+            [&](const proto::matrix::room_change::remove_child& one) {
+              this->set_room_state(room, "m.space.child", loom::ev::m_space_child_content_t{}, one.room);
             }},
         change);
   });
@@ -340,15 +356,12 @@ void account<Sink>::change_room(std::string room, proto::matrix::room_change_t c
 // A room encrypted from its first event: m.room.encryption in its initial
 // state, as Element makes direct chats and private rooms -- never a first
 // message in the clear while the state catches up.
-// What an account data request answered, read as a type: nothing where it
-// failed or is not that type (knot's error is not wanted here).
-template <class Type, class Answer>
-[[nodiscard]] std::optional<Type> read_answer(const Answer& answer) {
-  if (!answer)
-    return std::nullopt;
-  auto read = knot::try_read<Type>(answer->text);
-  return read ? std::optional<Type>(std::move(*read)) : std::nullopt;
-}
+// An account data request whose answer is read as the type it is kept as:
+// once, from the response's body.
+template <class Content>
+struct account_data_as : loom::cs::get_account_data {
+  using response = Content;
+};
 
 inline std::vector<loom::cs::create_room::body_t::state_event_t> encrypted_from_the_start() {
   loom::ev::m_room_encryption_content_t content;
@@ -399,7 +412,8 @@ void account<Sink>::send_sticker(std::string room, mux::emote sticker, std::opti
     auto sent = this->send_room_event(loom::cs::send_message{.room_id = room,
                                                       .event_type = "m.sticker",
                                                       .txn_id = this->transaction(),
-                                                      .body = as_body(content)});
+                                                      .body = as_body(content)},
+                                      relates_to_of(content));
     if (!sent)
       log(id_, "could not send a sticker to {}: {}", room, sent.error().said());
   });
@@ -451,7 +465,11 @@ void account<Sink>::send_custom(std::string room, std::string type, std::optiona
       sink_(proto::matrix::devtools_text{title, done ? "Sent: " + done->event_id : "Not sent: " + done.error().said()});
     } else {
       auto done = this->send_room_event(loom::cs::send_message{
-                                     .room_id = room, .event_type = type, .txn_id = this->transaction(), .body = knot::raw{json}});
+                                     .room_id = room, .event_type = type, .txn_id = this->transaction(), .body = knot::raw{json}},
+                                     [&] -> std::optional<knot::raw> {
+                                       const auto typed = knot::try_read<crypto::relation_part>(json);
+                                       return typed ? typed->relates_to : std::nullopt;
+                                     }());
       sink_(proto::matrix::devtools_text{title, done ? "Sent: " + done->event_id : "Not sent: " + done.error().said()});
     }
   });
@@ -465,13 +483,10 @@ void account<Sink>::fetch_preview(std::string url) {
     // The authenticated endpoint (Matrix 1.11), and the old one where the
     // server has not that.
     std::optional<link_facts> facts;
-    // What the spec leaves open -- og:title and the rest -- is kept as the
-    // answer's remainder, read here once; og:image is typed already.
+    // The page's Open Graph facts, as loom read them with the answer.
     const auto facts_of = [](const auto& answer) {
-      link_facts read = knot::try_read<link_facts>(answer.rest.text).value_or(link_facts{});
-      if (!read.image)
-        read.image = answer.og_image;
-      return read;
+      return link_facts{.site = answer.og_site_name, .title = answer.og_title, .description = answer.og_description,
+                        .image = answer.og_image};
     };
     if (auto got = perform(*api_, loom::cs::get_url_preview_authed{.url = url}))
       facts = facts_of(*got);
@@ -491,19 +506,20 @@ void account<Sink>::fetch_preview(std::string url) {
 }
 
 template <class Sink>
-void account<Sink>::search_directory(std::string server, std::string query) {
-  this->spawn_guarded([this, server = std::move(server), query = std::move(query)] {
+void account<Sink>::search_directory(std::string server, std::string query, std::optional<std::string> since) {
+  this->spawn_guarded([this, server = std::move(server), query = std::move(query), since = std::move(since)] {
     if (!api_)
       return;
     using asked = loom::cs::query_public_rooms;
     auto got = perform(*api_, asked{.server = server.empty() ? std::nullopt : std::optional<std::string>(server),
                                     .body = {.limit = 50,
+                                             .since = since,
                                              .filter = query.empty() ? std::nullopt
                                                                      : std::optional<asked::body_t::filter_t>(
                                                                            asked::body_t::filter_t{.generic_search_term = query})}});
     if (!got) {
       log(id_, "the directory of {}: {}", server.empty() ? std::string("the home server") : server, got.error().said());
-      sink_(change::directory_listed{id_, server, query, {}});
+      sink_(change::directory_listed{.by = id_, .server = server, .query = query, .more = since.has_value()});
       return;
     }
     std::vector<directory_room> rooms;
@@ -514,7 +530,12 @@ void account<Sink>::search_directory(std::string server, std::string query) {
                        .topic = one.topic.value_or(""),
                        .avatar = one.avatar_url,
                        .members = one.num_joined_members});
-    sink_(change::directory_listed{id_, server, query, std::move(rooms)});
+    sink_(change::directory_listed{.by = id_,
+                                   .server = server,
+                                   .query = query,
+                                   .rooms = std::move(rooms),
+                                   .next = got->next_batch,
+                                   .more = since.has_value()});
   });
 }
 
@@ -540,7 +561,7 @@ void account<Sink>::explore_space(std::string room) {
                          .avatar = one.avatar_url,
                          .members = one.num_joined_members,
                          .space = !one.children_state.empty() ||
-                                  splice::visit([](auto of) { return of.is_space; },
+                                  spl::visit([](auto of) { return of.is_space; },
                                                 room_type_of(one.room_type ? std::optional<std::string_view>(*one.room_type) : std::nullopt))});
     log(id_, "the rooms of {}: {} listed, {} of them spaces", room, rooms.size(),
         std::ranges::count_if(rooms, [](const directory_room& one) { return one.space; }));
@@ -636,7 +657,7 @@ void account<Sink>::list_packs(std::optional<std::string> room) {
     std::vector<emote_pack> found;
     if (!room) {
       if (const auto own = state_.account_data.find("im.ponies.user_emotes"); own != state_.account_data.end())
-        splice::visit(splice::overloaded{[&](const loom::ev::im_ponies_user_emotes_content_t& content) {
+        spl::visit(spl::overloaded{[&](const loom::ev::im_ponies_user_emotes_content_t& content) {
                                            found.push_back(packs::pack_of(content, std::nullopt, std::string()));
                                          },
                                          [](const auto&) {}},
@@ -646,7 +667,7 @@ void account<Sink>::list_packs(std::optional<std::string> room) {
         found.push_back(emote_pack{});
     } else if (const auto joined = state_.joined.find(*room); joined != state_.joined.end()) {
       for (const auto& [key, one] : joined->second.state.events)
-        splice::visit(splice::overloaded{[&](const loom::ev::im_ponies_room_emotes_content_t& content) {
+        spl::visit(spl::overloaded{[&](const loom::ev::im_ponies_room_emotes_content_t& content) {
                                            // An emptied one is a pack taken away.
                                            if (!content.images.empty() || content.pack)
                                              found.push_back(packs::pack_of(content, room, key.second));
@@ -663,7 +684,7 @@ void account<Sink>::save_pack(emote_pack pack) {
   this->spawn_guarded([this, pack = std::move(pack)]() mutable {
     // A new room pack: its state key made of its name.
     if (pack.chat && pack.key.empty()) {
-      pack.key = splice::bytes::key_text(pack.name);
+      pack.key = spl::bytes::key_text(pack.name);
       if (pack.key.empty())
         pack.key = "pack";
     }
@@ -721,12 +742,35 @@ void account<Sink>::search_people(std::string term) {
 
 template <class Sink>
 void account<Sink>::create_room(std::string name, std::string topic, bool open, std::string alias, bool federate,
-                                bool encrypted) {
+                                bool encrypted, mux::room_place place) {
   this->spawn_guarded([this, name = std::move(name), topic = std::move(topic), open, alias = std::move(alias), federate,
-                       encrypted] {
+                       encrypted, place = std::move(place)] {
     if (!api_)
       return;
     using made_t = loom::cs::create_room::body_t;
+    // What it is made as: a space, where asked; one of this server's only,
+    // where others are blocked -- Element's two switches, in its creation.
+    loom::ev::m_room_create_content_t creation;
+    if (!federate)
+      creation.m_federate = false;
+    if (place.make_space)
+      creation.type = "m.space";
+    // Its first state: encrypted, where asked; in a space, the space its
+    // parent and, where the space's members may join it, the rule saying so.
+    std::vector<made_t::state_event_t> first = encrypted && !place.make_space ? encrypted_from_the_start()
+                                                                              : std::vector<made_t::state_event_t>{};
+    if (place.space) {
+      loom::ev::m_space_parent_content_t parent;
+      parent.via = {this->server_of(*place.space)};
+      parent.canonical = true;
+      first.push_back({.type = "m.space.parent", .state_key = *place.space, .content = knot::raw{knot::to_json_string(parent)}});
+      if (place.space_members && !open) {
+        loom::ev::m_room_join_rules_content_t rule;
+        rule.join_rule = loom::ev::m_room_join_rules_content_t::join_rule_values::restricted{};
+        rule.allow = allow_of(proto::matrix::join_rule::restricted{{*place.space}});
+        first.push_back({.type = "m.room.join_rules", .state_key = "", .content = knot::raw{knot::to_json_string(rule)}});
+      }
+    }
     auto made = perform(
         *api_, loom::cs::create_room{
                    .body = {.visibility = open ? made_t::visibility_t{made_t::visibility_values::public_{}}
@@ -736,18 +780,24 @@ void account<Sink>::create_room(std::string name, std::string topic, bool open, 
                             .topic = topic.empty() ? std::nullopt : std::optional<std::string>(topic),
                             // Element's "Block anyone not part of the server":
                             // the room's creation content, as the spec has it.
-                            .creation_content = federate ? std::nullopt
-                                                         : std::optional<knot::raw>(knot::raw{R"({"m.federate":false})"}),
-                            // Encrypted, when asked, from the very start.
-                            .initial_state = encrypted ? std::optional(encrypted_from_the_start()) : std::nullopt,
+                            .creation_content = federate && !place.make_space
+                                                    ? std::nullopt
+                                                    : std::optional<knot::raw>(knot::raw{knot::to_json_string(creation)}),
+                            .initial_state = first.empty() ? std::nullopt : std::optional(std::move(first)),
                             .preset = open ? made_t::preset_t{made_t::preset_values::public_chat{}}
                                            : made_t::preset_t{made_t::preset_values::private_chat{}}}});
     if (!made) {
       log(id_, "could not make the room {}: {}", name, made.error().said());
       return;
     }
-    if (encrypted)
+    if (encrypted && !place.make_space)
       this->remember_encrypted(made->room_id);
+    // Listed in its space, as Element lists one made there.
+    if (place.space) {
+      loom::ev::m_space_child_content_t child;
+      child.via = {this->server_of(made->room_id)};
+      this->set_room_state(*place.space, "m.space.child", child, made->room_id);
+    }
     sink_(change::room_created{{id_, made->room_id}});
   });
 }

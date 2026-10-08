@@ -22,6 +22,7 @@ import loom.cs.redaction;
 import loom.cs.room_send;
 import loom.cs.rooms;
 import loom.cs.sync;
+import loom.cs.account_data;
 import loom.cs.typing;
 import loom.cs.wellknown;
 import mux.config;
@@ -56,9 +57,9 @@ void account<Sink>::crypto_answer_now(const loom::cs::sliding_sync::response_t& 
   if (extensions.to_device) {
     if (extensions.to_device->events)
       for (const auto& one : *extensions.to_device->events)
-        splice::visit(splice::overloaded{[&](const loom::ev::m_room_encrypted_content_t& content) {
+        spl::visit(spl::overloaded{[&](const loom::ev::m_room_encrypted_content_t& content) {
                                            if (auto said = crypto_->to_device(one.sender.value_or(""), content))
-                                             splice::visit(splice::overloaded{[&](const crypto::room_key_offer& offer) { this->vet_room_key(offer); },
+                                             spl::visit(spl::overloaded{[&](const crypto::room_key_offer& offer) { this->vet_room_key(offer); },
                                                                               [&](const crypto::secret_got& got) { this->secret_in(got); }},
                                                            *said);
                                          },
@@ -136,7 +137,7 @@ void account<Sink>::import_room_keys(std::string path, std::string passphrase) {
       sink_(change::refused{id_, "Not imported: encryption is not running for this account."});
       return;
     }
-    const std::optional<std::string> read = splice::bytes::file_text(path);
+    const std::optional<std::string> read = spl::bytes::file_text(path);
     if (!read) {
       sink_(change::refused{id_, std::format("Not imported: {} could not be read.", path)});
       return;
@@ -409,7 +410,18 @@ void account<Sink>::request_secrets(const std::string& device) {
     (void)perform(*api_, loom::cs::send_to_device{.event_type = "m.secret.request", .txn_id = this->transaction(),
                                                   .body = {.messages = std::move(messages)}});
   }
-  log(id_, "asked {} for the cross-signing keys and the backup key", device);
+  // And the key read mentions are sealed under, mux's own (not one of
+  // loom's names): asked the same way, kept apart.
+  {
+    const std::string request = this->transaction();
+    mentions_key_asked_.insert(request);
+    std::map<std::string, std::map<std::string, knot::raw>> messages;
+    messages[id_.address][device] = knot::raw{knot::to_json_string(crypto::secret_request_part{
+        .name = "net.mux.mentions_key", .requesting_device_id = crypto_->device_id(), .request_id = request})};
+    (void)perform(*api_, loom::cs::send_to_device{.event_type = "m.secret.request", .txn_id = this->transaction(),
+                                                  .body = {.messages = std::move(messages)}});
+  }
+  log(id_, "asked {} for the cross-signing keys, the backup key and the mentions key", device);
 }
 
 // A secret given: taken only as the answer to one asked here, from this
@@ -421,6 +433,17 @@ template <class Sink>
 void account<Sink>::secret_in(const crypto::secret_got& got) {
   if (!api_ || !crypto_)
     return;
+  // The mentions key: kept, where it is one, from a session verified here.
+  if (mentions_key_asked_.contains(got.request_id)) {
+    if (got.sender != id_.address || !std::ranges::contains(crypto_->verified_keys(id_.address), got.ed25519))
+      return;
+    mentions_key_asked_.erase(got.request_id);
+    if (auto bytes = crypto::from_base64(got.secret); bytes && bytes->size() == 32) {
+      this->keep_mentions_key(std::move(*bytes));
+      log(id_, "the mentions key given by another session of yours");
+    }
+    return;
+  }
   const auto asked = secrets_asked_.find(got.request_id);
   if (asked == secrets_asked_.end() || got.sender != id_.address)
     return;
@@ -430,7 +453,7 @@ void account<Sink>::secret_in(const crypto::secret_got& got) {
   }
   const crypto::secret_name_t which = asked->second;
   secrets_asked_.erase(asked);
-  splice::visit(splice::overloaded{[&](crypto::secret_name::master) { secrets_got_.master = got.secret; },
+  spl::visit(spl::overloaded{[&](crypto::secret_name::master) { secrets_got_.master = got.secret; },
                                    [&](crypto::secret_name::self_signing) { secrets_got_.self_signing = got.secret; },
                                    [&](crypto::secret_name::user_signing) { secrets_got_.user_signing = got.secret; },
                                    [&](crypto::secret_name::backup) {
@@ -467,21 +490,29 @@ template <class Sink>
 void account<Sink>::secret_request_in(const std::string& sender, const loom::ev::m_secret_request_content_t& content) {
   if (!api_ || !crypto_ || sender != id_.address || content.requesting_device_id == crypto_->device_id() || !content.name)
     return;
-  const bool asking = splice::visit(splice::overloaded{[](loom::ev::m_secret_request_content_t::action_values::request_) { return true; },
+  const bool asking = spl::visit(spl::overloaded{[](loom::ev::m_secret_request_content_t::action_values::request_) { return true; },
                                                        [](const auto&) { return false; }},
                                     content.action);
   if (!asking)
     return;
+  // The secret asked for, as this device has it: one of loom's names, or
+  // mux's own mentions key -- told apart where the name comes in.
   const auto keys = crypto_->cross_signing_keys();
   const auto which = crypto::secret_name_of(*content.name);
-  if (!keys || !which)
-    return;
-  const std::optional<std::string> secret =
-      splice::visit(splice::overloaded{[&](crypto::secret_name::master) { return std::optional<std::string>(keys->master); },
-                                       [&](crypto::secret_name::self_signing) { return std::optional<std::string>(keys->self_signing); },
-                                       [&](crypto::secret_name::user_signing) { return std::optional<std::string>(keys->user_signing); },
-                                       [](crypto::secret_name::backup) { return std::optional<std::string>(); }},
-                    *which);
+  std::optional<std::string> secret;
+  if (which && keys)
+    secret = spl::visit(spl::overloaded{[&](crypto::secret_name::master) { return std::optional<std::string>(keys->master); },
+                                        [&](crypto::secret_name::self_signing) { return std::optional<std::string>(keys->self_signing); },
+                                        [&](crypto::secret_name::user_signing) { return std::optional<std::string>(keys->user_signing); },
+                                        [](crypto::secret_name::backup) { return std::optional<std::string>(); }},
+                        *which);
+  else if (!which)
+    spl::visit(spl::overloaded{[&](own_secret::mentions_key) {
+                                 if (this->mentions_key())
+                                   secret = spl::bytes::base64_text(*this->mentions_key());
+                               },
+                               [](own_secret::other) {}},
+               own_secret_of(*content.name));
   if (!secret)
     return;
   auto got = this->keys_of(id_.address);
@@ -559,13 +590,12 @@ auto account<Sink>::own_sessions_now() -> std::optional<std::vector<own_session>
                               : crypto::device_of(*got, id_.address, curve->second, crypto_->pinned_master(id_.address));
     return identity && (identity->cross_signed || std::ranges::contains(verified_here, identity->ed25519));
   };
-  return mine->second | std::views::transform([&](const auto& each) {
+  return std::ranges::to<std::vector>(std::views::transform(mine->second, [&](const auto& each) {
            const auto& [id, info] = each;
            return own_session{.id = id,
                               .name = info.unsigned_ && info.unsigned_->device_display_name ? *info.unsigned_->device_display_name : id,
                               .trusted = trusted(id, info)};
-         }) |
-         std::ranges::to<std::vector>();
+         }));
 }
 
 template <class Sink>
@@ -577,8 +607,7 @@ void account<Sink>::check_own_sessions() {
     return;
   const auto here = std::ranges::find(*all, crypto_->device_id(), &own_session::id);
   const bool this_one = here != all->end() && here->trusted;
-  const auto others = *all | std::views::filter([&](const own_session& one) { return one.id != crypto_->device_id() && !one.trusted; }) |
-                      std::views::transform(&own_session::name) | std::ranges::to<std::vector>();
+  const auto others = std::ranges::to<std::vector>(std::views::transform(std::views::filter(*all, [&](const own_session& one) { return one.id != crypto_->device_id() && !one.trusted; }), &own_session::name));
   if (!this_one)
     sink_(change::notice{id_, "Verify this session",
                          "Verify this session to allow it to read your message history, and so that others can trust "
@@ -587,7 +616,7 @@ void account<Sink>::check_own_sessions() {
   if (!others.empty())
     sink_(change::notice{id_, "New login. Was this you?",
                          std::format("Not verified: {}. Verify each from Sessions -- or sign it out, if it was not you.",
-                                     others | std::views::join_with(std::string_view(", ")) | std::ranges::to<std::string>())});
+                                     std::ranges::to<std::string>(std::views::join_with(others, std::string_view(", "))))});
 }
 }  // namespace mux::proto::matrix::client
 
@@ -597,8 +626,8 @@ void account<Sink>::withheld_in(const loom::ev::m_room_key_withheld_content_t& c
   if (!content.session_id)
     return;
   using codes = loom::ev::m_room_key_withheld_content_t::code_values;
-  const std::string said = splice::visit(
-      splice::overloaded{
+  const std::string said = spl::visit(
+      spl::overloaded{
           [](codes::m_unverified) { return std::string("🔒 You don't have access to this message: the sender does not trust this session (it is not verified)."); },
           [](codes::m_blacklisted) { return std::string("🔒 You don't have access to this message: the sender has blocked this session."); },
           [](codes::m_unauthorised) { return std::string("🔒 You don't have access to this message."); },
@@ -641,4 +670,109 @@ void account<Sink>::accept_identity(std::string user) {
   identity_changed_.erase(user);
   this->tell_trust(std::move(user));
 }
+
+// Read mentions shared between this account's sessions: a room's account
+// data, net.mux.mentions_read (loom's net_mux_mentions_read_content_t) --
+// seen, the event IDs, in the clear; or sealed, as Secret Storage seals a
+// secret, under a key of its own named for the room.
+using mentions_read = loom::ev::net_mux_mentions_read_content_t;
+inline constexpr std::string_view kMentionsRead = "net.mux.mentions_read";
+inline constexpr std::string_view kMentionsKeySecret = "net.mux.mentions_key";
+// The most a room's list keeps: what each session keeps, a few times over.
+inline constexpr std::size_t kMentionsShared = 2000;
+[[nodiscard]] inline std::string mentions_sealed_for(std::string_view room) {
+  return std::string(kMentionsRead) + ":" + std::string(room);
+}
+
+template <class Sink>
+void account<Sink>::set_mentions_sharing(bool shared, bool sealed) {
+  how_.mentions_shared = shared;
+  how_.mentions_sealed = sealed;
+  mentions_key_missing_told_ = false;
+}
+template <class Sink>
+std::filesystem::path account<Sink>::mentions_key_file() const {
+  return std::filesystem::path(this->kept_file()).concat(".mentions-key");
+}
+template <class Sink>
+const std::optional<std::vector<std::uint8_t>>& account<Sink>::mentions_key() {
+  if (!mentions_key_read_) {
+    mentions_key_read_ = true;
+    if (const auto opened = how_.vault->read_file(this->mentions_key_file()))
+      if (auto bytes = crypto::from_base64(*opened); bytes && bytes->size() == 32)
+        mentions_key_ = std::move(*bytes);
+  }
+  return mentions_key_;
+}
+template <class Sink>
+void account<Sink>::keep_mentions_key(std::vector<std::uint8_t> key) {
+  if (!how_.vault->write_file(this->mentions_key_file(), spl::bytes::base64_text(key), true))
+    log(id_, "the key read mentions are sealed under could not be kept in {}", this->mentions_key_file().string());
+  mentions_key_ = std::move(key);
+  mentions_key_read_ = true;
+}
+template <class Sink>
+void account<Sink>::mentions_from(const conversation_id& in, const mentions_read& read) {
+  if (!how_.mentions_shared)
+    return;
+  std::vector<std::string> seen;
+  if (read.seen) {
+    seen = *read.seen;
+  } else if (read.sealed) {
+    const auto& key = this->mentions_key();
+    if (!key)
+      return;
+    const crypto::sealed_secret sealed{.iv = read.sealed->iv, .ciphertext = read.sealed->ciphertext, .mac = read.sealed->mac};
+    // What opens is plaintext come in as text: read once, here.
+    const auto opened = crypto::detail::open_secret(*key, mentions_sealed_for(in.id), sealed);
+    if (!opened)
+      return;
+    auto list = knot::try_read<std::vector<std::string>>(std::string_view(*opened));
+    if (!list)
+      return;
+    seen = std::move(*list);
+  }
+  mentions_remote_[in.id].insert(seen.begin(), seen.end());
+  if (!seen.empty())
+    sink_(change::marks_seen{in, std::move(seen)});
+}
+template <class Sink>
+void account<Sink>::share_marks_seen(std::string room, std::vector<std::string> seen) {
+  if (!how_.mentions_shared || !api_)
+    return;
+  auto& remote = mentions_remote_[room];
+  const auto news = [&](const std::string& one) { return !remote.contains(one); };
+  if (std::ranges::none_of(seen, news))
+    return;
+  // What the server has, then what is news to it: the oldest let go past
+  // the most a list keeps.
+  std::vector<std::string> all(remote.begin(), remote.end());
+  std::ranges::copy_if(seen, std::back_inserter(all), news);
+  if (all.size() > kMentionsShared)
+    all.erase(all.begin(), all.end() - static_cast<std::ptrdiff_t>(kMentionsShared));
+  mentions_read body;
+  if (how_.mentions_sealed) {
+    const auto& key = this->mentions_key();
+    if (!key) {
+      if (!std::exchange(mentions_key_missing_told_, true))
+        sink_(change::notice{id_, "Read mentions not synced",
+                             "They are to be sealed, and this session has no key for them yet. Restore with the recovery "
+                             "key (Accounts, Encryption) once, and they go from then on -- or turn sealing off."});
+      return;
+    }
+    const crypto::sealed_secret sealed = crypto::detail::seal_secret(*key, mentions_sealed_for(room), knot::to_json_string(all));
+    body.sealed = mentions_read::sealed_t{.iv = sealed.iv, .ciphertext = sealed.ciphertext, .mac = sealed.mac};
+  } else {
+    body.seen = all;
+  }
+  remote.insert(seen.begin(), seen.end());
+  this->spawn_guarded([this, room = std::move(room), text = knot::to_json_string(body)] {
+    if (!api_)
+      return;
+    if (!perform(*api_, loom::cs::set_account_data_per_room{.user_id = id_.address, .room_id = room,
+                                                              .type = std::string(kMentionsRead), .body = knot::raw{text}}))
+      log(id_, "the mentions read in {} could not be shared", room);
+  });
+}
+
 }  // namespace mux::proto::matrix::client

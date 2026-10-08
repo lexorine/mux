@@ -12,16 +12,16 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
     # The dependency family, at the commits mux's own CMakeLists.txt pins.
-    chevron = { url = "github:j4niwzis/chevron/bbc3e0d2a2b67f1cd039c582ef131bafa2d81348"; flake = false; };
-    knot = { url = "github:j4niwzis/knot/fa98812b7a63dde5d81dcd51f3ee0dceb6f98678"; flake = false; };
-    loom = { url = "github:j4niwzis/loom/96447ca69ee375f72ecca7a71764ce2dba36d336"; flake = false; };
-    splice = { url = "github:j4niwzis/splice/c3dc7bcff228014456b6f4b925da01118cb9e6f1"; flake = false; };
-    tern = { url = "github:j4niwzis/tern/92676a097f5b1b4c3c0874b23b3e864b4d892248"; flake = false; };
+    chevron = { url = "github:j4niwzis/chevron/8f40c545f0120747b3bf2ad6a61b420505e1249b"; flake = false; };
+    knot = { url = "github:j4niwzis/knot/f915e34f13265ee1302775cd4851dbfdf6201b24"; flake = false; };
+    loom = { url = "github:j4niwzis/loom/cf76d9f2c7179b411944f6e24df05f4335da8d7a"; flake = false; };
+    splice = { url = "github:j4niwzis/splice/8a7755a335917daf3bbfc54ef8a3a160f8445d15"; flake = false; };
+    tern = { url = "github:j4niwzis/tern/4178dfe4aa539799a04a71e3c6fde3a62c84d8d8"; flake = false; };
     boost-pfr = { url = "github:boostorg/pfr/401385c240027423acbb1eb6dea2abe0043db5aa"; flake = false; };
-    skiff = { url = "github:j4niwzis/skiff/547091adbc241e7dd7498c0a2a86e4b39e8b0b20"; flake = false; };
-    skiff-widgets = { url = "github:j4niwzis/skiff-widgets/0cdf560945dad34417600d3cfc50136dddcd7431"; flake = false; };
+    skiff = { url = "github:j4niwzis/skiff/3ccd977a1e4c86a3868d1df27599b8cb384d11c4"; flake = false; };
+    skiff-widgets = { url = "github:j4niwzis/skiff-widgets/dd4713eeaf699a51ba65e74f35fa0b5f27e71f95"; flake = false; };
     # alef: the pin mux's CMakeLists.txt carries.
-    alef = { url = "github:j4niwzis/alef/af2097d1ce5571fd22435540d411a774c199968e"; flake = false; };
+    alef = { url = "github:j4niwzis/alef/ca0dacaab3c6dd5a9dfb3fc4c2322b756f36f744"; flake = false; };
 
     # Assets mux #embed s. CMake checks for these before downloading, so
     # pre-creating them keeps configure off the network.
@@ -64,9 +64,9 @@
       # minutes and then die with SIGSEGV, on both prtapc and a GitHub
       # runner. Nothing writes to the read-only source tree any more.
       cmeArchive = pkgs.fetchurl {
-        url = "https://github.com/j4niwzis/cmake-everywhere/releases/download/v0.2.36/cmake-everywhere-0.2.36.tar.gz";
+        url = "https://github.com/j4niwzis/cmake-everywhere/releases/download/v0.2.44/cmake-everywhere-0.2.44.tar.gz";
         # Same digest get_cme.cmake has compiled in for v0.2.36.
-        hash = "sha256-TDOkNrSXf1WCScLoeq6guHaGP6ltHc4erf/uNd0Wt2s=";
+        hash = "sha256-lzOFZg7ORrB1G0q5hYAPnMXcF6Y81ZyEDR5CUlAaAuU=";
       };
 
       # cme's documented offline mechanism, in its own words: "A checkout

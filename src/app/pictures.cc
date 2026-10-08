@@ -125,7 +125,7 @@ class pictures_part {
         };
       });
     };
-    splice::visit(splice::overloaded{[&](const media_use::avatar& one) {
+    spl::visit(spl::overloaded{[&](const media_use::avatar& one) {
                             // An avatar is shown at 120 px at most -- twice that on a dense screen.
                             shown(mux::ui::avatar_images(), one.of, 256);
                           },
@@ -160,7 +160,7 @@ class pictures_part {
                picture.use);
     if (!fresh)
       return;
-    splice::visit(splice::overloaded{[](const media_use::avatar&) {}, [](const media_use::thumbnail&) {},
+    spl::visit(spl::overloaded{[](const media_use::avatar&) {}, [](const media_use::thumbnail&) {},
                                      [](const media_use::whole&) {}, [](const media_use::to_copy&) {},
                                      [&](const auto&) { this->keep(picture.use, picture.source, picture.bytes); }},
                   picture.use);
@@ -220,20 +220,26 @@ class pictures_part {
             if (const message* root = mux::ui::held_message(one, *open))
               in_thread.push_back(root);
             if (const auto found = one.threads.find(*open); found != one.threads.end())
-              std::ranges::copy(found->second | std::views::transform([](const message& answer) { return &answer; }),
+              std::ranges::copy(std::views::transform(found->second, [](const message& answer) { return &answer; }),
                                 std::back_inserter(in_thread));
           }
-          senders.insert_range(in_thread | std::views::transform([](const message* said) -> std::string_view { return said->sender; }));
-          for (const member& each : one.members)
-            if (senders.contains(each.id))
-              want(id, each.avatar, each.id);
+          senders.insert_range(std::views::transform(in_thread, [](const message* said) -> std::string_view { return said->sender; }));
+          // Each sender looked up, not every member walked for them.
+          const auto& placed = mux::ui::names_of(one).at;
+          const auto member_called = [&](std::string_view who) -> const member* {
+            const auto found = placed.find(std::string(who));
+            return found != placed.end() && found->second < one.members.size() ? &one.members[found->second] : nullptr;
+          };
+          for (const std::string_view sender : senders)
+            if (const member* each = member_called(sender))
+              want(id, each->avatar, each->id);
           // Those the forwards made are from: a member's picture as theirs,
           // anyone else's profile asked of their server, once, and its
           // picture then.
           for (std::size_t i = first; i < last && i < one.timeline.size(); ++i)
             if (const auto& forwarded = one.timeline[i].forwarded; forwarded && mux::proto::person_link(mux::state_before(mux::proto::protocol_of(forwarded->from)), forwarded->from)) {
               const std::string& from = forwarded->from;
-              if (const auto in_room = std::ranges::find(one.members, from, &member::id); in_room != one.members.end() && in_room->avatar)
+              if (const member* in_room = member_called(from); in_room && in_room->avatar)
                 want(id, in_room->avatar, from);
               else if (const auto known = profile_avatars.find(from); known != profile_avatars.end())
                 want(id, known->second, from);
@@ -484,7 +490,7 @@ class pictures_part {
   // one; touched, so it comes first.
   void save_gif(const std::string& source) {
     const auto kept = kept_file(media_use::whole{}, source);
-    auto bytes_read = kept ? splice::bytes::file_text(*kept) : std::nullopt;
+    auto bytes_read = kept ? spl::bytes::file_text(*kept) : std::nullopt;
     if (!bytes_read) {
       s_->root().show_message("GIFs", "The GIF has not loaded yet. Save it once it plays.");
       return;
@@ -587,7 +593,7 @@ class pictures_part {
     const auto kept = kept_file(media_use::whole{}, source);
     if (!kept)
       return std::nullopt;
-    return splice::bytes::file_text(*kept);
+    return spl::bytes::file_text(*kept);
   }
   // Bytes written where the dialog said, and said.
   void write_chosen(const std::string& bytes, const std::string& path) {
@@ -611,7 +617,7 @@ class pictures_part {
     const auto named = [&](std::string_view kind) {
       return std::optional(mux::config::cache_path("avatars") / (std::string(kind) + mux::config::file_name_of(source)));
     };
-    return splice::visit(splice::overloaded{[&](const media_use::avatar&) { return named(""); },
+    return spl::visit(spl::overloaded{[&](const media_use::avatar&) { return named(""); },
                                  [&](const media_use::thumbnail&) { return named("thumb_"); },
                                  [&](const media_use::whole&) { return named("full_"); },
                                  [](const media_use::to_open&) { return std::optional<std::filesystem::path>(); },
@@ -662,7 +668,7 @@ class pictures_part {
     const auto where = kept_file(use, source);
     if (!where)
       return false;
-    auto bytes_read = splice::bytes::file_text(*where);
+    auto bytes_read = spl::bytes::file_text(*where);
     if (!bytes_read)
       return false;
     std::string bytes = std::move(*bytes_read);
@@ -755,7 +761,7 @@ class pictures_part {
         ".exe", ".com", ".bat", ".cmd", ".scr", ".pif", ".msi", ".msp", ".lnk", ".url", ".js",   ".jse",
         ".vbs", ".vbe", ".wsf", ".wsh", ".ps1", ".psm1", ".hta", ".cpl", ".reg", ".jar", ".desktop", ".sh",
         ".run", ".appimage", ".command", ".app", ".pkg", ".dmg", ".apk", ".py", ".pl", ".deb"};
-    const std::string extension = splice::bytes::lower_text(name.extension().string());
+    const std::string extension = spl::bytes::lower_text(name.extension().string());
     return std::ranges::contains(kinds, std::string_view(extension));
   }
   void save_download(const std::string& bytes, std::string name, bool open) {

@@ -15,7 +15,7 @@ import :config_limits;
 export namespace mux::config {
 // What an account is known by: what its protocol says -- a JID, a user ID.
 [[nodiscard]] inline const std::string& address_of(const account_t& one) noexcept {
-  return splice::visit([](const auto& each) -> const std::string& { return address_of(each); }, one.own);
+  return spl::visit([](const auto& each) -> const std::string& { return address_of(each); }, one.own);
 }
 
 [[nodiscard]] inline bool& enabled_of(account_t& one) noexcept {
@@ -38,17 +38,59 @@ template <class Kept>
 }
 }  // namespace only_verified_defaults
 [[nodiscard]] inline std::optional<bool>* only_verified_in(account_t& one) {
-  return splice::visit([](auto& each) -> std::optional<bool>* {
+  return spl::visit([](auto& each) -> std::optional<bool>* {
     using only_verified_defaults::only_verified_in;
     return only_verified_in(each);
   }, one.own);
 }
 [[nodiscard]] inline bool only_verified_of(const account_t& one) {
-  const std::optional<bool>* kept = splice::visit([](const auto& each) -> const std::optional<bool>* {
+  const std::optional<bool>* kept = spl::visit([](const auto& each) -> const std::optional<bool>* {
     using only_verified_defaults::only_verified_in;
     return only_verified_in(each);
   }, one.own);
   return kept && kept->value_or(false);
+}
+// Whether an account shares the mentions read with its other sessions, and
+// seals them there: where its protocol keeps that (mentions_shared_in and
+// mentions_sealed_in(kept), by ADL); none for another.
+namespace mentions_defaults {
+template <class Kept>
+[[nodiscard]] auto mentions_shared_in(Kept&) -> std::conditional_t<std::is_const_v<Kept>, const std::optional<bool>*, std::optional<bool>*> {
+  return nullptr;
+}
+template <class Kept>
+[[nodiscard]] auto mentions_sealed_in(Kept&) -> std::conditional_t<std::is_const_v<Kept>, const std::optional<bool>*, std::optional<bool>*> {
+  return nullptr;
+}
+}  // namespace mentions_defaults
+[[nodiscard]] inline std::optional<bool>* mentions_shared_in(account_t& one) {
+  return spl::visit([](auto& each) -> std::optional<bool>* {
+    using mentions_defaults::mentions_shared_in;
+    return mentions_shared_in(each);
+  }, one.own);
+}
+[[nodiscard]] inline std::optional<bool>* mentions_sealed_in(account_t& one) {
+  return spl::visit([](auto& each) -> std::optional<bool>* {
+    using mentions_defaults::mentions_sealed_in;
+    return mentions_sealed_in(each);
+  }, one.own);
+}
+// As they are now; none where the account's protocol cannot share them.
+struct mentions_choice {
+  bool shared = false;
+  bool sealed = false;
+  friend bool operator==(const mentions_choice&, const mentions_choice&) = default;
+};
+[[nodiscard]] inline std::optional<mentions_choice> mentions_choice_of(const account_t& one) {
+  return spl::visit([](const auto& each) -> std::optional<mentions_choice> {
+    using mentions_defaults::mentions_shared_in;
+    using mentions_defaults::mentions_sealed_in;
+    const std::optional<bool>* shared = mentions_shared_in(each);
+    const std::optional<bool>* sealed = mentions_sealed_in(each);
+    if (!shared || !sealed)
+      return std::nullopt;
+    return mentions_choice{shared->value_or(false), sealed->value_or(false)};
+  }, one.own);
 }
 [[nodiscard]] inline std::optional<bool>& read_receipts_in(account_t& one) {
   return one.shared.read_receipts;
@@ -110,7 +152,7 @@ struct decrypt {
 [[nodiscard]] inline std::optional<std::string> new_passphrase_refused(const std::string& fresh, const std::string& again) {
   if (fresh.empty())
     return "Type a passphrase.";
-  if (std::ranges::distance(fresh | std::views::filter([](char c) { return (c & 0xC0) != 0x80; })) < 10)
+  if (std::ranges::distance(std::views::filter(fresh, [](char c) { return (c & 0xC0) != 0x80; })) < 10)
     return "A passphrase of at least 10 characters.";
   if (fresh != again)
     return "The new passphrase is not the same twice.";
@@ -223,7 +265,7 @@ struct decrypt {
 
 // The name of an account's protocol, as the user reads it.
 [[nodiscard]] inline std::string_view protocol_name(const account_t& one) noexcept {
-  return splice::visit([](const auto& each) { return protocol_name(each); }, one.own);
+  return spl::visit([](const auto& each) { return protocol_name(each); }, one.own);
 }
 
 constexpr bool is_matrix(std::string_view address) noexcept { return address.starts_with('@'); }
@@ -243,14 +285,14 @@ template <class... Tags>
 
 // The accounts of a file as the program holds them, and back.
 [[nodiscard]] inline std::optional<account_t> account_of(const saved_account& one) {
-  return splice::visit(splice::overloaded{[](const knot::value&) { return std::optional<account_t>(); },
+  return spl::visit(spl::overloaded{[](const knot::value&) { return std::optional<account_t>(); },
                                           [&](const auto& own) {
                                             return std::optional<account_t>(account_t{.own = kept_t{own}, .shared = one.shared});
                                           }},
                        one.own.data());
 }
 [[nodiscard]] inline saved_account saved_of(const account_t& one) {
-  return splice::visit([&](const auto& own) {
+  return spl::visit([&](const auto& own) {
     return saved_account{.protocol = std::string(protocol_word(own)), .own = kept_saved_t{own}, .shared = one.shared};
   }, one.own);
 }
@@ -266,21 +308,18 @@ template <class... Tags>
 }
 // The accounts of a protocol this build has not: kept to be written back.
 [[nodiscard]] inline std::vector<saved_account> foreign_of(const file& from) {
-  return from.accounts.value_or(std::vector<saved_account>{}) |
-         std::views::filter([](const saved_account& one) { return !account_of(one).has_value(); }) |
-         std::ranges::to<std::vector>();
+  return std::ranges::to<std::vector>(std::views::filter(from.accounts.value_or(std::vector<saved_account>{}), [](const saved_account& one) { return !account_of(one).has_value(); }));
 }
 [[nodiscard]] inline file file_of(std::span<const account_t> accounts, std::span<const saved_account> foreign = {}) {
   file out;
-  out.accounts = accounts | std::views::transform([](const account_t& one) { return saved_of(one); }) |
-                 std::ranges::to<std::vector>();
+  out.accounts = std::ranges::to<std::vector>(std::views::transform(accounts, [](const account_t& one) { return saved_of(one); }));
   out.accounts->append_range(foreign);
   return out;
 }
 
 // What is wrong with an account as typed: its protocol's check(kept), by ADL.
 std::optional<std::string> check(const account_t& one) {
-  return splice::visit([](const auto& each) { return check(each); }, one.own);
+  return spl::visit([](const auto& each) { return check(each); }, one.own);
 }
 
 // Where what the program keeps between runs, and could make again, is put:

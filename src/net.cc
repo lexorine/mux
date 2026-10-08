@@ -226,6 +226,75 @@ inline tls client_tls() {
   return tls(std::move(made));
 }
 
+// How a server's certificate is checked: against its name, always (as
+// asio's host_name_verification); and for trust, by OpenSSL against the
+// system's CAs -- or, on Android, by Android itself, as its own TLS would
+// (mux_android_trusts): the whole chain the server sent, decided once, at
+// the leaf. Earlier depths are let through there: OpenSSL has no CAs of
+// Android's to build the chain with, and Android builds it.
+struct peer_verification {
+  std::string host;
+  // What Android said of this connection's chain, once asked, and why not.
+  std::shared_ptr<std::optional<bool>> android_said = std::make_shared<std::optional<bool>>();
+  std::shared_ptr<std::string> refused = std::make_shared<std::string>();
+  bool operator()(bool preverified, asio::ssl::verify_context& context) const {
+#if defined(__ANDROID__)
+    (void)preverified;  // OpenSSL's own verdict: it holds none of Android's CAs
+    ::X509_STORE_CTX* store = context.native_handle();
+    if (::X509_STORE_CTX_get_error_depth(store) > 0)
+      return true;
+    if (!android_said->has_value()) {
+      // The chain as the server sent it, leaf first, each DER-encoded.
+      const STACK_OF(X509)* sent = ::X509_STORE_CTX_get0_untrusted(store);
+      std::vector<std::vector<unsigned char>> ders;
+      const int count = sent ? sk_X509_num(sent) : 0;
+      for (int at = 0; at < count; ++at) {
+        ::X509* one = sk_X509_value(sent, at);
+        const int size = ::i2d_X509(one, nullptr);
+        if (size <= 0)
+          continue;
+        std::vector<unsigned char> der(static_cast<std::size_t>(size));
+        unsigned char* into = der.data();
+        ::i2d_X509(one, &into);
+        ders.push_back(std::move(der));
+      }
+      if (ders.empty())
+        if (::X509* leaf = ::X509_STORE_CTX_get0_cert(store)) {
+          const int size = ::i2d_X509(leaf, nullptr);
+          std::vector<unsigned char> der(static_cast<std::size_t>(size > 0 ? size : 0));
+          unsigned char* into = der.data();
+          if (size > 0 && ::i2d_X509(leaf, &into) > 0)
+            ders.push_back(std::move(der));
+        }
+      const std::vector<const unsigned char*> pointers =
+          std::ranges::to<std::vector<const unsigned char*>>(std::views::transform(ders, [](const auto& one) { return one.data(); }));
+      const std::vector<std::size_t> sizes =
+          std::ranges::to<std::vector<std::size_t>>(std::views::transform(ders, [](const auto& one) { return one.size(); }));
+      char why[256] = {};
+      *android_said = mux_android_trusts(pointers.data(), sizes.data(), pointers.size(), host.c_str(), why, sizeof why);
+      if (!**android_said)
+        *refused = why;
+    }
+    if (!**android_said) {
+      ::X509_STORE_CTX_set_error(store, X509_V_ERR_CERT_UNTRUSTED);
+      return false;
+    }
+    // Trusted by Android: the name checked as anywhere else.
+    return asio::ssl::host_name_verification(host)(true, context);
+#else
+    return asio::ssl::host_name_verification(host)(preverified, context);
+#endif
+  }
+};
+
+// Why a peer's certificate was not trusted, in OpenSSL's words ("unable to
+// get local issuer certificate", "certificate has expired"), where that was
+// what failed: what "certificate verify failed" alone did not say.
+inline std::string verify_reason(const ::SSL* connection) {
+  const long result = ::SSL_get_verify_result(connection);
+  return result == X509_V_OK ? std::string() : std::string(::X509_verify_cert_error_string(result));
+}
+
 // A server's TLS settings, from its certificate chain and key in PEM:
 // what a test's server, or a local one, speaks with.
 inline tls server_tls(std::string_view certificate_pem, std::string_view key_pem) {
@@ -312,7 +381,7 @@ class stream {
     if (!::SSL_set_tlsext_host_name(stream_.native_handle(), name.c_str()))
       return false;
     stream_.set_verify_mode(asio::ssl::verify_peer);
-    stream_.set_verify_callback(asio::ssl::host_name_verification(name));
+    stream_.set_verify_callback(peer_verification{name});
     const auto [error] = owner_->await<>([&](auto done) {
       stream_.async_handshake(asio::ssl::stream_base::client, std::move(done));
     });
@@ -445,20 +514,48 @@ class descriptor {
   asio::posix::stream_descriptor stream_;
 };
 
+// How long a host's name is looked up for, and its addresses tried, before
+// it is given up on: each waited for as long as the system let it -- a
+// connect whose first packet is dropped, two minutes and more -- and an
+// account stood offline with nothing said.
+inline constexpr std::chrono::seconds kResolveFor{15};
+inline constexpr std::chrono::seconds kConnectFor{15};
+
 // A host's addresses, each tried in turn: the connected socket.
 inline tcp::socket connect(loop& owner, std::string_view host, std::uint16_t port) {
   tcp::resolver resolver(owner.io());
+  bool resolve_expired = false;
+  asio::steady_timer resolving(owner.io(), kResolveFor);
+  resolving.async_wait([&](error_code ended) {
+    if (!ended) {
+      resolve_expired = true;
+      resolver.cancel();
+    }
+  });
   const auto [resolved, found] = owner.await<tcp::resolver::results_type>([&](auto done) {
     resolver.async_resolve(std::string(host), std::to_string(port), std::move(done));
   });
+  resolving.cancel();
   if (resolved)
-    throw failure("resolving " + std::string(host), resolved);
+    throw failure("resolving " + std::string(host) + (resolve_expired ? " (timed out)" : ""),
+                  resolve_expired ? error_code(asio::error::timed_out) : resolved);
   tcp::socket socket(owner.io());
+  bool connect_expired = false;
+  asio::steady_timer connecting(owner.io(), kConnectFor);
+  connecting.async_wait([&](error_code ended) {
+    if (!ended) {
+      connect_expired = true;
+      error_code ignored;
+      socket.cancel(ignored);
+    }
+  });
   const auto [connected, to] = owner.await<tcp::endpoint>([&](auto done) {
     asio::async_connect(socket, found, std::move(done));
   });
+  connecting.cancel();
   if (connected)
-    throw failure("connecting to " + std::string(host), connected);
+    throw failure("connecting to " + std::string(host) + (connect_expired ? " (timed out)" : ""),
+                  connect_expired ? error_code(asio::error::timed_out) : connected);
   return socket;
 }
 
@@ -469,7 +566,7 @@ namespace proxy_kind {
 struct socks5 {};
 struct http {};
 }  // namespace proxy_kind
-using proxy_kind_t = splice::variant<proxy_kind::socks5, proxy_kind::http>;
+using proxy_kind_t = spl::variant<proxy_kind::socks5, proxy_kind::http>;
 
 // Who a domain's SRV records are asked of, through a proxy: the system's
 // nameserver (where the proxy can reach it), none at all, or one chosen --
@@ -481,7 +578,7 @@ struct server {
   asio::ip::address address;
 };
 }  // namespace srv_lookup
-using srv_lookup_t = splice::variant<srv_lookup::system, srv_lookup::none, srv_lookup::server>;
+using srv_lookup_t = spl::variant<srv_lookup::system, srv_lookup::none, srv_lookup::server>;
 // As a profile says it, read once: unset the system's; "off" none; else a
 // nameserver's address -- and none where it is not one, rather than the
 // system's, which the user had chosen not to ask.
@@ -634,7 +731,7 @@ inline void http_connect(loop& owner, tcp::socket& socket, const proxy& via, std
 // there -- a router's page, a printer's -- from the user's machine. A name
 // that resolves to such an address is not caught here.
 [[nodiscard]] inline bool public_host(std::string_view host) {
-  const std::string lower = splice::bytes::lower_text(host);
+  const std::string lower = spl::bytes::lower_text(host);
   if (lower == "localhost" || lower.ends_with(".localhost") || lower.ends_with(".local") ||
       lower.ends_with(".internal") || lower.ends_with(".lan") || (!lower.contains('.') && !lower.contains(':')))
     return false;
@@ -658,7 +755,7 @@ inline tcp::socket connect(loop& owner, const std::optional<proxy>& via, std::st
   if (!via)
     return connect(owner, host, port);
   tcp::socket socket = connect(owner, via->host, via->port);
-  splice::visit(splice::overloaded{[&](proxy_kind::socks5) { detail::socks5(owner, socket, *via, host, port); },
+  spl::visit(spl::overloaded{[&](proxy_kind::socks5) { detail::socks5(owner, socket, *via, host, port); },
                                    [&](proxy_kind::http) { detail::http_connect(owner, socket, *via, host, port); }},
                 via->kind);
   return socket;
@@ -798,8 +895,8 @@ inline std::vector<tern::srv::target> xmpp_targets(loop& owner, const std::optio
   std::vector<tern::srv::target> found;
   // Whom to ask: the system's nameserver, where one the proxy can reach;
   // the one chosen; or none.
-  const std::optional<asio::ip::address> asked = splice::visit(
-      splice::overloaded{[](srv_lookup::system) -> std::optional<asio::ip::address> {
+  const std::optional<asio::ip::address> asked = spl::visit(
+      spl::overloaded{[](srv_lookup::system) -> std::optional<asio::ip::address> {
                            const auto server = nameserver();
                            return !server || local_only(*server) ? std::nullopt : server;
                          },

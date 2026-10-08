@@ -36,10 +36,13 @@ void app::woken() {
   auto changes = box->take();
   if (changes.empty())
     return;
+  // Deletions of what is not held in memory, by chat: looked for on disk on
+  // a worker, each chat's file read once for all of its (mark_deleted_on_disk).
+  std::map<mux::conversation_id, std::vector<std::string>> deleted_on_disk;
   for (const auto& one : changes) {
     // What the program itself does with a change, besides the model: a
     // session kept, a picture shown.
-    splice::visit(splice::overloaded{[&](const mux::change::avatar_loaded& picture) {
+    spl::visit(spl::overloaded{[&](const mux::change::avatar_loaded& picture) {
                                  pictures.take(picture, true);
                                  mux::ui::download_progress().erase(picture.source);
                                },
@@ -50,7 +53,8 @@ void app::woken() {
                                [&](const mux::change::room_created& made) { made_room_ = made.id; },
                                // A directory searched: its rooms, in Explore.
                                [&](const mux::change::directory_listed& listed) {
-                                 root().show_directory(listed.rooms, listed.server, listed.space);
+                                 root().show_directory(listed.rooms, listed.server, listed.space, listed.query, listed.next,
+                                                       listed.more);
                                  // The own server's, for what the chat list searched.
                                  if (listed.server.empty() && !listed.space)
                                    root().main().found_rooms_elsewhere(listed.query, listed.rooms);
@@ -122,19 +126,25 @@ void app::woken() {
     // A message deleted: marked where it is kept, and kept whole apart --
     // as it was, before the model takes it out of view.
     if (!ask.demo)
-      splice::visit(splice::overloaded{[&](const mux::change::message_redacted& c) {
-                                   std::optional<mux::message> was;
-                                   if (const mux::conversation* chat = model->find(c.in))
-                                     if (const auto found = std::ranges::find(chat->timeline, c.id, &mux::message::id);
-                                         found != chat->timeline.end())
-                                       was = *found;
-                                   store.mark_deleted(c.in, c.id, was);
+      spl::visit(spl::overloaded{[&](const mux::change::message_redacted& c) {
+                                   const mux::conversation* chat = model->find(c.in);
+                                   const auto found = chat ? std::ranges::find(chat->timeline, c.id, &mux::message::id)
+                                                           : std::vector<mux::message>::const_iterator{};
+                                   if (chat && found != chat->timeline.end())
+                                     store.mark_deleted(c.in, c.id, *found);
+                                   else
+                                     deleted_on_disk[c.in].push_back(c.id);
                                  },
                                  [](const auto&) {}},
                  one);
     model->apply(one);
     paging.keep(one);
   }
+  for (auto& [in, ids] : deleted_on_disk)
+    work.run([this, in, ids = std::move(ids)]() -> workers::done_t {
+      store.mark_deleted_on_disk(in, ids);
+      return {};
+    });
   // The marks: those read back put in, written where they changed, and a
   // mark made kept with its message.
   marks.took(changes);
@@ -143,13 +153,13 @@ void app::woken() {
   if (!ask.demo) {
     std::set<std::string> mentioning;
     for (const mux::change_t& one : changes)
-      splice::visit(splice::overloaded{[&](const mux::change::mentioned& m) { mentioning.insert(m.event); },
+      spl::visit(spl::overloaded{[&](const mux::change::mentioned& m) { mentioning.insert(m.event); },
                                  [](const auto&) {}},
                  one);
     for (const mux::change_t& one : changes)
-      splice::visit(splice::overloaded{[&](const mux::change::message_added& added) {
-                                   const bool live = splice::visit(
-                                       splice::overloaded{[](mux::placement::at_end) { return true; },
+      spl::visit(spl::overloaded{[&](const mux::change::message_added& added) {
+                                   const bool live = spl::visit(
+                                       spl::overloaded{[](mux::placement::at_end) { return true; },
                                                        [](const auto&) { return false; }},
                                        added.where);
                                    if (live)
@@ -170,8 +180,8 @@ void app::woken() {
     if (const auto found = mux::logic::chat_of(*model, *shared.joining)) {
       const auto link = *std::exchange(shared.joining, std::nullopt);
       // A message in it, where the link is to one.
-      const auto event = splice::visit(
-          splice::overloaded{[](const mux::logic::mention::place& one) { return one.event; },
+      const auto event = spl::visit(
+          spl::overloaded{[](const mux::logic::mention::place& one) { return one.event; },
                              [](const auto&) { return std::optional<std::string>(); }},
           mux::logic::mention_in(link));
       if (event)
@@ -184,7 +194,7 @@ void app::woken() {
   // A message jumped to that the server says is not there: the jump
   // stopped, and said why -- it paged the whole history back for it.
   for (const mux::change_t& one : changes)
-    splice::visit(splice::overloaded{[&](const mux::change::event_missing& gone) {
+    spl::visit(spl::overloaded{[&](const mux::change::event_missing& gone) {
                                        auto& screen = root().main();
                                        if (screen.jumping_to == gone.id) {
                                          // An edit: to the message it edits, which is where it shows.
@@ -281,11 +291,11 @@ void app::before_frame() {
   menu.keep_selection();
   auto pending = std::exchange(ask.requests, {});
   for (const request_t& one : pending)
-    splice::visit([this](const auto& each) { this->route(each); }, one);
+    spl::visit([this](const auto& each) { this->route(each); }, one);
   // A selectable text or a field pressed with the right button -- a long
   // press, on a phone: its menu, the last asked for.
   if (auto asked = std::exchange(skiff::scene::textMenusAsked(), {}); !asked.empty() && !root().context_menu_up())
-    splice::visit(splice::overloaded{[&](skiff::scene::text_menu::of_text& text) {
+    spl::visit(spl::overloaded{[&](skiff::scene::text_menu::of_text& text) {
                                        root().show_text_menu(std::move(text.text), std::move(text.link));
                                      },
                                      [&](const skiff::scene::text_menu::of_field& field) { root().show_field_menu(field); }},
@@ -361,7 +371,7 @@ void app::refresh(std::source_location from) {
   // The accounts page, where it is up: the account being added shown in,
   // and the chats then.
   if (auto* up = root().open_panel())
-    if (splice::visit([this](auto& panel) { return accounts_screen.bring_up_to_date(panel); }, *up))
+    if (spl::visit([this](auto& panel) { return accounts_screen.bring_up_to_date(panel); }, *up))
       this->show_conversations();
 }
 
@@ -426,7 +436,7 @@ void app::lock(std::vector<mux::config::account_t> extra, bool demo) { local_dat
 // -- opened, what was kept begun -- and a protocol's own, to its program
 // glue.
 void app::apply(const request::give_passphrase& one) {
-  splice::visit(splice::overloaded{[&](mux::config::passphrase_for::unlock) {
+  spl::visit(spl::overloaded{[&](mux::config::passphrase_for::unlock) {
                                      if (auto opened = local_data.unlock(one))
                                        this->begin(opened->saved, std::move(opened->extra), opened->demo, std::move(opened->error));
                                    },

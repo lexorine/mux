@@ -36,7 +36,7 @@ class pointer_shapes {
         sdl::SDL_DestroyCursor(one);
   }
   void show(const skiff::scene::Cursor& shape) {
-    const sdl::SDL_SystemCursor which = splice::visit([](auto one) { return system_cursor(one); }, shape);
+    const sdl::SDL_SystemCursor which = spl::visit([](auto one) { return system_cursor(one); }, shape);
     if (which == shown_)
       return;
     sdl::SDL_Cursor*& made = made_[static_cast<std::size_t>(which)];
@@ -59,6 +59,8 @@ inline skiff::scene::Key key_of(sdl::SDL_Keycode key) {
     case sdl::kKeyReturn:
     case sdl::kKeyKpEnter: return keys::kEnter;
     case sdl::kKeySpace: return keys::kSpace;
+    // Android's Back (button or gesture) closes what Escape closes.
+    case sdl::kKeyBack:
     case sdl::kKeyEscape: return keys::kEscape;
     case sdl::kKeyLeft: return keys::kLeft;
     case sdl::kKeyRight: return keys::kRight;
@@ -106,6 +108,7 @@ inline skiff::scene::Key key_of(sdl::SDL_Keycode key) {
     case sdl::kKey7: return keys::k7;
     case sdl::kKey8: return keys::k8;
     case sdl::kKey9: return keys::k9;
+    case sdl::kKeyPeriod: return keys::kPeriod;
     default: return keys::kUnknown;
   }
 }

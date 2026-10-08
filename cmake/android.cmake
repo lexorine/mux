@@ -23,11 +23,9 @@ if(NOT DEFINED MUX_ANDROID_ABI)
   message(FATAL_ERROR "No Android ABI in android/abis.json is built for ${CMAKE_SYSTEM_PROCESSOR}")
 endif()
 # Cargo still needs the Android triple for the vodozemac static library.
-# With --target, Cargo creates a cache root under the target triple.
-# cxx-build puts its shared bridge headers there; CME's CARGO_INCLUDE
-# is relative to the outer Cargo target directory.
-cme_declare_port(NAME vodozemac CARGO_TARGET ${mux_cargo_target}
-  CARGO_INCLUDE ${mux_cargo_target}/cxxbridge)
+# Built with --target, its bridge headers are under target/<triple>/, which
+# cmake-everywhere looks in itself (0.2.41) for the port's CARGO_INCLUDE.
+cme_declare_port(NAME vodozemac CARGO_TARGET ${mux_cargo_target} CARGO_INCLUDE cxxbridge)
 # AOSP's headers declare getentropy even below its introduction in API 28.
 # Keep OpenSSL's kernel getrandom path for those older Android targets.
 cme_declare_port(NAME openssl PATCHES
@@ -40,7 +38,7 @@ if(MUX_ANDROID_SDL_SOURCE_DIR)
   list(APPEND mux_sdl_source SOURCE_DIR "${MUX_ANDROID_SDL_SOURCE_DIR}")
 endif()
 cme_declare_port(NAME sdl3 PROVIDES SDL3 sdl3 VERSION 3.5.0
-  GITHUB_REPOSITORY j4niwzis/SDL GIT_TAG ce58363f4fccd346e795f2bcac39d3454c65ff73
+  GITHUB_REPOSITORY j4niwzis/SDL GIT_TAG db82ec729c1bc2d85bd29f0377b2866472837164
   ${mux_sdl_source} LICENSE Zlib TARGETS SDL3::SDL3)
 # Static, in libmux.so: the DEX loads libmux.so (sdl-native-dex --library),
 # whose JNI_OnLoad is SDL's (android/exports.map).

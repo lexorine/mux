@@ -49,10 +49,10 @@ struct direct {
   friend bool operator==(direct, direct) = default;
 };
 }  // namespace folder
-using folder_t = splice::variant<folder::all, folder::space, folder::group, folder::direct>;
+using folder_t = spl::variant<folder::all, folder::space, folder::group, folder::direct>;
 // The space a folder is, where it is one.
 [[nodiscard]] inline std::optional<std::string> space_of(const folder_t& one) {
-  return splice::visit(splice::overloaded{[](const folder::space& s) { return std::optional<std::string>(s.room); },
+  return spl::visit(spl::overloaded{[](const folder::space& s) { return std::optional<std::string>(s.room); },
                                           [](const auto&) { return std::optional<std::string>(); }},
                        one);
 }
@@ -84,7 +84,7 @@ struct space_icon : nodes::Stack {
     fState.apply({.width = size, .height = size, .cornerRadius = size * 0.5f, .background = colours.tile,
                   .hoverBackground = colours.chosen,
                   .border = scene::Border{chosen ? colours.accent : skia::SkColor{0}, chosen ? 2.0f : 0.0f}});
-    splice::visit(splice::overloaded{[&](config::space_item::home) { parts.mark.emplace("\u2302", size * 0.5f, colours.text); },
+    spl::visit(spl::overloaded{[&](config::space_item::home) { parts.mark.emplace("\u2302", size * 0.5f, colours.text); },
                                      [&](config::space_item::direct) { parts.mark.emplace("@", size * 0.45f, colours.text, true); },
                                      [&](const config::space_item::space&) { parts.face.emplace(id, shown, size - 6.0f); }},
                   item);
@@ -421,6 +421,23 @@ struct side_column : nodes::Stack {
     std::string room;
     void operator()() const { actions->manage_space(room); }
   };
+  struct leave_act {
+    Actions* actions;
+    std::string account;
+    std::string room;
+    void operator()() const { actions->open_leave_space(conversation_id{account_id{protocol_of(account), account}, room}); }
+  };
+  // A room, or a space, made in it -- Element's Add room and Add space.
+  struct create_in_act {
+    Actions* actions;
+    std::string account;
+    std::string room;
+    std::string name;
+    bool make_space = false;
+    void operator()() const {
+      actions->open_new_room_in(conversation_id{account_id{protocol_of(account), account}, room}, name, make_space);
+    }
+  };
   // The column's menus' look: a card over the rest, 190 wide.
   static void as_popup(nodes::Stack& menu, const palette& colours) {
     menu.setGap(4.0f);
@@ -510,17 +527,22 @@ struct side_column : nodes::Stack {
       nodes::Text title;
       widgets::Button<explore_act> explore;
       widgets::Button<manage_act> manage;
+      widgets::Button<create_in_act> add_room, add_space;
+      widgets::Button<leave_act> leave;
       widgets::Button<set_bars_act> side, top, both, hide;
     } parts;
     [[nodiscard]] static std::string room_of(const config::space_item_t& item) {
-      return splice::visit(splice::overloaded{[](const config::space_item::space& s) { return s.room; },
+      return spl::visit(spl::overloaded{[](const config::space_item::space& s) { return s.room; },
                                               [](const auto&) { return std::string(); }},
                            item);
     }
     space_menu(const palette& colours, Actions* a, const std::string& account, const config::space_item_t& item, std::string name)
-        : parts{.title = nodes::Text(std::move(name), 13.0f, colours.dim, true),
+        : parts{.title = nodes::Text(name, 13.0f, colours.dim, true),
                 .explore = widgets::Button<explore_act>(colours.widgets, "Explore its rooms\u2026", {a, room_of(item)}),
                 .manage = widgets::Button<manage_act>(colours.widgets, "Space settings\u2026", {a, room_of(item)}),
+                .add_room = widgets::Button<create_in_act>(colours.widgets, "Create a room in it\u2026", {a, account, room_of(item), name, false}),
+                .add_space = widgets::Button<create_in_act>(colours.widgets, "Create a space in it\u2026", {a, account, room_of(item), name, true}),
+                .leave = widgets::Button<leave_act>(colours.widgets, "Leave space\u2026", {a, account, room_of(item)}),
                 .side = widgets::Button<set_bars_act>(colours.widgets, "Side bar only", {a, account, item, true, false}),
                 .top = widgets::Button<set_bars_act>(colours.widgets, "Top bar only", {a, account, item, false, true}),
                 .both = widgets::Button<set_bars_act>(colours.widgets, "Both bars", {a, account, item, true, true}),
@@ -528,10 +550,12 @@ struct side_column : nodes::Stack {
       as_popup(*this, colours);
       parts.title.setElided(true);
       parts.title.apply({.fillX = true});
-      for (scene::Node* each : std::initializer_list<scene::Node*>{&parts.explore, &parts.manage, &parts.side, &parts.top, &parts.both, &parts.hide})
+      for (scene::Node* each : std::initializer_list<scene::Node*>{&parts.explore, &parts.manage, &parts.add_room, &parts.add_space,
+                                                                   &parts.leave, &parts.side, &parts.top, &parts.both, &parts.hide})
         each->apply({.fillX = true, .height = 30.0f});
-      parts.explore.setVisible(!room_of(item).empty());
-      parts.manage.setVisible(!room_of(item).empty());
+      for (scene::Node* each : std::initializer_list<scene::Node*>{&parts.explore, &parts.manage, &parts.add_room, &parts.add_space,
+                                                                   &parts.leave})
+        each->setVisible(!room_of(item).empty());
     }
   };
   struct parts_t {
@@ -592,7 +616,7 @@ struct side_column : nodes::Stack {
   skia::SkPoint fly_from{}, fly_to{};
   std::optional<config::space_item_t> landing;
   [[nodiscard]] space_icon<Pick>* icon_of(const config::space_item_t& item, const config::space_bar_t& bar) {
-    space_icons<Pick>& line = splice::visit(splice::overloaded{[&](config::space_bar::top) -> space_icons<Pick>& { return top_line; },
+    space_icons<Pick>& line = spl::visit(spl::overloaded{[&](config::space_bar::top) -> space_icons<Pick>& { return top_line; },
                                                      [&](const auto&) -> space_icons<Pick>& { return side_line; }},
                                   bar);
     const auto found = std::ranges::find(icons_of(line), item, &space_icon<Pick>::item);
@@ -642,7 +666,7 @@ struct side_column : nodes::Stack {
   }
   [[nodiscard]] std::vector<space_icon<Pick>>& icons_of(space_icons<Pick>& bar) { return std::get<0>(bar.fChildren); }
   [[nodiscard]] skia::SkRect shown_at(const space_icon<Pick>& one) const {
-    return splice::visit(splice::overloaded{[&](config::space_bar::top) { return one.bounds().makeOffset(-top_bar.offset, 0.0f); },
+    return spl::visit(spl::overloaded{[&](config::space_bar::top) { return one.bounds().makeOffset(-top_bar.offset, 0.0f); },
                                             [&](const auto&) { return side_bar.toView(one.bounds()); }},
                          one.bar);
   }
@@ -670,12 +694,9 @@ struct side_column : nodes::Stack {
   // first whose middle is past the point, along the bar.
   [[nodiscard]] std::vector<config::space_item_t> order_with(const config::space_bar_t& bar, const config::space_item_t& item,
                                                              float x, float y) {
-    const bool along_x = splice::visit(splice::overloaded{[](config::space_bar::top) { return true; }, [](const auto&) { return false; }}, bar);
+    const bool along_x = spl::visit(spl::overloaded{[](config::space_bar::top) { return true; }, [](const auto&) { return false; }}, bar);
     space_icons<Pick>& icons = along_x ? top_line : side_line;
-    std::vector<config::space_item_t> out = icons_of(icons) |
-                                            std::views::filter([&](const auto& one) { return one.item != item; }) |
-                                            std::views::transform([](const auto& one) { return one.item; }) |
-                                            std::ranges::to<std::vector>();
+    std::vector<config::space_item_t> out = std::ranges::to<std::vector>(std::views::transform(std::views::filter(icons_of(icons), [&](const auto& one) { return one.item != item; }), [](const auto& one) { return one.item; }));
     const auto before = std::ranges::count_if(icons_of(icons), [&](const auto& one) {
       const skia::SkRect at = this->shown_at(one);
       return one.item != item && (along_x ? at.centerX() < x : at.centerY() < y);
@@ -761,7 +782,7 @@ struct side_column : nodes::Stack {
       // In the side bar, a quick move along it is a scroll -- a finger's or
       // a quick drag's -- left to the bar; one held a moment first, or one
       // out across it, carries the item.
-      const bool along_side = splice::visit(splice::overloaded{[](config::space_bar::side) { return true; },
+      const bool along_side = spl::visit(spl::overloaded{[](config::space_bar::side) { return true; },
                                                                [](const auto&) { return false; }},
                                             drag->from);
       const bool quick = std::chrono::steady_clock::now() - drag->pressed < std::chrono::milliseconds(250);
@@ -806,7 +827,7 @@ struct side_column : nodes::Stack {
     // the last -- or back where it was.
     const auto bar = this->bar_at(at.x, at.y);
     const config::space_bar_t to_bar = bar ? *bar : was.from;
-    const bool along_x = splice::visit(splice::overloaded{[](config::space_bar::top) { return true; }, [](const auto&) { return false; }}, to_bar);
+    const bool along_x = spl::visit(spl::overloaded{[](config::space_bar::top) { return true; }, [](const auto&) { return false; }}, to_bar);
     const std::vector<config::space_item_t> order = this->order_with(to_bar, was.item, at.x, at.y);
     const auto index = static_cast<std::size_t>(std::ranges::find(order, was.item) - order.begin());
     skia::SkPoint target{at.x, at.y};

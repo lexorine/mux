@@ -33,7 +33,7 @@ struct other {
   static constexpr bool shown_as_affiliation = false, shown_as_role = false;
 };
 }  // namespace muc_rank
-using muc_rank_t = splice::variant<muc_rank::owner_or_admin, muc_rank::moderator, muc_rank::other>;
+using muc_rank_t = spl::variant<muc_rank::owner_or_admin, muc_rank::moderator, muc_rank::other>;
 [[nodiscard]] inline muc_rank_t muc_rank_of(std::optional<std::string_view> name) {
   static const std::unordered_map<std::string_view, muc_rank_t> known = {
       {"owner", muc_rank::owner_or_admin{}}, {"admin", muc_rank::owner_or_admin{}}, {"moderator", muc_rank::moderator{}}};
@@ -68,26 +68,24 @@ inline mux::proto::xmpp::registration_asked registration_asked_of(const account_
   using mux::proto::xmpp::registration_field;
   namespace shown = mux::proto::xmpp::field_shown;
   const auto picture_of = [&](const tern::data_form::field& one) {
-    const auto cids = one.media ? one.media->uri | std::views::filter([](const tern::data_form::uri& where) {
+    const auto cids = one.media ? std::ranges::to<std::vector<std::string_view>>(std::views::transform(std::views::filter(one.media->uri, [](const tern::data_form::uri& where) {
                                     return where.location.starts_with("cid:");
-                                  }) | std::views::transform([](const tern::data_form::uri& where) {
+                                  }), [](const tern::data_form::uri& where) {
                                     return std::string_view(where.location).substr(4);
-                                  }) | std::ranges::to<std::vector<std::string_view>>()
+                                  }))
                                 : std::vector<std::string_view>{};
     const auto sent = std::ranges::find_if(asked.data, [&](const tern::bob::data& one_sent) {
       return std::ranges::contains(cids, std::string_view(one_sent.cid));
     });
     if (sent == asked.data.end())
       return std::vector<std::uint8_t>{};
-    const std::string packed = sent->base64 | std::views::filter([](char c) { return c != ' ' && c != '\n' && c != '\r' && c != '\t'; }) |
-                               std::ranges::to<std::string>();
+    const std::string packed = std::ranges::to<std::string>(std::views::filter(sent->base64, [](char c) { return c != ' ' && c != '\n' && c != '\r' && c != '\t'; }));
     return tern::crypto::base64_decode(packed).value_or(std::vector<std::uint8_t>{});
   };
   const auto links_of = [](const tern::data_form::field& one) {
-    return one.media ? one.media->uri | std::views::filter([](const tern::data_form::uri& where) {
+    return one.media ? std::ranges::to<std::vector<std::string>>(std::views::transform(std::views::filter(one.media->uri, [](const tern::data_form::uri& where) {
                          return where.location.starts_with("http://") || where.location.starts_with("https://");
-                       }) | std::views::transform(&tern::data_form::uri::location) |
-                           std::ranges::to<std::vector<std::string>>()
+                       }), &tern::data_form::uri::location))
                      : std::vector<std::string>{};
   };
   // The form's type says how a field is shown; what XEP-0004 has not, typed.
@@ -101,15 +99,14 @@ inline mux::proto::xmpp::registration_asked registration_asked_of(const account_
                                             .instructions = asked.instructions.value_or(""),
                                             .page = asked.page ? asked.page->url : std::nullopt};
   if (asked.form) {
-    out.instructions = (asked.form->instructions | std::views::join_with('\n') | std::ranges::to<std::string>());
+    out.instructions = (std::ranges::to<std::string>(std::views::join_with(asked.form->instructions, '\n')));
     if (out.instructions.empty())
       out.instructions = asked.instructions.value_or("");
     // The address and the password are the form's own fields: not asked
     // again.
-    out.fields = asked.form->fields | std::views::filter([](const tern::data_form::field& one) {
+    out.fields = std::ranges::to<std::vector<registration_field>>(std::views::transform(std::views::filter(asked.form->fields, [](const tern::data_form::field& one) {
                    return one.var != std::optional<std::string>("username") && one.var != std::optional<std::string>("password");
-                 }) |
-                 std::views::transform([&](const tern::data_form::field& one) {
+                 }), [&](const tern::data_form::field& one) {
                    return registration_field{.var = one.var.value_or(""),
                                              .label = one.label.value_or(one.var.value_or("")),
                                              .desc = one.desc.value_or(""),
@@ -118,11 +115,10 @@ inline mux::proto::xmpp::registration_asked registration_asked_of(const account_
                                              .required = one.required.has_value(),
                                              .picture = picture_of(one),
                                              .links = links_of(one),
-                                             .choices = one.options | std::views::transform([](const tern::data_form::option& o) {
+                                             .choices = std::ranges::to<std::vector<std::string>>(std::views::transform(one.options, [](const tern::data_form::option& o) {
                                                           return o.label ? *o.label + " (" + o.value + ")" : o.value;
-                                                        }) | std::ranges::to<std::vector<std::string>>()};
-                 }) |
-                 std::ranges::to<std::vector<registration_field>>();
+                                                        }))};
+                 }));
   } else if (asked.email) {
     out.fields.push_back(registration_field{.var = "email", .label = "Email", .shown = shown::typed{}, .required = true});
   }
@@ -360,8 +356,54 @@ class account {
     });
   }
 
+  // The text with its runs as XEP-0393 (Message Styling) writes them: marks
+  // in the body itself -- *strong*, _emphasis_, ~strike~ and `code`. A run
+  // is marked where its text starts and ends with no space, as the XEP
+  // asks; underline, spoilers and links it has none for, and they go as
+  // plain text. Put in from the end back, so each offset before is as it was.
+  [[nodiscard]] static std::string styled_body(std::string text, const std::vector<mux::styled_run>& runs) {
+    struct mark_at {
+      std::size_t at;
+      std::string_view mark;
+      bool closing;
+    };
+    std::vector<mark_at> marks;
+    const auto blank = [](char c) { return c == ' ' || c == '\n' || c == '\t'; };
+    for (const mux::styled_run& run : runs) {
+      std::size_t first = run.first, last = std::min(run.last, text.size());
+      while (first < last && blank(text[first]))
+        ++first;
+      while (last > first && blank(text[last - 1]))
+        --last;
+      if (first >= last)
+        continue;
+      const std::string_view mark = spl::visit(
+          spl::overloaded{[](const mux::run_style::bold&) { return std::string_view("*"); },
+                          [](const mux::run_style::italic&) { return std::string_view("_"); },
+                          [](const mux::run_style::strike&) { return std::string_view("~"); },
+                          [](const mux::run_style::code&) { return std::string_view("`"); },
+                          [](const mux::run_style::underline&) { return std::string_view(); },
+                          [](const mux::run_style::spoiler&) { return std::string_view(); },
+                          [](const mux::run_style::link&) { return std::string_view(); }},
+          run.style);
+      if (mark.empty())
+        continue;
+      marks.push_back({first, mark, false});
+      marks.push_back({last, mark, true});
+    }
+    // Back to front; at one place, closings before openings in the text --
+    // so put in openings first going backwards.
+    std::ranges::sort(marks, [](const mark_at& a, const mark_at& b) {
+      return a.at != b.at ? a.at > b.at : a.closing < b.closing;
+    });
+    for (const mark_at& one : marks)
+      text.insert(one.at, one.mark);
+    return text;
+  }
+
   void send(std::string to, std::string text, std::optional<std::string> reply_to = std::nullopt,
-            std::vector<mux::mention> = {}) {
+            std::vector<mux::mention> = {}, std::vector<mux::styled_run> styles = {}) {
+    text = styled_body(std::move(text), styles);
     this->spawn_guarded([this, to = bare(to), text = std::move(text), reply_to = std::move(reply_to)] {
       message out{.in = {id_, to},
                   .id = "mux-" + std::to_string(++sent_),
@@ -385,7 +427,8 @@ class account {
   }
 
   // A message of one's own corrected (XEP-0308): the new text in its place.
-  void edit(std::string to, std::string id, std::string text) {
+  void edit(std::string to, std::string id, std::string text, std::vector<mux::styled_run> styles = {}) {
+    text = styled_body(std::move(text), styles);
     this->spawn_guarded([this, to = bare(to), id = std::move(id), text = std::move(text)] {
       if (!session_)
         return;
@@ -508,7 +551,7 @@ class account {
         std::string meaning = made.error().detail;
         const auto closed = [&](const auto&) { meaning = "the server does not let accounts be made here"; };
         if (refused && refused->what)
-          refused->what->with(splice::overloaded{
+          refused->what->with(spl::overloaded{
               [&](const tern::conditions::conflict&) { meaning = "that address is taken"; },
               // The answers not taken -- a captcha's, perhaps: asked afresh
               // next time, the form shown again.
@@ -616,13 +659,13 @@ class account {
   }
 
   void on(const proto::stanza_t& one) {
-    splice::visit(splice::overloaded{[this](const proto::message_t& message) {
-                            splice::visit([this](const auto& got) { on_message(got); }, message);
+    spl::visit(spl::overloaded{[this](const proto::message_t& message) {
+                            spl::visit([this](const auto& got) { on_message(got); }, message);
                           },
                           [this](const proto::presence_t& presence) {
-                            splice::visit([this](const auto& got) { on_presence(got); }, presence);
+                            spl::visit([this](const auto& got) { on_presence(got); }, presence);
                           },
-                          [this](const proto::iq_t& iq) { splice::visit([this](const auto& got) { on_iq(got); }, iq); }},
+                          [this](const proto::iq_t& iq) { spl::visit([this](const auto& got) { on_iq(got); }, iq); }},
                one);
   }
   // A roster push, handed out once tern has answered it; the other iqs are
@@ -725,9 +768,9 @@ class account {
       for (const auto& carried : got.payload)
         if (const auto* user = carried.template get_if<tern::muc::user>())
           for (const auto& item : user->items) {
-            if (splice::visit([](auto rank) { return rank.shown_as_affiliation; }, muc_rank_of(item.affiliation)))
+            if (spl::visit([](auto rank) { return rank.shown_as_affiliation; }, muc_rank_of(item.affiliation)))
               one.role = item.affiliation;
-            else if (splice::visit([](auto rank) { return rank.shown_as_role; }, muc_rank_of(item.role)))
+            else if (spl::visit([](auto rank) { return rank.shown_as_role; }, muc_rank_of(item.role)))
               one.role = item.role;
           }
       occupants[nick] = std::move(one);

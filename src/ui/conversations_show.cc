@@ -53,6 +53,12 @@ void conversations_screen<Actions>::onKey(scene::phase::bubble, const scene::key
     reply.handle();
     return;
   }
+  // A forum gone into, no chat of it open: Esc back out to the chats.
+  if (press.key == keys::kEscape && !any && !chosen && forum_open) {
+    this->close_forum();
+    reply.handle();
+    return;
+  }
   if (!chosen && !pointed)
     return;
   // Only a forum gone to: Alt+Up and Alt+Down go on from it, nothing else.
@@ -60,6 +66,8 @@ void conversations_screen<Actions>::onKey(scene::phase::bubble, const scene::key
     return;
   if (press.key == keys::kF && control) {
     actions->open_search();
+  } else if (press.key == keys::kK && control) {
+    actions->ask_link();
   } else if (press.key == keys::kUp && control) {
     actions->reply_step(true);
   } else if (press.key == keys::kDown && control) {
@@ -76,6 +84,11 @@ void conversations_screen<Actions>::onKey(scene::phase::bubble, const scene::key
       return;
     }
     skiff::scene::setClipboardText(selected->parts.body.parts.text.selected());
+  } else if (press.key == keys::kEscape && !any && chat.parts.selection.visible()) {
+    // Messages selected, the focus elsewhere than their bar: let go first.
+    actions->selection_cancel();
+  } else if (press.key == keys::kEscape && !any && search.visible()) {
+    actions->close_search();
   } else if (press.key == keys::kEscape && !any && parts.threads.answering) {
     parts.threads.stop_answering();
   } else if (press.key == keys::kEscape && !any && line.answering()) {
@@ -85,21 +98,22 @@ void conversations_screen<Actions>::onKey(scene::phase::bubble, const scene::key
     // To the next chat in the list, or the one before: Ctrl+Tab and
     // Ctrl+Shift+Tab, Alt+Down and Alt+Up.
     const bool back = press.key == keys::kUp || press.modifiers.template has<scene::modifier::shift>();
-    const auto& rows = std::get<0>(std::get<0>(list.fChildren).fChildren);
+    // Over every chat listed, not only the rows made.
+    const std::vector<conversation_id>& rows = order;
     // From the forum gone to, where one is; else from the chat open.
-    const auto at = std::ranges::find(rows, pointed ? *pointed : *chosen, &conversation_row<Actions>::id);
+    const auto at = std::ranges::find(rows, pointed ? *pointed : *chosen);
     if (at == rows.end() || rows.empty())
       return;
     const auto index = static_cast<std::size_t>(at - rows.begin());
     const std::size_t to = back ? (index == 0 ? rows.size() - 1 : index - 1) : (index + 1) % rows.size();
     // A forum: gone to, lit, not opened -- Alt+Right opens it. A chat: opened.
-    if (is_forum(rows[to].id)) {
-      pointed = rows[to].id;
+    if (is_forum(rows[to])) {
+      pointed = rows[to];
       if (last_model)
         this->show(*last_model, false);
     } else {
       pointed.reset();
-      actions->choose(rows[to].id);
+      actions->choose(rows[to]);
     }
   } else if (press.key == keys::kPageUp || press.key == keys::kPageDown) {
     // A page of the messages, most of what is in view.
@@ -107,7 +121,9 @@ void conversations_screen<Actions>::onKey(scene::phase::bubble, const scene::key
     timeline.scrollTo(std::max(0.0f, timeline.current() + (press.key == keys::kPageUp ? -page : page)));
   } else if (press.key == keys::kEnd && control) {
     actions->jump_to_end();
-  } else if (press.key == keys::kEscape && !any && single) {
+  } else if (press.key == keys::kEscape && !any) {
+    // Nothing else to cancel: a step back -- the threads or the info shut,
+    // else the chat closed, as tdesktop's Esc closes it.
     this->step_back();
   } else {
     return;
@@ -167,8 +183,8 @@ void conversations_screen<Actions>::show_space_bars(const model& now) {
     std::vector<shown_icon> out;
     for (const entry* one : items) {
       out.push_back({one, nullptr, 0});
-      const std::optional<std::string> room = splice::visit(
-          splice::overloaded{[](const config::space_item::space& it) { return std::optional<std::string>(it.room); },
+      const std::optional<std::string> room = spl::visit(
+          spl::overloaded{[](const config::space_item::space& it) { return std::optional<std::string>(it.room); },
                              [](const auto&) { return std::optional<std::string>(); }},
           one->item);
       if (!room || !open.contains(*room))
@@ -176,7 +192,7 @@ void conversations_screen<Actions>::show_space_bars(const model& now) {
       std::vector<std::pair<const conversation*, int>> todo;
       const auto push_children = [&](const std::string& of, int depth) {
         if (const auto found = spaces_in.find(of); found != spaces_in.end())
-          for (const conversation* sub : found->second | std::views::reverse)
+          for (const conversation* sub : std::views::reverse(found->second))
             todo.emplace_back(sub, depth);
       };
       push_children(*room, 1);
@@ -193,9 +209,7 @@ void conversations_screen<Actions>::show_space_bars(const model& now) {
     }
     return out;
   };
-  const std::vector<config::space_placed> mine = space_places |
-                                                 std::views::filter([&](const config::space_placed& p) { return p.account == address; }) |
-                                                 std::ranges::to<std::vector>();
+  const std::vector<config::space_placed> mine = std::ranges::to<std::vector>(std::views::filter(space_places, [&](const config::space_placed& p) { return p.account == address; }));
   const auto in_bar = [&](const entry& one, const config::space_bar_t& bar) {
     const bool placed = std::ranges::any_of(mine, [&](const auto& p) { return p.item == one.item; });
     if (!placed)
@@ -210,17 +224,16 @@ void conversations_screen<Actions>::show_space_bars(const model& now) {
         ranked.emplace_back(at == mine.end() ? mine.size() + i : static_cast<std::size_t>(at - mine.begin()), &all[i]);
       }
     std::ranges::sort(ranked, {}, &std::pair<std::size_t, const entry*>::first);
-    return ranked | std::views::values | std::ranges::to<std::vector>();
+    return std::ranges::to<std::vector>(std::views::values(ranked));
   };
   const std::vector<const entry*> side_items = bar_of(config::space_bar::side{});
   const std::vector<const entry*> top_items = bar_of(config::space_bar::top{});
   // For the settings to list them.
   needs_.shared->space_account = address;
-  needs_.shared->space_items = all | std::views::transform([&](const entry& one) {
+  needs_.shared->space_items = std::ranges::to<std::vector>(std::views::transform(all, [&](const entry& one) {
                         return space_item_shown{one.item, one.name, in_bar(one, config::space_bar::side{}),
                                                 in_bar(one, config::space_bar::top{})};
-                      }) |
-                      std::ranges::to<std::vector>();
+                      }));
   side.account = address;
   // Made again only where they changed.
   std::vector<std::string> made;
@@ -351,12 +364,19 @@ void conversations_screen<Actions>::update(double now_ms) {
   // The older asked long ago and not come: asked again.
   if (this->history_pending() && now_ms - history_asked_ms > kHistoryPatienceMs)
     history_asked.reset();
-  // Near the last chat made, with more listed: the next few made.
-  if (last_model && chats_made < chats_listed && list.visible() &&
-      list.atEnd(std::max(300.0f, list.bounds().height() * 1.5f))) {
-    chats_made += kChatsStep;
+  // The info's members near their end, with more: the next few made; or a
+  // member opened past those made, theirs worked out.
+  if (last_model && chosen && info.visible() && (info.wants_show || info.wants_more()))
+    if (const conversation* one = last_model->find(*chosen)) {
+      if (!info.wants_show)
+        info.members_made += info.kMembersStep;
+      info.wants_show = false;
+      info.show(*one, *last_model, muted.contains(one->id));
+    }
+  // The list scrolled past the rows made: those for where it is now made,
+  // those far from it let go.
+  if (last_model && list.visible() && this->chats_window() != std::pair{chats_from, chats_made})
     this->show(*last_model, false);
-  }
   // The panels' opacity on its way to the chat's.
   if (auto& ease = needs_.paint->ease; ease.t.step(now_ms)) {
     needs_.paint->panel.opacity = ease.from + (ease.to - ease.from) * ease.t.value();
@@ -538,6 +558,7 @@ void conversations_screen<Actions>::update(double now_ms) {
       loading != chat.area.parts.loading.visible())
     chat.area.parts.loading.setVisible(loading);
   this->find_mentions();
+  this->find_emoji();
   // What is in the composer: typing while there is text in it.
   if (const bool has_text = !line.text().empty(); has_text != was_typing || (has_text && line.text() != typed_last)) {
     was_typing = has_text;
@@ -663,8 +684,8 @@ void conversations_screen<Actions>::show(const model& now, bool with_chat) {
   }
   // The folder chosen kept while it is still there: a tab's, or a bar's --
   // Direct messages, or a space the account has (the bars' are no tabs).
-  const bool in_bars = spaces_on && splice::visit(
-      splice::overloaded{[](const folder::direct&) { return true; },
+  const bool in_bars = spaces_on && spl::visit(
+      spl::overloaded{[](const folder::direct&) { return true; },
                          [&](const folder::space& s) {
                            if (!current)
                              return false;
@@ -715,8 +736,7 @@ void conversations_screen<Actions>::show(const model& now, bool with_chat) {
   // Forums: each listed as one chat; their rooms in them, not beside them.
   std::set<std::string> in_forums;
   if (in)
-    std::ranges::for_each(in->conversations | std::views::values |
-                              std::views::filter([&](const conversation& one) { return this->shown_as_forum(one); }),
+    std::ranges::for_each(std::views::filter(std::views::values(in->conversations), [&](const conversation& one) { return this->shown_as_forum(one); }),
                           [&](const conversation& one) { in_forums.insert(one.children.begin(), one.children.end()); });
   // The forum open: still one; its rooms, the list.
   if (forum_open && (!current || !this->is_forum(conversation_id{*current, *forum_open})))
@@ -735,7 +755,7 @@ void conversations_screen<Actions>::show(const model& now, bool with_chat) {
       if (each.space && (home_hides_spaced || hidden_from_home.contains(each.id)))
         in_spaces.insert(each.children.begin(), each.children.end());
   const auto direct = [](const conversation& one) {
-    return splice::visit(splice::overloaded{[](conversation_kind::direct) { return true; }, [](const auto&) { return false; }}, one.kind);
+    return spl::visit(spl::overloaded{[](conversation_kind::direct) { return true; }, [](const auto&) { return false; }}, one.kind);
   };
   const auto in_folder = [&](const conversation& one) {
     if (!one.space && in_spaces.contains(one.id.id) && !direct(one))
@@ -749,11 +769,11 @@ void conversations_screen<Actions>::show(const model& now, bool with_chat) {
       return false;
     if (!one.space && in_forums.contains(one.id.id))
       return false;
-    return splice::visit(splice::overloaded{[](const folder::all&) { return true; },
+    return spl::visit(spl::overloaded{[](const folder::all&) { return true; },
                                  [&](const folder::space&) { return in_space.contains(one.id.id); },
                                  [&](const folder::group& g) { return std::ranges::contains(one.groups, g.name); },
                                  [&](const folder::direct&) {
-                                   return splice::visit(splice::overloaded{[](conversation_kind::direct) { return true; },
+                                   return spl::visit(spl::overloaded{[](conversation_kind::direct) { return true; },
                                                                            [](const auto&) { return false; }},
                                                         one.kind);
                                  }},
@@ -842,12 +862,19 @@ void conversations_screen<Actions>::show(const model& now, bool with_chat) {
     return pointed ? *pointed == one->id : chosen && *chosen == one->id;
   };
   const std::vector<conversation_id> listed_before =
-      rows | std::views::transform([](const conversation_row<Actions>& row) { return row.id; }) | std::ranges::to<std::vector>();
+      std::ranges::to<std::vector>(std::views::transform(rows, [](const conversation_row<Actions>& row) { return row.id; }));
   chats_listed = chats.size();
+  order = std::ranges::to<std::vector>(std::views::transform(chats, [](const conversation* one) { return one->id; }));
+  tops.assign(1, 0.0f);
+  tops.reserve(chats.size() + 1);
+  for (const conversation* one : chats)
+    tops.push_back(tops.back() + conversation_row<Actions>::height_of(*one));
+  std::tie(chats_from, chats_made) = this->chats_window();
+  const auto made = std::views::take(std::views::drop(chats, chats_from), chats_made - chats_from);
+  // The rows not made, above and below: as much room as they would take.
+  std::get<0>(list.fChildren).apply({.padding = scene::Margin{tops[chats_from], 0.0f, tops.back() - tops[chats_made], 0.0f}});
   {
-    const std::set<conversation_id> listed = chats | std::views::take(chats_made) |
-                                             std::views::transform([](const conversation* one) { return one->id; }) |
-                                             std::ranges::to<std::set>();
+    const std::set<conversation_id> listed = std::ranges::to<std::set>(std::views::transform(made, [](const conversation* one) { return one->id; }));
     for (conversation_row<Actions>& row : rows)
       if (!listed.contains(row.id)) {
         const conversation_id id = row.id;
@@ -857,7 +884,7 @@ void conversations_screen<Actions>::show(const model& now, bool with_chat) {
       rows_kept.erase(rows_kept.begin());
   }
   if (nodes::reconcile(
-          rows, chats | std::views::take(chats_made), [](const conversation* one) { return one->id; },
+          rows, made, [](const conversation* one) { return one->id; },
           [](const conversation_row<Actions>& row) { return row.id; },
           [&](const conversation* one) {
             if (const auto kept = rows_kept.find(one->id); kept != rows_kept.end()) {
@@ -926,8 +953,7 @@ template <class Actions>
 void conversations_screen<Actions>::show_banners(const conversation* one, const model& now) {
   const auto banners = one ? proto::composer_banners(protocol_state_of(*needs_.shared, one->id.account), *one, now)
                            : std::vector<proto::any_banner>{};
-  const std::string said = banners | std::views::transform(&proto::any_banner::text) | std::views::join_with('\n') |
-                           std::ranges::to<std::string>();
+  const std::string said = std::ranges::to<std::string>(std::views::join_with(std::views::transform(banners, &proto::any_banner::text), '\n'));
   // The first's button, where it has one.
   const std::string label = banners.empty() ? std::string() : banners.front().button;
   chat.banner_asks = banners.empty() ? std::nullopt : banners.front().asks;
@@ -946,7 +972,7 @@ void conversations_screen<Actions>::show_banners(const conversation* one, const 
   // The protocol's own node under the head, made again for the chat.
   chat.parts.their_head.reset();
   if (one)
-    splice::visit(
+    spl::visit(
         [&](const auto& now) {
           using head_view_defaults::make_head_view;
           this->place_head_view(make_head_view(now, *one, type_tag<Actions>{}));
@@ -955,7 +981,7 @@ void conversations_screen<Actions>::show_banners(const conversation* one, const 
   // The protocol's own node over the composer, made again for the chat.
   chat.parts.their_view.reset();
   if (one)
-    splice::visit(
+    spl::visit(
         [&](const auto& now) {
           using composer_view_defaults::make_composer_view;
           this->place_composer_view(make_composer_view(now, *one, type_tag<Actions>{}));
@@ -999,7 +1025,10 @@ void conversations_screen<Actions>::show_conversation(const model& now) {
     needs_.looks->bubbles = bubbles;
     entries.clear();
   }
-  info.show(*one, now, muted.contains(one->id));
+  // Only while it is open: its members were made at every switch of chat,
+  // the panel shut or not. Opened, it is shown then (toggle_info).
+  if (info.visible())
+    info.show(*one, now, muted.contains(one->id));
   chat.area.show_wallpaper(wallpaper);
   if (parts.threads.visible())
     parts.threads.show(*one, &now);
@@ -1013,7 +1042,7 @@ void conversations_screen<Actions>::show_conversation(const model& now) {
     chat.line.show_knocks(actions, one->knocking, may.invite);
     chat.line.show_unsent(std::ranges::any_of(one->timeline, [](const message& said) {
       return said.outgoing &&
-             splice::visit(splice::overloaded{[](const delivery::failed&) { return true; }, [](const auto&) { return false; }},
+             spl::visit(spl::overloaded{[](const delivery::failed&) { return true; }, [](const auto&) { return false; }},
                            said.delivery);
     }));
   }
@@ -1050,7 +1079,7 @@ void conversations_screen<Actions>::show_conversation(const model& now) {
   const std::size_t new_from =
       newest_before == all.end() ? all.size() : static_cast<std::size_t>(newest_before - all.begin()) + 1;
   const auto arrives = [&](std::size_t i) {
-    const bool acknowledged = all[i].outgoing && splice::visit(splice::overloaded{[](const delivery::sent&) { return true; },
+    const bool acknowledged = all[i].outgoing && spl::visit(spl::overloaded{[](const delivery::sent&) { return true; },
                                                                        [](const auto&) { return false; }},
                                                             all[i].delivery);
     return same_chat && was_at_end && i >= new_from && shows(all[i]) && !acknowledged &&

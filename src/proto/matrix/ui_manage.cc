@@ -72,7 +72,7 @@ void needs_level(Box* box, const power_need_t& need, std::int64_t level) {
   if (!may(facts, power_need::change_permissions{}) || level > facts.mine)
     return;
   box->actions->ask_for(request::change_room{room_change::set_need{need, level}});
-  splice::visit(splice::overloaded{[&](power_need::default_role) { rules_in(facts.theirs).needs.users_default = level; },
+  spl::visit(spl::overloaded{[&](power_need::default_role) { rules_in(facts.theirs).needs.users_default = level; },
                                    [&](power_need::send_messages) { rules_in(facts.theirs).needs.events_default = level; },
                                    [&](power_need::change_settings) { rules_in(facts.theirs).needs.state_default = level; },
                                    [&](power_need::invite) { rules_in(facts.theirs).needs.invite = level; },
@@ -153,6 +153,57 @@ struct pick_new_level {
   }
 };
 
+// ---- A space's rooms: listed, taken out, added -------------------------------
+// A room put in the space or taken out of it: asked of the server, and the
+// facts kept as they will be -- moved from one list to the other.
+template <class Box>
+void change_child(Box* box, const std::string& room, bool add) {
+  auto& facts = box->facts;
+  if (!may(facts, power_need::change_settings{}))
+    return;
+  auto& from = add ? facts.addable : facts.children;
+  auto& to = add ? facts.children : facts.addable;
+  const auto found = std::ranges::find(from, room, &room_settings_facts::named_room::id);
+  if (found == from.end())
+    return;
+  to.push_back(*found);
+  from.erase(found);
+  box->actions->ask_for(request::change_room{add ? room_change_t{room_change::add_child{room}}
+                                                 : room_change_t{room_change::remove_child{room}}});
+  box->show_again();
+}
+template <class Box>
+struct add_child_press {
+  Box* box;
+  std::string room;
+  void operator()() const { change_child(box, room, true); }
+};
+template <class Box>
+struct remove_child_press {
+  Box* box;
+  std::string room;
+  void operator()() const { change_child(box, room, false); }
+};
+// A room listed with what may be done to it: its name, and a button.
+template <class Press>
+struct listed_room_row : nodes::Stack {
+  struct parts_t {
+    nodes::Text name;
+    widgets::Button<Press> act;
+  } parts;
+  listed_room_row(const palette& colours, std::string name, std::string label, Press press, bool allowed)
+      : parts{.name = nodes::Text(std::move(name), 14.0f, colours.text),
+              .act = widgets::Button<Press>(colours.widgets, std::move(label), std::move(press))} {
+    this->setHorizontal();
+    this->setGap(8.0f);
+    fState.apply({.fillX = true, .height = 34.0f});
+    parts.name.setElided(true);
+    parts.name.apply({.grow = scene::axes::kX, .alignSelf = scene::align::kMiddle});
+    parts.act.apply({.width = 90.0f, .height = 28.0f, .alignSelf = scene::align::kMiddle});
+    parts.act.setVisible(allowed);
+  }
+};
+
 // ---- Room: its picture, name, topic and addresses ----------------------------
 template <class Box>
 struct room_page : nodes::Stack {
@@ -191,7 +242,15 @@ struct room_page : nodes::Stack {
     nodes::Text main_address;
     nodes::Text others_title;
     std::vector<nodes::Text> others;
+    // A space's: the rooms in it, each to be taken out; and the account's
+    // others, each to be added -- as Element's Add existing rooms.
+    nodes::Text space_rooms;
+    std::vector<listed_room_row<remove_child_press<Box>>> children;
+    nodes::Text add_heading;
+    std::vector<listed_room_row<add_child_press<Box>>> addable;
   } parts;
+  // At most this many of the account's rooms offered to be added.
+  static constexpr std::size_t kMostAddable = 60;
   room_page(Actions*, Box* box, const room_settings_facts& facts)
       : parts{.heading = tab_heading((*box->colours_), "Room"),
               .photo = avatar_mark(facts.id, facts.name, 88.0f),
@@ -202,8 +261,22 @@ struct room_page : nodes::Stack {
               .published = part_heading((*box->colours_), "Published Addresses"),
               .published_about = explained((*box->colours_),  "Published addresses can be used by anyone on any server to join your room. To publish an address, it " "needs to be set as a local address first."),
               .main_address = nodes::Text("Main address: " + facts.alias.value_or("none"), 14.0f, box->colours_->text),
-              .others_title = nodes::Text("Other published addresses:", 14.0f, (*box->colours_).text)},
+              .others_title = nodes::Text("Other published addresses:", 14.0f, (*box->colours_).text),
+              .space_rooms = part_heading((*box->colours_), "Rooms in this space"),
+              .add_heading = part_heading((*box->colours_), "Add existing rooms")},
         box_(box) {
+    const bool arrange = facts.space && may(facts, power_need::change_settings{});
+    parts.space_rooms.setVisible(facts.space);
+    parts.add_heading.setVisible(arrange);
+    if (facts.space) {
+      for (const auto& one : facts.children)
+        parts.children.emplace_back(*box->colours_, one.name, "Remove", remove_child_press<Box>{box, one.id}, arrange);
+      if (facts.children.empty())
+        parts.space_rooms.setText("No rooms in this space yet");
+    }
+    if (arrange)
+      for (const auto& one : std::views::take(facts.addable, kMostAddable))
+        parts.addable.emplace_back(*box->colours_, one.name, "Add", add_child_press<Box>{box, one.id}, true);
     this->setGap(6.0f);
     fState.apply({.fillX = true, .autoSize = scene::axes::kY, .padding = {0.0f, 28.0f, 24.0f, 12.0f}});
     parts.photo.apply({.alignSelf = scene::align::kStart});
@@ -242,6 +315,21 @@ struct room_page : nodes::Stack {
 };
 
 // ---- Security & Privacy -----------------------------------------------------------
+// The spaces a room is in, for a rule for their members: their IDs; and
+// said, as Element says it -- or that it is in none, which leaves the rule
+// nothing to name.
+[[nodiscard]] inline std::vector<std::string> space_ids(const room_settings_facts& facts) {
+  return std::ranges::to<std::vector<std::string>>(
+      std::views::transform(facts.parents, [](const room_settings_facts::named_room& one) { return one.id; }));
+}
+[[nodiscard]] inline std::string spaces_said(const room_settings_facts& facts, std::string_view before, std::string_view after) {
+  if (facts.parents.empty())
+    return "This room is in no space.";
+  std::string names;
+  for (std::size_t i = 0; i < facts.parents.size(); ++i)
+    names += (i == 0 ? "" : i + 1 == facts.parents.size() ? " or " : ", ") + facts.parents[i].name;
+  return std::string(before) + names + std::string(after);
+}
 template <class Box>
 struct security_page : nodes::Stack {
   using Actions = typename Box::actions_type;
@@ -255,7 +343,7 @@ struct security_page : nodes::Stack {
     nodes::Text encryption_warning;
     nodes::Text access;
     nodes::Text access_about;
-    join_choice invite, knock, open;
+    join_choice invite, members, knock, knock_members, open;
     nodes::Text history;
     nodes::Text history_about;
     history_choice anyone, shared, invited, joined;
@@ -275,8 +363,17 @@ struct security_page : nodes::Stack {
               .access_about = explained((*box->colours_), "Decide who can join " + facts.name + "."),
               .invite = join_choice((*box->colours_), "Private (invite only)", "Only invited people can join.", {box, join_rule::invite{}},
                                     is_rule<join_rule::invite>(rules_of(facts.theirs).join_rule), may(facts, power_need::change_access{})),
+              .members = join_choice((*box->colours_), "Space members", spaces_said(facts, "Anyone in ", " can find and join."),
+                                     {box, join_rule::restricted{space_ids(facts)}},
+                                     is_rule<join_rule::restricted>(rules_of(facts.theirs).join_rule),
+                                     may(facts, power_need::change_access{}) && !facts.parents.empty()),
               .knock = join_choice((*box->colours_), "Ask to join", "People cannot join unless access is granted.", {box, join_rule::knock{}},
                                    is_rule<join_rule::knock>(rules_of(facts.theirs).join_rule), may(facts, power_need::change_access{})),
+              .knock_members = join_choice((*box->colours_), "Ask to join, or join as a space member",
+                                           spaces_said(facts, "Anyone in ", " can join; anyone else can ask."),
+                                           {box, join_rule::knock_restricted{space_ids(facts)}},
+                                           is_rule<join_rule::knock_restricted>(rules_of(facts.theirs).join_rule),
+                                           may(facts, power_need::change_access{}) && !facts.parents.empty()),
               .open = join_choice((*box->colours_), "Public", "Anyone can find and join.", {box, join_rule::open{}},
                                   is_rule<join_rule::open>(rules_of(facts.theirs).join_rule), may(facts, power_need::change_access{})),
               .history = part_heading((*box->colours_), "Who can read history?"),
@@ -524,7 +621,7 @@ struct roles_page : nodes::Stack {
     // Those the list has by their own row are not again.
     std::set<std::string_view> listed;
     for (const auto& [text, need] : all)
-      splice::visit(splice::overloaded{[&]<sends_state Need>(const Need&) { listed.insert(Need::event); }, [](const auto&) {}}, need);
+      spl::visit(spl::overloaded{[&]<sends_state Need>(const Need&) { listed.insert(Need::event); }, [](const auto&) {}}, need);
     for (const auto& [event, level] : rules_of(facts.theirs).needs.events)
       if (!listed.contains(event))
         parts.others.emplace_back(box, event, level, facts);

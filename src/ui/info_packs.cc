@@ -337,7 +337,7 @@ struct packs_box : nodes::Stack {
     for (std::size_t i = 0; i < draft.pictures.size(); ++i)
       rows.emplace_back(this, i, draft.pictures[i]);
     parts.pictures.invalidateLayout();
-    shared_->pack_pictures_shown = draft.pictures | std::views::transform(&pack_picture::url) | std::ranges::to<std::vector>();
+    shared_->pack_pictures_shown = std::ranges::to<std::vector>(std::views::transform(draft.pictures, &pack_picture::url));
   }
   // What shows: the list, or the pack open.
   void show_page() {
@@ -388,7 +388,7 @@ struct packs_box : nodes::Stack {
   void add_picture(pack_picture one) {
     if (!open)
       return;
-    std::string code = splice::bytes::key_text(one.shortcode);
+    std::string code = spl::bytes::key_text(one.shortcode);
     if (code.empty())
       code = "image";
     std::string unique = code;

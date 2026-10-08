@@ -119,7 +119,7 @@ struct plain {};   // as a note
 struct accent {};  // as news
 struct danger {};  // as a warning
 }  // namespace tone
-using tone_t = splice::variant<tone::plain, tone::accent, tone::danger>;
+using tone_t = spl::variant<tone::plain, tone::accent, tone::danger>;
 struct line {
   std::string text;
   tone_t tone = tone::plain{};
@@ -169,7 +169,7 @@ namespace style {
 struct bubbles {};
 struct lines {};
 }  // namespace style
-using style_t = splice::variant<style::bubbles, style::lines>;
+using style_t = spl::variant<style::bubbles, style::lines>;
 }  // namespace part
 
 }  // namespace mux::proto
@@ -252,7 +252,7 @@ export namespace mux::proto {
 // Whether anything at all may be done, in the state an account is in.
 inline constexpr struct available_t {
   bool operator()(const protocol_state_t& state) const {
-    return splice::visit([](const auto& now) {
+    return spl::visit([](const auto& now) {
       using defaults::available;
       return available(now);
     }, state);
@@ -262,7 +262,7 @@ inline constexpr struct available_t {
 inline constexpr struct offers_t {
   template <class Feature>
   bool operator()(const protocol_state_t& state, Feature wanted) const {
-    return splice::visit([&](const auto& now) {
+    return spl::visit([&](const auto& now) {
       using defaults::available;
       using defaults::offers;
       return available(now) && offers(now, wanted);
@@ -273,7 +273,7 @@ inline constexpr struct offers_t {
 inline constexpr struct can_page_back_t {
   template <class State>
   bool operator()(const State& state) const {
-    return splice::visit([](const auto& now) {
+    return spl::visit([](const auto& now) {
       using defaults::available;
       using defaults::can_page_back;
       return available(now) && can_page_back(now);
@@ -287,7 +287,7 @@ inline constexpr struct can_page_back_t {
 inline constexpr struct can_upload_t {
   template <class State>
   bool operator()(const State& state) const {
-    return splice::visit([](const auto& now) {
+    return spl::visit([](const auto& now) {
       using defaults::available;
       using defaults::can_upload;
       return available(now) && can_upload(now);
@@ -298,7 +298,7 @@ inline constexpr struct can_upload_t {
 inline constexpr struct share_link_t {
   template <class Speaks>
   std::optional<std::string> operator()(const Speaks& speaks, std::string_view address) const {
-    return splice::visit([&](const auto& now) {
+    return spl::visit([&](const auto& now) {
       using defaults::share_link;
       return share_link(now, address);
     }, speaks);
@@ -308,7 +308,7 @@ inline constexpr struct share_link_t {
 inline constexpr struct room_link_t {
   template <class Speaks>
   std::optional<std::string> operator()(const Speaks& speaks, const conversation& chat) const {
-    return splice::visit([&](const auto& now) {
+    return spl::visit([&](const auto& now) {
       using defaults::room_link;
       return room_link(now, chat);
     }, speaks);
@@ -318,7 +318,7 @@ inline constexpr struct room_link_t {
 inline constexpr struct message_link_t {
   template <class Speaks>
   std::optional<std::string> operator()(const Speaks& speaks, const conversation& chat, std::string_view id) const {
-    return splice::visit([&](const auto& now) {
+    return spl::visit([&](const auto& now) {
       using defaults::message_link;
       return message_link(now, chat, id);
     }, speaks);
@@ -328,7 +328,7 @@ inline constexpr struct message_link_t {
 inline constexpr struct person_link_t {
   template <class Speaks>
   std::optional<std::string> operator()(const Speaks& speaks, std::string_view who) const {
-    return splice::visit([&](const auto& now) {
+    return spl::visit([&](const auto& now) {
       using defaults::person_link;
       return person_link(now, who);
     }, speaks);
@@ -338,7 +338,7 @@ inline constexpr struct person_link_t {
 inline constexpr struct unheard_presence_t {
   template <class State>
   std::string operator()(const State& state) const {
-    return splice::visit([](const auto& now) {
+    return spl::visit([](const auto& now) {
       using defaults::unheard_presence;
       return unheard_presence(now);
     }, state);
@@ -349,7 +349,7 @@ inline constexpr struct unheard_presence_t {
 inline constexpr struct can_leave_t {
   template <class State>
   bool operator()(const State& state, const conversation& chat) const {
-    return splice::visit([&](const auto& now) {
+    return spl::visit([&](const auto& now) {
       using defaults::available;
       using defaults::can_leave;
       return available(now) && can_leave(now, chat);
@@ -362,7 +362,7 @@ inline constexpr struct can_leave_t {
 inline constexpr struct message_lines_t {
   template <class State>
   std::vector<part::line> operator()(const State& state, const conversation& chat, const message& one) const {
-    return splice::visit([&](const auto& now) {
+    return spl::visit([&](const auto& now) {
       using defaults::message_lines;
       return message_lines(now, chat, one);
     }, state);
@@ -371,7 +371,7 @@ inline constexpr struct message_lines_t {
 inline constexpr struct header_badges_t {
   template <class State, class Model>
   std::vector<part::badge> operator()(const State& state, const conversation& chat, const Model& known) const {
-    return splice::visit([&](const auto& now) {
+    return spl::visit([&](const auto& now) {
       using defaults::header_badges;
       return header_badges(now, chat, known);
     }, state);
@@ -382,7 +382,7 @@ inline constexpr struct header_badges_t {
 inline constexpr struct id_reads_as_name_t {
   template <class State>
   bool operator()(const State& state, std::string_view id) const {
-    return splice::visit([&](const auto& now) {
+    return spl::visit([&](const auto& now) {
       using defaults::id_reads_as_name;
       return id_reads_as_name(now, id);
     }, state);
@@ -392,7 +392,7 @@ inline constexpr struct id_reads_as_name_t {
 inline constexpr struct chat_rights_t {
   template <class State>
   part::chat_rights operator()(const State& state, const conversation& chat) const {
-    return splice::visit([&](const auto& now) {
+    return spl::visit([&](const auto& now) {
       using defaults::available;
       using defaults::chat_rights;
       return available(now) ? chat_rights(now, chat) : part::chat_rights{false, false, false};
@@ -402,7 +402,7 @@ inline constexpr struct chat_rights_t {
 inline constexpr struct person_rights_t {
   template <class State>
   part::person_rights operator()(const State& state, const conversation& chat, std::string_view who) const {
-    return splice::visit([&](const auto& now) {
+    return spl::visit([&](const auto& now) {
       using defaults::available;
       using defaults::person_rights;
       return available(now) ? person_rights(now, chat, who) : part::person_rights{};
@@ -415,7 +415,7 @@ inline constexpr struct person_badges_t {
   template <class State, class Model>
   std::vector<part::badge> operator()(const State& state, const conversation* chat, const Model& known, const account_id& by,
                                       std::string_view who) const {
-    return splice::visit([&](const auto& now) {
+    return spl::visit([&](const auto& now) {
       using defaults::person_badges;
       return person_badges(now, chat, known, by, who);
     }, state);
@@ -426,7 +426,7 @@ inline constexpr struct person_badges_t {
 inline constexpr struct chat_status_t {
   template <class State, class Model>
   std::optional<std::string> operator()(const State& state, const conversation& chat, const Model& known) const {
-    return splice::visit([&](const auto& now) {
+    return spl::visit([&](const auto& now) {
       using defaults::chat_status;
       return chat_status(now, chat, known);
     }, state);
@@ -438,7 +438,7 @@ inline constexpr struct chat_status_t {
 inline constexpr struct native_forum_t {
   template <class State>
   bool operator()(const State& state, const conversation& chat) const {
-    return splice::visit([&](const auto& now) {
+    return spl::visit([&](const auto& now) {
       using defaults::native_forum;
       return native_forum(now, chat);
     }, state);
@@ -450,7 +450,7 @@ inline constexpr struct native_forum_t {
 inline constexpr struct successor_of_t {
   template <class State>
   std::optional<std::string> operator()(const State& state, const conversation& chat) const {
-    return splice::visit([&](const auto& now) {
+    return spl::visit([&](const auto& now) {
       using defaults::successor_of;
       return successor_of(now, chat);
     }, state);
@@ -459,7 +459,7 @@ inline constexpr struct successor_of_t {
 inline constexpr struct predecessor_of_t {
   template <class State>
   std::optional<std::string> operator()(const State& state, const conversation& chat) const {
-    return splice::visit([&](const auto& now) {
+    return spl::visit([&](const auto& now) {
       using defaults::predecessor_of;
       return predecessor_of(now, chat);
     }, state);
@@ -470,7 +470,7 @@ inline constexpr struct predecessor_of_t {
 inline constexpr struct manage_facts_t {
   template <class State, class Facts>
   void operator()(const State& state, const conversation& chat, Facts& facts) const {
-    splice::visit([&](const auto& now) {
+    spl::visit([&](const auto& now) {
       using defaults::manage_facts;
       manage_facts(now, chat, facts);
     }, state);
@@ -480,7 +480,7 @@ inline constexpr struct manage_facts_t {
 inline constexpr struct message_style_t {
   template <class State>
   part::style_t operator()(const State& state) const {
-    return splice::visit([](const auto& now) {
+    return spl::visit([](const auto& now) {
       using defaults::message_style;
       return message_style(now);
     }, state);
@@ -490,7 +490,7 @@ inline constexpr struct message_style_t {
 inline constexpr struct local_part_t {
   template <class State>
   std::string operator()(const State& state, std::string_view address) const {
-    return splice::visit([&](const auto& now) {
+    return spl::visit([&](const auto& now) {
       using defaults::local_part;
       return local_part(now, address);
     }, state);
@@ -501,7 +501,7 @@ inline constexpr struct local_part_t {
 inline constexpr struct sender_role_t {
   template <class State>
   std::string operator()(const State& state, const conversation& chat, std::string_view who) const {
-    return splice::visit([&](const auto& now) {
+    return spl::visit([&](const auto& now) {
       using defaults::sender_role;
       return sender_role(now, chat, who);
     }, state);
@@ -511,7 +511,7 @@ inline constexpr struct sender_role_t {
 inline constexpr struct row_badges_t {
   template <class State>
   std::vector<part::badge> operator()(const State& state, const conversation& chat) const {
-    return splice::visit([&](const auto& now) {
+    return spl::visit([&](const auto& now) {
       using defaults::row_badges;
       return row_badges(now, chat);
     }, state);
@@ -546,7 +546,7 @@ constexpr auto account_pages_of(const State& state) {
 inline constexpr struct direct_contact_t {
   template <class State>
   std::string operator()(const State& state, const conversation& one) const {
-    return splice::visit([&](const auto& now) {
+    return spl::visit([&](const auto& now) {
       using defaults::direct_contact;
       return direct_contact(now, one);
     }, state);
@@ -556,7 +556,7 @@ inline constexpr struct direct_contact_t {
 inline constexpr struct can_pin_t {
   template <class State>
   bool operator()(const State& state, std::string_view id) const {
-    return splice::visit([&](const auto& now) {
+    return spl::visit([&](const auto& now) {
       using defaults::available;
       using defaults::can_pin;
       return available(now) && can_pin(now, id);
@@ -567,7 +567,7 @@ inline constexpr struct can_pin_t {
 inline constexpr struct may_delete_t {
   template <class State>
   bool operator()(const State& state, const conversation& chat, bool outgoing) const {
-    return splice::visit([&](const auto& now) {
+    return spl::visit([&](const auto& now) {
       using defaults::available;
       using defaults::may_delete;
       return available(now) && may_delete(now, chat, outgoing);
@@ -592,7 +592,7 @@ inline constexpr struct may_view_redacted_t {
 inline constexpr struct may_edit_t {
   template <class State>
   bool operator()(const State& state, const conversation& chat, const message& one) const {
-    return splice::visit([&](const auto& now) {
+    return spl::visit([&](const auto& now) {
       using defaults::available;
       using defaults::edit_rule;
       return available(now) && allows(edit_rule(now), chat, one);

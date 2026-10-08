@@ -37,7 +37,7 @@ export namespace mux::ui {
 // events.
 template <class Actions>
 struct window : scene::Node {
-  using panel_type = splice::variant<accounts_panel<Actions>>;
+  using panel_type = spl::variant<accounts_panel<Actions>>;
   using with_drawer = widgets::Drawer<conversations_screen<Actions>, drawer_panel<Actions>>;
 
   // What the window holds, made anew when the theme changes: what is made
@@ -57,7 +57,8 @@ struct window : scene::Node {
     struct key_it {
       Actions* actions;
       scene::Key key;
-      void operator()() const { actions->text_key(key); }
+      bool shift = false;
+      void operator()() const { actions->text_key(key, shift); }
     };
     struct parts_t {
       std::optional<widgets::Button<copy_it>> copy;
@@ -66,6 +67,16 @@ struct window : scene::Node {
       std::optional<widgets::Button<key_it>> copy_selected;
       std::optional<widgets::Button<key_it>> paste;
       std::optional<widgets::Button<key_it>> select_all;
+      // A field that formats, with something selected: tdesktop's
+      // Formatting items, each its shortcut given to the field.
+      std::optional<widgets::Button<key_it>> bold;
+      std::optional<widgets::Button<key_it>> italic;
+      std::optional<widgets::Button<key_it>> underline;
+      std::optional<widgets::Button<key_it>> strike;
+      std::optional<widgets::Button<key_it>> monospace;
+      std::optional<widgets::Button<key_it>> spoiler;
+      std::optional<widgets::Button<key_it>> link;
+      std::optional<widgets::Button<key_it>> plain;
     } parts;
     // A selectable text's.
     text_menu(const ui_needs<Actions>& n, std::string text, std::optional<std::string> link) : text_menu(*n.colours) {
@@ -76,8 +87,9 @@ struct window : scene::Node {
     }
     // A field's.
     text_menu(const ui_needs<Actions>& n, const scene::text_menu::of_field& field) : text_menu(*n.colours) {
-      const auto item = [&](std::optional<widgets::Button<key_it>>& button, std::string label, scene::Key key) {
-        button.emplace(n.colours->widgets, std::move(label), key_it{n.actions, key});
+      const auto item = [&](std::optional<widgets::Button<key_it>>& button, std::string label, scene::Key key,
+                            bool shift = false) {
+        button.emplace(n.colours->widgets, std::move(label), key_it{n.actions, key, shift});
       };
       if (field.selection && !field.masked) {
         item(parts.cut, "Cut", scene::keys::kX);
@@ -85,6 +97,16 @@ struct window : scene::Node {
       }
       item(parts.paste, "Paste", scene::keys::kV);
       item(parts.select_all, "Select All", scene::keys::kA);
+      if (field.formats && field.selection && !field.masked) {
+        item(parts.bold, "Bold", scene::keys::kB);
+        item(parts.italic, "Italic", scene::keys::kI);
+        item(parts.underline, "Underline", scene::keys::kU);
+        item(parts.strike, "Strikethrough", scene::keys::kX, true);
+        item(parts.monospace, "Monospace", scene::keys::kM, true);
+        item(parts.spoiler, "Spoiler", scene::keys::kP, true);
+        item(parts.link, "Link", scene::keys::kK);
+        item(parts.plain, "Plain text", scene::keys::kN, true);
+      }
       this->rows();
     }
     // How tall it is, for where it is put: its rows and its padding.
@@ -155,6 +177,10 @@ struct window : scene::Node {
       widgets::Dialog<reactions_box<Actions>> reactions;
       // A message's earlier versions, as AyuGram's edit history.
       widgets::Dialog<edit_history_box<Actions>> history;
+      // A link put on what is selected in the message field: Ctrl+K's.
+      widgets::Dialog<link_box<Actions>> linking;
+      // Leaving a space, and which of its rooms with it.
+      widgets::Dialog<leave_space_box<Actions>> leaving;
       // The mentions or the reactions not yet seen, listed.
       widgets::Dialog<marks_box<Actions>> marks;
       // A room's management.
@@ -194,9 +220,20 @@ struct window : scene::Node {
     // by that press is put. A press off the text menu closes it, at once --
     // nothing of it is pressed.
     skia::SkPoint last_press{};
+    // A press off the emoji popup, where it was: let go there -- a tap, not
+    // a drag to scroll the chat under it -- it closes the popup.
+    std::optional<skia::SkPoint> press_off_emoji;
     using Node::onPointer;
+    void onPointer(scene::phase::capture, const scene::pointer::up& lift, scene::PointerReply&) {
+      const auto off = std::exchange(press_off_emoji, std::nullopt);
+      if (off && parts.emoji && std::hypot(lift.x - off->fX, lift.y - off->fY) < 8.0f)
+        actions_of->close_emoji();
+    }
     void onPointer(scene::phase::capture, const scene::pointer::down& press, scene::PointerReply&) {
       last_press = {press.x, press.y};
+      press_off_emoji = parts.emoji && !parts.emoji->parts.card.bounds().contains(press.x, press.y)
+                            ? std::optional<skia::SkPoint>(skia::SkPoint::Make(press.x, press.y))
+                            : std::nullopt;
       if (parts.text_menu_up && !parts.text_menu_up->bounds().contains(press.x, press.y)) {
         parts.text_menu_up.reset();
         this->invalidateLayout();
@@ -238,6 +275,14 @@ struct window : scene::Node {
         return a->close_emoji(), closed();
       if (parts.viewer)
         return a->close_picture(), closed();
+      // A verification: OK where it is over, Decline or Cancel where it
+      // waits. Not while the emoji are compared: an answer is asked there.
+      if (auto* box = parts.verifying.shown()) {
+        if (box->parts.close.visible())
+          return a->close_verification(), closed();
+        if (box->parts.decline.visible())
+          return a->verify_cancel_now(), closed();
+      }
       // The dialogs, the one drawn last -- on top -- first.
       if (parts.sending.shown())
         return a->close_send_box(), closed();
@@ -259,6 +304,10 @@ struct window : scene::Node {
         return a->close_manage(), closed();
       if (parts.marks.shown())
         return a->close_marks(), closed();
+      if (parts.leaving.shown())
+        return a->close_leave_space(), closed();
+      if (parts.linking.shown())
+        return a->close_link(), closed();
       if (parts.history.shown())
         return a->close_edit_history(), closed();
       if (parts.reactions.shown())
@@ -269,8 +318,15 @@ struct window : scene::Node {
         return a->close_person_info(), closed();
       if (parts.notice.shown())
         return a->close_notice(), closed();
-      if (parts.settings.shown())
+      // Settings: a page back to where its ← goes; home, closed.
+      if (auto* box = parts.settings.shown()) {
+        if (box->step_back())
+          return closed();
         return a->close_settings(), closed();
+      }
+      // The drawer, under every dialog.
+      if (parts.frame.base().isOpen())
+        return parts.frame.base().close(), closed();
     }
 
     // While a dialog fades in or out, what is under it -- the window's
@@ -285,15 +341,15 @@ struct window : scene::Node {
     skia::SkRect frozen_at = skia::SkRect::MakeEmpty();  // where it is on the device
 
     [[nodiscard]] bool dialog_fading() {
-      auto& [backdrop, behind, frame, settings, notice, person, room, reactions, history, marks, manage, forwarding, new_chat, new_room, packs, wallpaper, explore, tools, sending, passphrase, verifying, emoji, menu, viewer, text_menu_up, call_up, call_whole] = parts;
+      auto& [backdrop, behind, frame, settings, notice, person, room, reactions, history, linking, leaving, marks, manage, forwarding, new_chat, new_room, packs, wallpaper, explore, tools, sending, passphrase, verifying, emoji, menu, viewer, text_menu_up, call_up, call_whole] = parts;
       return settings.settling() || notice.settling() || person.settling() || room.settling() || reactions.settling() ||
-             history.settling() ||
+             history.settling() || linking.settling() || leaving.settling() ||
              marks.settling() || manage.settling() || forwarding.settling() || new_chat.settling() ||
              new_room.settling() || packs.settling() || wallpaper.settling() || explore.settling() ||
              tools.settling() || sending.settling() || passphrase.settling() || verifying.settling();
     }
     void draw(skiff::scene::Painting& painting, skia::SkCanvas* canvas, float alpha) {
-      auto& [backdrop, behind, frame, settings, notice, person, room, reactions, history, marks, manage, forwarding, new_chat, new_room, packs, wallpaper, explore, tools, sending, passphrase, verifying, emoji, menu, viewer, text_menu_up, call_up, call_whole] = parts;
+      auto& [backdrop, behind, frame, settings, notice, person, room, reactions, history, linking, leaving, marks, manage, forwarding, new_chat, new_room, packs, wallpaper, explore, tools, sending, passphrase, verifying, emoji, menu, viewer, text_menu_up, call_up, call_whole] = parts;
       skia::SkMatrix inverse;
       if (!this->dialog_fading() || !canvas->getTotalMatrix().invert(&inverse)) {
         frozen = nullptr;
@@ -323,7 +379,7 @@ struct window : scene::Node {
       }
       canvas->drawImageRect(frozen, inverse.mapRect(frozen_at), skia::SkSamplingOptions(skia::SkFilterMode::kNearest));
       const auto over = [&](auto&... each) { (scene::draw(each, painting, canvas, alpha), ...); };
-      over(settings, notice, person, room, reactions, history, marks, manage, forwarding, new_chat, new_room, packs, wallpaper, explore,
+      over(settings, notice, person, room, reactions, history, linking, leaving, marks, manage, forwarding, new_chat, new_room, packs, wallpaper, explore,
            tools, sending, passphrase, verifying);
       const auto over_if = [&](auto&... each) { ((each ? scene::draw(*each, painting, canvas, alpha) : void()), ...); };
       over_if(emoji, menu, viewer, text_menu_up, call_up, call_whole);
@@ -384,10 +440,10 @@ struct window : scene::Node {
   template <class Panel>
   Panel& open() {
     if (panel_type* up = layer().frame.shown())
-      if (Panel* same = up->visit(splice::overloaded{[](Panel& one) -> Panel* { return &one; },
+      if (Panel* same = up->visit(spl::overloaded{[](Panel& one) -> Panel* { return &one; },
                                              [](auto&) -> Panel* { return nullptr; }}))
         return *same;
-    return splice::get<Panel>(layer().frame.open(std::in_place_type<Panel>, needs_));
+    return spl::get<Panel>(layer().frame.open(std::in_place_type<Panel>, needs_));
   }
   // The top panel goes, and the one under it is up again.
   void back_panel() { layer().frame.back(); }
@@ -401,6 +457,8 @@ struct window : scene::Node {
     layer().room.dropClosed();
     layer().reactions.dropClosed();
     layer().history.dropClosed();
+    layer().linking.dropClosed();
+    layer().leaving.dropClosed();
     layer().marks.dropClosed();
     layer().manage.dropClosed();
     layer().forwarding.dropClosed();
@@ -560,8 +618,8 @@ struct window : scene::Node {
   // A passphrase asked for: the one at the start is not dismissed.
   void ask_passphrase(proto::passphrase_for_t why) {
     auto& dialog = layer().passphrase;
-    dialog.setDismissable(splice::visit(
-        splice::overloaded{[](config::passphrase_for::unlock) { return false; }, [](const auto&) { return true; }}, why));
+    dialog.setDismissable(spl::visit(
+        spl::overloaded{[](config::passphrase_for::unlock) { return false; }, [](const auto&) { return true; }}, why));
     dialog.open(needs_, why);
   }
   void passphrase_refused(std::string why) {
@@ -590,6 +648,10 @@ struct window : scene::Node {
     layer().history.open(needs_, in, now, known);
   }
   void close_edit_history() { layer().history.close(); }
+  void open_link(std::string text, std::string url) { layer().linking.open(needs_, std::move(text), std::move(url)); }
+  void close_link() { layer().linking.close(); }
+  void open_leave_space(leave_space_facts facts) { layer().leaving.open(needs_, std::move(facts)); }
+  void close_leave_space() { layer().leaving.close(); }
   void open_marks(mark_kind_t kind, const conversation& in, const std::vector<mark_entry>& entries, const model* now) {
     layer().marks.open(needs_, kind, in, entries, now);
   }
@@ -608,9 +670,9 @@ struct window : scene::Node {
     if (auto* up = layer().new_chat.shown())
       up->show_found(people, query);
   }
-  void open_new_room(const std::string& own_server) {
+  void open_new_room(const std::string& own_server, std::optional<new_room_place> place = std::nullopt) {
     close_drawer();
-    layer().new_room.open(actions, *needs_.colours, own_server);
+    layer().new_room.open(actions, *needs_.colours, own_server, std::move(place));
   }
   void close_new_room() { layer().new_room.close(); }
   void open_packs(std::optional<std::string> room, bool editable) { layer().packs.open(actions, *needs_.colours, *needs_.shared, std::move(room), editable); }
@@ -666,9 +728,10 @@ struct window : scene::Node {
     }
   }
   void show_directory(const std::vector<directory_room>& rooms, const std::string& server,
-                      const std::optional<std::string>& space = std::nullopt) {
+                      const std::optional<std::string>& space = std::nullopt, const std::string& query = {},
+                      const std::optional<std::string>& next = std::nullopt, bool more = false) {
     if (auto* up = layer().explore.shown())
-      up->show(rooms, server, space);
+      up->show(rooms, server, space, query, next, more);
   }
   // A protocol's own dialog up (Node, one of its dialogs), made from args.
   template <class Node, class... Args>

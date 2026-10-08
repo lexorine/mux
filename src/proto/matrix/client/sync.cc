@@ -91,9 +91,9 @@ inline loom::cs::sync::response legacy_of(const loom::cs::sliding_sync::response
       if (events)
         for (const auto& one : *events)
           if (one.state_key && *one.state_key == user)
-            splice::visit(splice::overloaded{[&](const loom::ev::m_room_member_content_t& member) {
+            spl::visit(spl::overloaded{[&](const loom::ev::m_room_member_content_t& member) {
                                                using values = loom::ev::m_room_member_content_t::membership_values;
-                                               out_of_it = splice::visit(splice::overloaded{[](values::leave) { return true; },
+                                               out_of_it = spl::visit(spl::overloaded{[](values::leave) { return true; },
                                                                                             [](values::ban) { return true; },
                                                                                             [](const auto&) { return false; }},
                                                                          member.membership);
@@ -126,8 +126,7 @@ inline loom::cs::sync::response legacy_of(const loom::cs::sliding_sync::response
                                             .events = room.timeline.value_or(std::vector<loom::ev::timeline_event>{})};
       if (room.heroes || room.joined_count || room.invited_count)
         one.summary = joined_t::room_summary_t{
-            .m_heroes = room.heroes ? std::optional(*room.heroes | std::views::transform([](const auto& hero) { return hero.user_id; }) |
-                                                    std::ranges::to<std::vector>())
+            .m_heroes = room.heroes ? std::optional(std::ranges::to<std::vector>(std::views::transform(*room.heroes, [](const auto& hero) { return hero.user_id; })))
                                     : std::nullopt,
             .m_joined_member_count = room.joined_count,
             .m_invited_member_count = room.invited_count};
@@ -285,15 +284,15 @@ void account<Sink>::run() {
       const loom::interactive_auth& wanted = *said->auth;
       const std::string session = *said->session;
       const auto passable = [&](const loom::auth_stage_t& stage) {
-        return splice::visit(splice::overloaded{[](loom::auth_stage::password) { return false; },
+        return spl::visit(spl::overloaded{[](loom::auth_stage::password) { return false; },
                                                 [&](loom::auth_stage::registration_token) { return how_.registration_token.has_value(); },
                                                 [](const auto&) { return true; }},
                              stage);
       };
       const auto flow = std::ranges::find_if(wanted.flows, [&](const auto& stages) { return std::ranges::all_of(stages, passable); });
       if (flow == wanted.flows.end()) {
-        const bool token_wanted = std::ranges::any_of(wanted.flows | std::views::join, [](const loom::auth_stage_t& stage) {
-          return splice::visit(splice::overloaded{[](loom::auth_stage::registration_token) { return true; },
+        const bool token_wanted = std::ranges::any_of(std::views::join(wanted.flows), [](const loom::auth_stage_t& stage) {
+          return spl::visit(spl::overloaded{[](loom::auth_stage::registration_token) { return true; },
                                                   [](const auto&) { return false; }},
                                stage);
         });
@@ -311,18 +310,17 @@ void account<Sink>::run() {
       const auto answer = [&](knot::raw rest = knot::raw{"{}"}) {
         auth = asked_t::body_t::authentication_data_t{.type = loom::name_of(*next), .session = session, .rest = std::move(rest)};
       };
-      const bool go_on = splice::visit(
-          splice::overloaded{
+      const bool go_on = spl::visit(
+          spl::overloaded{
               [&](loom::auth_stage::dummy) { return answer(), true; },
               [&](loom::auth_stage::registration_token) {
                 return answer(as_body(registration_token_field{*how_.registration_token})), true;
               },
               [&](loom::auth_stage::terms) {
                 if (!how_.accept_terms) {
-                  const std::string listed = wanted.terms | std::views::transform([](const loom::auth_policy& one) {
+                  const std::string listed = std::ranges::to<std::string>(std::views::join_with(std::views::transform(wanted.terms, [](const loom::auth_policy& one) {
                                                return std::format("{} ({})", one.name, one.url);
-                                             }) |
-                                             std::views::join_with(std::string(", ")) | std::ranges::to<std::string>();
+                                             }), std::string(", ")));
                   return failed("the server asks you to agree to its terms -- " + listed +
                                 " -- turn on I agree to the server's terms, and add the account again");
                 }
@@ -607,7 +605,7 @@ void account<Sink>::run() {
     }();
     if (!got) {
       const failure& why = got.error();
-      if (why.server && splice::visit([](auto code) { return code.gone; }, errcode_of(why.server->errcode))) {
+      if (why.server && spl::visit([](auto code) { return code.gone; }, errcode_of(why.server->errcode))) {
         // A kept session no longer good: logged in again, once.
         if (kept) {
           log(id_, "the session kept is no longer good: logging in again");
@@ -668,7 +666,9 @@ void account<Sink>::run() {
           if (const auto had = state_.joined.find(room); had != state_.joined.end() && !had->second.timeline.empty())
             gaps.emplace_back(room, *part.timeline->prev_batch, had->second.timeline.back().event_id);
     state_.apply(*got);
+    telling_history_ = first || sliding_first;
     tell(*got);
+    telling_history_ = false;
     for (auto& [room, from, until] : gaps)
       this->catch_up(std::move(room), std::move(from), std::move(until));
     // Written every half a minute, and at the end: a restart goes on from
@@ -742,7 +742,14 @@ void account<Sink>::load_kept() {
     return;
   }
   state_.apply(*saved);
+  // Who was typing when it was kept is long past: the server tells m.typing
+  // only as it changes, so a typer kept here stayed "typing" -- re-told at
+  // every sync -- until they typed in that room again.
+  for (auto& [room, kept] : state_.joined)
+    kept.typing.clear();
+  telling_history_ = true;
   tell(*saved);
+  telling_history_ = false;
   log(id_, "the sync kept: {} rooms, going on from there", state_.joined.size());
 }
 
@@ -750,7 +757,7 @@ void account<Sink>::load_kept() {
 // value the spec does not name is taken as offline.
 [[nodiscard]] inline mux::presence presence_from(const loom::ev::m_presence_content_t& content) {
   using values = loom::ev::m_presence_content_t::presence_values;
-  return {splice::visit(splice::overloaded{[](values::online) -> mux::availability_t { return mux::availability::online{}; },
+  return {spl::visit(spl::overloaded{[](values::online) -> mux::availability_t { return mux::availability::online{}; },
                                 [](values::unavailable) -> mux::availability_t { return mux::availability::away{}; },
                                 [](values::offline) -> mux::availability_t { return mux::availability::offline{}; },
                                 [](const std::string&) -> mux::availability_t { return mux::availability::offline{}; }},
@@ -764,7 +771,7 @@ void account<Sink>::tell(const loom::cs::sync::response& got) {
   if (got.presence && got.presence->events)
     for (const auto& event : *got.presence->events)
       if (event.sender)
-        splice::visit(splice::overloaded{[&](const loom::ev::m_presence_content_t& content) {
+        spl::visit(spl::overloaded{[&](const loom::ev::m_presence_content_t& content) {
                                 sink_(change::presence_changed{id_, *event.sender, presence_from(content)});
                               },
                               [](const auto&) {}},
@@ -798,6 +805,13 @@ void account<Sink>::tell(const loom::cs::sync::response& got) {
       std::ranges::copy_if(found->second.typing, std::back_inserter(typing),
                            [&](const std::string& who) { return who != id_.address; });
       sink_(change::typing_changed{in, std::move(typing)});
+      // The mentions read in another session of this account (theirs, in
+      // the room's account data): seen here too.
+      if (part.account_data && part.account_data->events)
+        for (const auto& one : *part.account_data->events)
+          spl::visit(spl::overloaded{[&](const loom::ev::net_mux_mentions_read_content_t& content) { this->mentions_from(in, content); },
+                                     [](const auto&) {}},
+                     one.content.data());
       // Receipts: m.receipt's content is event -> kind -> user; the public
       // and the private m.read both say how far someone has read.
       if (part.ephemeral && part.ephemeral->events) {
@@ -824,8 +838,8 @@ void account<Sink>::tell(const loom::cs::sync::response& got) {
       std::map<std::string, std::string> names;
       if (const auto kept = state_.invited.find(room); kept != state_.invited.end())
         for (const auto& [key, one] : kept->second)
-          splice::visit(
-              splice::overloaded{
+          spl::visit(
+              spl::overloaded{
                   [&](const loom::ev::m_room_name_content_t& c) {
                     if (!c.name.empty())
                       made.name = c.name;
@@ -837,7 +851,7 @@ void account<Sink>::tell(const loom::cs::sync::response& got) {
                   },
                   [&](const loom::ev::m_room_canonical_alias_content_t& c) { made.alias = c.alias; },
                   [&](const loom::ev::m_room_create_content_t& c) {
-                    made.space = splice::visit([](auto of) { return of.is_space; }, room_type_of(c.type));
+                    made.space = spl::visit([](auto of) { return of.is_space; }, room_type_of(c.type));
                   },
                   [&](const loom::ev::m_room_member_content_t& c) {
                     if (c.displayname)
@@ -989,8 +1003,7 @@ void account<Sink>::conversation(const conversation_id& in, const loom::client::
                                      .pinned = kept.state.pinned(),
                                      .emotes = emotes_of(kept),
                                      .stickers = emotes_of(kept, true),
-                                     .theirs = proto::matrix::room_rules{.join_rule = join_rule_of(rule_text(kept.state.template content<loom::ev::m_room_join_rules_content_t>("m.room.join_rules"),
-                                                                         &loom::ev::m_room_join_rules_content_t::join_rule)),
+                                     .theirs = proto::matrix::room_rules{.join_rule = join_rule_from(kept.state.template content<loom::ev::m_room_join_rules_content_t>("m.room.join_rules")),
                                      .history = history_rule_of(rule_text(kept.state.template content<loom::ev::m_room_history_visibility_content_t>("m.room.history_visibility"),
                                                                           &loom::ev::m_room_history_visibility_content_t::history_visibility)),
                                      .powers = powers_in(kept),

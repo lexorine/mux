@@ -55,25 +55,21 @@ void app::apply(const request::choose& one) {
     screen.line.set_text(screen.draft_of(one.which));
   }
   model->touch(one.which);
-  // What was kept of its reads, where the model has nothing newer.
-  if (model->find(one.which) && !ask.demo)
-    work.run([this, which = one.which]() -> workers::done_t {
-      auto kept = store.read_reads(which);
-      return [this, which, kept = std::move(kept)]() mutable {
-        const mux::conversation* chat = model->find(which);
-        if (!chat)
-          return;
-        std::map<std::string, std::string> missing;
-        for (auto& [user, event] : kept.read_by)
-          if (!chat->read_by.contains(user))
-            missing.emplace(user, std::move(event));
-        if (!missing.empty())
-          model->apply(mux::change_t{mux::change::receipts_changed{which, std::move(missing)}});
-        if (!chat->read_up_to && kept.me)
-          model->read_up_to(which, *kept.me);
-        this->refresh();
-      };
-    });
+  // What was kept of its reads, where the model has nothing newer: read
+  // now, before the chat is shown -- a small file -- so that it opens at
+  // the first unread as read here, not by the server's count, which it did
+  // when this came a moment after.
+  if (const mux::conversation* chat = model->find(one.which); chat && !ask.demo) {
+    auto kept = store.read_reads(one.which);
+    if (!chat->read_up_to && kept.me)
+      model->read_up_to(one.which, *kept.me);
+    std::map<std::string, std::string> missing;
+    for (auto& [user, event] : kept.read_by)
+      if (!chat->read_by.contains(user))
+        missing.emplace(user, std::move(event));
+    if (!missing.empty())
+      model->apply(mux::change_t{mux::change::receipts_changed{one.which, std::move(missing)}});
+  }
   // A group opened: all its members, once, where a sync gives only some.
   if (const mux::conversation* chat = model->find(one.which);
       chat && !ask.demo && chat->member_count > static_cast<std::int64_t>(chat->members.size()) &&
@@ -104,10 +100,36 @@ void app::apply(const request::leave_chat&) {
     root().show_notice("This chat cannot be left");
     return;
   }
+  // A space: Element's box first, for which of its rooms to leave with it.
+  if (one->space) {
+    this->apply(request::open_leave_space{*chosen});
+    return;
+  }
   if (!ask.demo)
     net->leave(*chosen);
   root().main().info_open = false;
 }
+
+void app::apply(const request::open_leave_space& one) {
+  const mux::conversation* space = model->find(one.space);
+  if (!space)
+    return;
+  mux::ui::leave_space_facts facts{.space = one.space, .name = space->name.empty() ? one.space.id : space->name};
+  for (const std::string& child : space->children)
+    if (const mux::conversation* room = model->find(mux::conversation_id{one.space.account, child}))
+      facts.rooms.push_back({child, room->name.empty() ? child : room->name});
+  root().open_leave_space(std::move(facts));
+}
+void app::apply(const request::leave_space& one) {
+  root().close_leave_space();
+  if (ask.demo)
+    return;
+  for (const std::string& room : one.rooms)
+    net->leave(mux::conversation_id{one.space.account, room});
+  net->leave(one.space);
+  root().main().info_open = false;
+}
+void app::apply(const request::close_leave_space&) { root().close_leave_space(); }
 
 void app::apply(const request::back&) { this->show_conversations(); }
 
@@ -122,7 +144,7 @@ void app::apply(const request::toggle_info&) {
   // it holds, and no more than a page of rows is looked at.
   if (const auto& chosen = root().main().chosen; chosen && !shared.demo())
     if (const mux::conversation* chat = model->find(*chosen); chat && chat->encrypted)
-      for (const mux::member& each : chat->members | std::views::take(200))
+      for (const mux::member& each : std::views::take(chat->members, 200))
         net->ask_trust(chosen->account, each.id);
 }
 

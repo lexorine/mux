@@ -71,8 +71,7 @@ struct page {
   // A code point as UTF-8 (alef): none where it is past Unicode's.
   const auto utf8 = [](std::uint32_t c) {
     const std::u32string point = c < 0x110000 ? std::u32string(1, static_cast<char32_t>(c)) : std::u32string();
-    return point | alef::as_utf8 | std::views::transform([](char8_t unit) { return std::bit_cast<char>(unit); }) |
-           std::ranges::to<std::string>();
+    return std::ranges::to<std::string>(std::views::transform(point | alef::as_utf8, [](char8_t unit) { return std::bit_cast<char>(unit); }));
   };
   std::string out;
   out.reserve(text.size());
@@ -152,7 +151,7 @@ inline constexpr std::array<std::pair<std::string_view, std::string facts::*>, 6
 
 // The page's head read for its preview: none where it says nothing.
 [[nodiscard]] inline std::optional<link_preview> read_page(std::string_view html, std::string_view at) {
-  const std::string lowered = splice::bytes::lower_text(html);
+  const std::string lowered = spl::bytes::lower_text(html);
   const std::string_view lower = lowered;
   const std::size_t head_end = std::min(lower.find("</head"), lower.size());
   facts read;
@@ -170,7 +169,7 @@ inline constexpr std::array<std::pair<std::string_view, std::string facts::*>, 6
     const auto content = attribute(tag, tag_lower, "content");
     if (!name || !content)
       continue;
-    const std::string key = splice::bytes::lower_text(*name);
+    const std::string key = spl::bytes::lower_text(*name);
     if (const auto field = std::ranges::find(kTags, key, [](const auto& one) { return one.first; });
         field != kTags.end() && (read.*(field->second)).empty())
       read.*(field->second) = *content;

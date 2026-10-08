@@ -106,6 +106,7 @@ struct stub {
   void open_explore() {}
   void close_explore() {}
   void search_rooms(std::string, std::string) {}
+  void more_rooms(std::string, std::string, std::string) {}
   void search_pick(std::size_t) {}
   void manage_space(std::string) {}
   void flip_forum(std::string) {}
@@ -113,7 +114,12 @@ struct stub {
   void manage_forum() {}
   void explore_space(std::string, std::string = {}) {}
   void join_directory_room(std::string, std::string) {}
-  void create_room(std::string, std::string, bool, std::string, bool = true, bool = false) {}
+  void create_room(std::string, std::string, bool, std::string, bool = true, bool = false,
+                   std::optional<mux::conversation_id> = std::nullopt, bool = false, bool = false) {}
+  void open_new_room_in(mux::conversation_id, std::string, bool) {}
+  void open_leave_space(mux::conversation_id) {}
+  void leave_space(mux::conversation_id, std::vector<std::string>) {}
+  void close_leave_space() {}
   void find_people(std::string) {}
   void search_elsewhere(std::string) {}
   void open_packs() {}
@@ -157,10 +163,14 @@ struct stub {
   void open_new_room() {}
   void close_new_room() {}
   void copy_text(std::string) {}
-  void text_key(scene::Key) {}
+  void text_key(scene::Key, bool = false) {}
+  void ask_link() {}
+  void set_link(std::string, std::string) {}
+  void close_link() {}
   void start_call(mux::conversation_id) {}
   void dismiss_call() {}
   void call_chosen() {}
+  void dismiss_call() {}
   void menu_edit_history() {}
   void close_edit_history() {}
   void menu_select() {}
@@ -177,8 +187,7 @@ struct stub {
   void flip_notify(mux::config::notify_flag_t) {}
   void flip_unified_push() {}
   void set_notify_backend(mux::config::notify_backend_t) {}
-  void flip_account_notify() {}
-  void flip_account_notify_sound() {}
+  void set_notify_choice(mux::choice_level_t, mux::config::notify_setting_t, std::optional<bool>) {}
   void set_chat_notify(mux::config::notify_mode_t) {}
   void set_room_event_kind(mux::choice_level_t, std::optional<mux::room_event_t>, std::optional<bool>) {}
   void set_room_events(mux::choice_level_t, std::optional<bool>, std::optional<mux::config::room_event_kinds>) {}
@@ -211,6 +220,7 @@ struct stub {
   void menu_pin() {}
   void menu_reactions() {}
   void close_reactions() {}
+  void close_edit_history() {}
   void open_avatar(std::string) {}
   void open_manage() {}
   void menu_forward() {}
@@ -239,6 +249,8 @@ struct stub {
   void ask_for(Request) {}
   void flip_account_receipts() {}
   void flip_only_verified() {}
+  void flip_account_mentions_shared() {}
+  void flip_account_mentions_sealed() {}
   void accept_identity(mux::conversation_id) {}
   void proxy_kind(mux::config::proxy_kind_t) {}
   void choose_account_proxy(int) {}

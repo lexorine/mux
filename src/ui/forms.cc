@@ -62,6 +62,42 @@ struct field : nodes::Stack {
   }
 };
 
+// A link put on what is selected in the message field, as tdesktop's
+// EditLinkBox: its text and its URL, the forms' own fields; Done puts it on,
+// Esc or Cancel leaves the field as it was.
+template <class Actions>
+struct link_box : nodes::Stack {
+  // The dialog it is shown in.
+  [[nodiscard]] static dialog_look look_of_dialog() { return {.size = dialog_size::fitting{400.0f}}; }
+  struct done {
+    link_box* box;
+    void operator()() const { box->actions->set_link(box->parts.text.text(), box->parts.url.text()); }
+  };
+  struct cancel {
+    Actions* actions;
+    void operator()() const { actions->close_link(); }
+  };
+  Actions* actions = nullptr;
+  struct parts_t {
+    nodes::Text title;
+    field text;
+    field url;
+    widgets::Button<done> go;
+    widgets::Button<cancel> back;
+  } parts;
+  link_box(const ui_needs<Actions>& n, std::string text, std::string url)
+      : actions(n.actions),
+        parts{.title = nodes::Text(url.empty() ? "Add link" : "Edit link", 17.0f, n.colours->text, true),
+              .text = field(*n.colours, "Text", "Text", std::move(text)),
+              .url = field(*n.colours, "URL", "https://", std::move(url)),
+              .go = widgets::Button<done>(n.colours->widgets, "Done", {this}),
+              .back = widgets::Button<cancel>(n.colours->widgets, "Cancel", {n.actions})} {
+    fState.apply({.fillX = true, .autoSize = scene::axes::kY, .padding = {20.0f, 22.0f, 20.0f, 22.0f}});
+    this->setGap(10.0f);
+    parts.title.apply({.fillX = true});
+  }
+};
+
 // A passphrase asked for: to open local data at the start (not dismissed --
 // nothing behind it is anything until it opens), to turn its encryption on
 // or off, or to change it. Its fields are the forms' own, masked; what each
@@ -146,7 +182,7 @@ struct passphrase_box : nodes::Stack {
     parts.go.apply({.width = 110.0f, .height = 34.0f, .alignSelf = scene::align::kEnd});
   }
   [[nodiscard]] words said() const {
-    return splice::visit([](auto why) { return words_of(why); }, purpose);
+    return spl::visit([](auto why) { return words_of(why); }, purpose);
   }
   // Why it was not taken: said under the fields, which are emptied.
   void say(std::string what) {
@@ -225,7 +261,7 @@ template <class Actions, class>
 struct form_list;
 template <class Actions, class... Tags>
 struct form_list<Actions, protocol_list<Tags...>> {
-  using type = splice::variant<form_of_t<Tags, Actions>...>;
+  using type = spl::variant<form_of_t<Tags, Actions>...>;
 };
 template <class Actions>
 using account_form = typename form_list<Actions, protocols>::type;
@@ -233,7 +269,7 @@ using account_form = typename form_list<Actions, protocols>::type;
 // The form of an account's own protocol, filled in from what it keeps.
 template <class Actions>
 [[nodiscard]] account_form<Actions> form_of(Actions* a, const palette& colours, const config::account_t& saved) {
-  return splice::visit([&](const auto& kept) {
+  return spl::visit([&](const auto& kept) {
     using form = typename decltype(form_type_for(kept, type_tag<Actions>{}))::type;
     return account_form<Actions>(std::in_place_type<form>, a, colours, std::optional(kept));
   }, saved.own);
@@ -241,7 +277,7 @@ template <class Actions>
 // A form laid out in the column under `top`.
 template <class Actions>
 void place_form(account_form<Actions>& form, const skia::SkRect& column, float top) {
-  splice::visit(
+  spl::visit(
       [&](auto& one) {
         one.fState.arrange(0.0f, 0.0f);
         scene::layout(one, skia::SkRect::MakeLTRB(column.fLeft, column.fTop + top, column.fRight, column.fBottom));
@@ -249,8 +285,9 @@ void place_form(account_form<Actions>& form, const skia::SkRect& column, float t
       form);
 }
 
-// Esc closes a panel: back to what is under it.
-template <class Actions>
+// Esc leaves a panel: back to what is under it, or a step back within it
+// first, as Back says.
+template <class Actions, class Back = ask<Actions, &Actions::pop_panel>>
 struct closes_on_escape : nodes::Stack {
   Actions* actions = nullptr;
   explicit closes_on_escape(Actions* a) : actions(a) {}
@@ -258,7 +295,7 @@ struct closes_on_escape : nodes::Stack {
   using Node::onKey;
   void onKey(scene::phase::bubble, const scene::key::down& press, scene::Reply& reply) {
     if (press.key == scene::keys::kEscape) {
-      actions->pop_panel();
+      Back{actions}();
       reply.handle();
     }
   }

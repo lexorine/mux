@@ -30,8 +30,7 @@ class media_session {
  public:
   media_session(const std::vector<ice_server>& servers, Wake wake) : wake_(std::move(wake)) {
     rtc::Configuration config;
-    config.iceServers = servers | std::views::transform([](const ice_server& one) { return server_of(one); }) |
-                        std::ranges::to<std::vector>();
+    config.iceServers = std::ranges::to<std::vector>(std::views::transform(servers, [](const ice_server& one) { return server_of(one); }));
     pc_ = std::make_unique<rtc::PeerConnection>(config);
     pc_->onLocalDescription([this](rtc::Description given) {
       this->tell(said::description{{kind_of(given.type()), std::string(given)}});
@@ -117,8 +116,8 @@ class media_session {
   static constexpr int kMostBytes = 1275;          // the largest Opus frame
 
   static rtc::IceServer server_of(const ice_server& one) {
-    return splice::visit(
-        splice::overloaded{
+    return spl::visit(
+        spl::overloaded{
             [&](relay::stun) { return rtc::IceServer(one.host, one.port); },
             [&](relay::turn_udp) {
               return rtc::IceServer(one.host, one.port, one.username, one.password, rtc::IceServer::RelayType::TurnUdp);
@@ -166,9 +165,7 @@ class media_session {
         samples += platform::audio::call_audio::kFrame;
         if (bytes <= 0 || !track_ || !track_->isOpen())
           continue;
-        const auto sent = packet | std::views::take(bytes) |
-                          std::views::transform([](unsigned char b) { return static_cast<std::byte>(b); }) |
-                          std::ranges::to<rtc::binary>();
+        const auto sent = std::ranges::to<rtc::binary>(std::views::transform(std::views::take(packet, bytes), [](unsigned char b) { return static_cast<std::byte>(b); }));
         track_->sendFrame(sent, rtc::FrameInfo(samples));
       }
     });
@@ -184,7 +181,7 @@ class media_session {
     const int got = opus_decode_float(decoder_, packet.data(), static_cast<opus_int32>(data.size()), pcm.data(),
                                       static_cast<int>(pcm.size()), 0);
     if (got > 0)
-      audio_.play(pcm | std::views::take(got));
+      audio_.play(std::views::take(pcm, got));
   }
 
   Wake wake_;

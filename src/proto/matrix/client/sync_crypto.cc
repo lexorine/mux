@@ -216,7 +216,14 @@ void account<Sink>::verification_in(const std::string& sender, const loom::ev::m
   // Both sides started: the one whose user and device sort first keeps its.
   if (state.we_started && std::pair(id_.address, crypto_->device_id()) < std::pair(sender, content.from_device))
     return;
-  const auto offer = knot::try_read<crypto::sas_offer>(content.rest.text);
+  // The SAS method's offer, as loom read it with the start.
+  const std::optional<crypto::sas_offer> offer =
+      content.key_agreement_protocols && content.hashes && content.message_authentication_codes && content.short_authentication_string
+          ? std::optional(crypto::sas_offer{.key_agreement_protocols = *content.key_agreement_protocols,
+                                            .hashes = *content.hashes,
+                                            .message_authentication_codes = *content.message_authentication_codes,
+                                            .short_authentication_string = *content.short_authentication_string})
+          : std::nullopt;
   if (content.method != "m.sas.v1" || !offer || !crypto::speaks(*offer))
     return this->cancel_verification(state.txn, "m.unknown_method", "Only emoji verification is spoken here.");
   // Committed to as its sender wrote it: in a room, with its reference (out
@@ -302,7 +309,7 @@ void account<Sink>::sas_send_mac(crypto::sas_state& state) {
     const std::string master_key = "ed25519:" + *master;
     macs.emplace(master_key, state.mac(*master, base + master_key));
   }
-  const std::string ids = macs | std::views::keys | std::views::join_with(',') | std::ranges::to<std::string>();
+  const std::string ids = std::ranges::to<std::string>(std::views::join_with(std::views::keys(macs), ','));
   this->send_step(state, "m.key.verification.mac",
                   loom::ev::m_key_verification_mac_content_t{.mac = std::move(macs), .keys = state.mac(ids, base + "KEY_IDS")});
 }
@@ -320,7 +327,7 @@ template <class Sink>
 void account<Sink>::sas_check_mac(crypto::sas_state& state) {
   const std::string txn = state.txn;
   const std::string base = std::string(kMacInfo) + state.their_user + state.their_device + id_.address + crypto_->device_id() + txn;
-  const std::string ids = *state.their_mac | std::views::keys | std::views::join_with(',') | std::ranges::to<std::string>();
+  const std::string ids = std::ranges::to<std::string>(std::views::join_with(std::views::keys(*state.their_mac), ','));
   if (!state.mac_ok(ids, base + "KEY_IDS", state.their_keys_mac))
     return this->cancel_verification(txn, "m.key_mismatch", "The keys they listed are not the ones they sent.");
   if (!api_)
@@ -389,41 +396,36 @@ void account<Sink>::verification_request_in_room(const conversation_id& in, cons
 // Its steps: read by their type as the to-device ones are, the request they
 // refer to standing for the transaction. Shown nowhere in the timeline.
 template <class Sink>
-bool account<Sink>::verification_in_room(const conversation_id& in, const loom::ev::timeline_event& one, const knot::raw& raw,
-                                         placement_t where) {
-  const auto kind = verification_kind_of(one.type);
-  const bool step = splice::visit(splice::overloaded{[](verification_kind::none) { return false; }, [](const auto&) { return true; }}, kind);
-  if (!step)
-    return false;
-  const bool live = splice::visit(splice::overloaded{[](placement::at_end) { return true; }, [](const auto&) { return false; }}, where);
-  if (!live || one.sender == id_.address || !crypto_)
-    return true;
-  // The step, read as its type's content, its reference made its transaction
-  // -- for the room it came in only.
-  const auto take = [&]<class Content>(type_tag<Content>) {
-    auto content = knot::try_read<Content>(raw.text);
-    if (!content)
-      return;
-    const auto reference = content->m_relates_to && content->m_relates_to->event_id ? content->m_relates_to->event_id
-                                                                                     : outer_reference_;
+bool account<Sink>::verification_in_room(const conversation_id& in, const loom::ev::timeline_event& one, placement_t where) {
+  // The step, its reference made its transaction -- for the room it came in
+  // only. An old one -- in the first sync's history -- is not one to answer.
+  // Asked here, outside the step's lambda, as before: an inline member
+  // reached only from inside a generic lambda was not emitted where this is
+  // explicitly instantiated.
+  const bool answerable = (!telling_history_ && placed_as_news(where)) && one.sender != id_.address && crypto_;
+  const auto take = [&](auto content) {
+    if (!answerable)
+      return true;
+    const auto reference = content.m_relates_to && content.m_relates_to->event_id ? content.m_relates_to->event_id
+                                                                                   : outer_reference_;
     if (!reference)
-      return;
+      return true;
     const auto found = verifications_.find(*reference);
     if (found == verifications_.end() || found->second.room != in.id)
-      return;
-    content->transaction_id = found->first;
-    this->verification_in(one.sender, *content);
+      return true;
+    content.transaction_id = found->first;
+    this->verification_in(one.sender, content);
+    return true;
   };
-  splice::visit(splice::overloaded{[](verification_kind::none) {},
-                                   [&](verification_kind::ready) { take(type_tag<loom::ev::m_key_verification_ready_content_t>{}); },
-                                   [&](verification_kind::start) { take(type_tag<loom::ev::m_key_verification_start_content_t>{}); },
-                                   [&](verification_kind::accept) { take(type_tag<loom::ev::m_key_verification_accept_content_t>{}); },
-                                   [&](verification_kind::key) { take(type_tag<loom::ev::m_key_verification_key_content_t>{}); },
-                                   [&](verification_kind::mac) { take(type_tag<loom::ev::m_key_verification_mac_content_t>{}); },
-                                   [&](verification_kind::cancel) { take(type_tag<loom::ev::m_key_verification_cancel_content_t>{}); },
-                                   [](verification_kind::done) {}},
-                kind);
-  return true;
+  return spl::visit(spl::overloaded{[&](const loom::ev::m_key_verification_ready_content_t& step) { return take(step); },
+                                    [&](const loom::ev::m_key_verification_start_content_t& step) { return take(step); },
+                                    [&](const loom::ev::m_key_verification_accept_content_t& step) { return take(step); },
+                                    [&](const loom::ev::m_key_verification_key_content_t& step) { return take(step); },
+                                    [&](const loom::ev::m_key_verification_mac_content_t& step) { return take(step); },
+                                    [&](const loom::ev::m_key_verification_cancel_content_t& step) { return take(step); },
+                                    [](const loom::ev::m_key_verification_done_content_t&) { return true; },
+                                    [](const auto&) { return false; }},
+                    one.content.data());
 }
 
 template <class Sink>
