@@ -2,7 +2,7 @@
 
 Fonts and themes can be set in Settings → Appearance (client), an account’s Appearance page, and Manage → General for a space or room. Empty font and theme-file fields inherit from the nearest space, account, or client. A room can override the text font while inheriting the code font and theme. Choosing a built-in theme at a lower level replaces an inherited custom palette.
 
-Enter an installed font family or a font file path. Click **Apply fonts and theme**, or close the settings editor, to apply the saved choices. Applying follows the account and room currently being viewed; editing another account saves its choices for when that account is selected.
+Pick a text font or a code font from the lists under each field: the text list has every installed family, the code list only the fixed-pitch ones, and **Default** clears the field. The fields also take an installed family name typed in, or a font file path. Click **Apply fonts and theme**, or close the settings editor, to apply the saved choices. Applying follows the account and room currently being viewed; editing another account saves its choices for when that account is selected.
 
 A custom theme is a JSON palette file. Colors are unsigned 32-bit ARGB integers. Every color is optional; omitted colors use the selected built-in theme. See `themes/example.json` for an example. Available colors are `background`, `sidebar`, `chosen`, `text`, `dim`, `accent`, `error`, `selected`, `selected_text`, `band`, `section`, `tile`, `sent_time`, `bubble`, `out_bubble`, `chat`, `chat_top`, `pattern`, and `on_accent`.
 

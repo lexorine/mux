@@ -96,6 +96,32 @@ inline void load_fonts(const std::string& directory, skia::SkFont& font) {
   }
 }
 
+// The families installed, by name and in order: every one, or for code only
+// those with a fixed-pitch face. Listed once the fonts are loaded, and none
+// before that. Hidden families, whose names begin with a dot, are left out.
+inline const std::vector<std::string>& installed_families(bool monospace) {
+  static std::vector<std::string> all, fixed;
+  static bool listed = false;
+  if (!listed && installed_manager) {
+    listed = true;
+    for (int index = 0; index < installed_manager->countFamilies(); ++index) {
+      skia::SkString family;
+      installed_manager->getFamilyName(index, &family);
+      const std::string name = family.c_str();
+      if (name.empty() || name.starts_with('.'))
+        continue;
+      all.push_back(name);
+      if (const auto face = installed_manager->matchFamilyStyle(name.c_str(), skia::SkFontStyle()); face && face->isFixedPitch())
+        fixed.push_back(name);
+    }
+    for (auto* names : {&all, &fixed}) {
+      std::ranges::sort(*names);
+      names->erase(std::ranges::unique(*names).begin(), names->end());
+    }
+  }
+  return monospace ? fixed : all;
+}
+
 inline bool select_fonts(std::string_view regular, std::string_view monospace) {
   auto manager = installed_manager;
   if (!manager) return regular.empty() && monospace.empty();

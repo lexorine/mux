@@ -10,6 +10,7 @@ import skiff.scene;
 import skiff.compose;
 import skiff.nodes.flow;
 import skiff.nodes.icon;
+import skiff.nodes.scroll;
 import skiff.nodes.text;
 import skiff.widgets.avatar;
 import skiff.widgets.button;
@@ -21,6 +22,7 @@ import skiff.bind;
 import mux.core;
 import mux.logic.room_events;
 import mux.config;
+import mux.platform.fonts;
 import :base;
 import :icons;
 import :avatars;
@@ -653,6 +655,36 @@ struct pick_style_theme {
     return skiff::bind::own(skiff::model::setTo(values.at(index)));
   }
 };
+// A family to pick, or the default (empty: what the level above gives, or the
+// shipped face): a press sets the field to its name, and the row the field
+// holds is the one shown chosen. As the radio rows of the room's access do.
+template <auto Member>
+inline auto font_row(const palette& colours, const std::string& name) {
+  namespace c = skiff::compose;
+  using field = skiff::model::Field<Member>;
+  const std::string shown = name.empty() ? std::string("Default") : name;
+  return c::spec_for<field>([name](const auto& now) { return scene::Spec{.selected = now == name}; },
+      c::onClick(skiff::bind::own(skiff::model::setTo(name)),
+          c::row(c::hbox(0.0f, {.fillX = true, .height = 28.0f, .padding = {0.0f, 10.0f, 0.0f, 10.0f},
+                                .cornerRadius = 6.0f, .hoverBackground = colours.chosen, .selectedBackground = colours.chosen}),
+              c::styled({.grow = scene::axes::kX, .alignSelf = scene::align::kMiddle},
+                  elided(nodes::Text(shown, 13.0f, colours.text)))),
+          shown));
+}
+// The installed families, as a list that scrolls: the default first, then
+// each in its own order -- every one for the text, and for code only those
+// with a fixed-pitch face, so the two pickers offer different lists.
+template <auto Member>
+inline auto font_picker(const palette& colours, bool monospace) {
+  namespace c = skiff::compose;
+  std::vector<decltype(font_row<Member>(colours, std::string()))> rows;
+  rows.push_back(font_row<Member>(colours, std::string()));
+  for (const std::string& name : mux::platform::fonts::installed_families(monospace))
+    rows.push_back(font_row<Member>(colours, name));
+  return c::styled({.fillX = true, .height = 132.0f},
+      nodes::ScrollContainer(c::many(c::vbox(0.0f, {.fillX = true, .autoSize = scene::axes::kY}), std::move(rows))));
+}
+
 template <auto Member>
 inline auto style_text_field(const palette& colours, std::string label, std::string hint) {
   namespace c = skiff::compose;
@@ -672,7 +704,9 @@ inline auto style_controls(const palette& colours, bool choose_base = true) {
       nodes::Text("FONTS AND THEME", 13.0f, colours.dim, true), c::visible(choose_base, std::move(theme)),
       style_text_field<&style::theme_file>(colours, "Custom theme", "JSON palette file path; empty inherits"),
       style_text_field<&style::font>(colours, "Text font", "Installed family or font file path; empty inherits"),
+      font_picker<&style::font>(colours, false),
       style_text_field<&style::monospace>(colours, "Code font", "Installed family or font file path; empty inherits"),
+      font_picker<&style::monospace>(colours, true),
       c::onClick(request::apply_style{}, c::styled({.fillX = true, .height = 36.0f},
           widgets::Button<>(colours.widgets, "Apply fonts and theme")))));
 }
