@@ -38,6 +38,11 @@ concurrency:
   group: cachix-${{ github.ref }}
   cancel-in-progress: false
 
+# Read-only by default; the build job below is the one that writes, to commit
+# flake.lock back to the branch it built.
+permissions:
+  contents: read
+
 jobs:
   # Cheap gate: proves the whole dependency graph still resolves (Skia,
   # FFmpeg's eight codecs, SDL3) without spending an hour compiling. Runs
@@ -69,6 +74,8 @@ jobs:
     name: build and push
     runs-on: ubuntu-24.04
     timeout-minutes: 300
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -86,6 +93,48 @@ jobs:
             # which is what makes it safe to cache. TODO: vendor the last
             # few fetches and turn this back off.
             sandbox = false
+
+      # flake.lock is generated here, from the flake's inputs as flake.nix pins
+      # them, and written back to the branch built: the lock the cache was made
+      # from is then the one in the repository. nix flake lock re-pins only the
+      # inputs whose pin moved; a current lock is left alone.
+      #
+      # A pull request from a fork gets a read-only token, so its lock is
+      # written and built but not pushed. Otherwise the commit goes to the head
+      # branch, which pushes with GITHUB_TOKEN do not re-trigger workflows, and
+      # [skip ci] says so for anything that does. A failed push is a warning:
+      # the cache is still published from the lock this run built with.
+      - name: Write flake.lock
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+          SAME_REPO: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        run: |
+          set -euo pipefail
+          nix flake lock
+          if git diff --quiet -- flake.lock; then
+            echo "flake.lock is current"
+            echo "- flake.lock: current" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "- flake.lock: re-pinned, written as \`$BRANCH\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$SAME_REPO" != "true" ]; then
+            echo "::notice::flake.lock changed, but this pull request is from a fork: not pushed"
+            exit 0
+          fi
+          cp flake.lock "$RUNNER_TEMP/flake.lock"
+          git checkout -- flake.lock
+          # A pull request's checkout is its merge commit: the commit goes on
+          # the head branch's own tip, not on the merge.
+          git fetch origin "$BRANCH"
+          git checkout -B "$BRANCH" FETCH_HEAD
+          cp "$RUNNER_TEMP/flake.lock" flake.lock
+          git add flake.lock
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "Update flake.lock to the inputs' pins [skip ci]"
+          if ! git push origin "HEAD:refs/heads/$BRANCH"; then
+            echo "::warning::could not push flake.lock to $BRANCH; the lock this run built with is only in its log"
+          fi
 
       # Skia + FFmpeg + an `import std` toolchain can outgrow the runner's
       # ~14 GB of disk part-way through, and the failure then looks like an
