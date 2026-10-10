@@ -26,6 +26,30 @@ class rooms_part {
   rooms_part(const rooms_part&) = delete;
   rooms_part& operator=(const rooms_part&) = delete;
 
+  void apply(const request::open_room_invite& one) {
+    const auto* chat = s_->model->find(one.room);
+    if (!chat || !mux::ui::is_group(*chat) || chat->invite ||
+        !mux::proto::chat_rights(mux::ui::protocol_state_of(s_->ui, one.room.account), *chat).invite)
+      return;
+    mux::ui::new_chat_facts facts{.by = one.room.account, .inviting = one.room, .room_name = mux::ui::display_name(*chat)};
+    if (const auto* own = s_->model->accounts().find(one.room.account))
+      facts.people = std::ranges::to<std::vector>(std::views::transform(
+          std::views::filter(own->conversations.values(), [](const auto& in) { return !mux::ui::is_group(in); }),
+          [&](const auto& in) { return mux::found_person{.id = mux::ui::contact_of(s_->ui, in), .name = mux::ui::display_name(in), .avatar = in.avatar}; }));
+    std::ranges::sort(facts.people, {}, &mux::found_person::name);
+    facts.rows = mux::ui::people_rows(facts);
+    mux::ui::show(*s_->showing, std::optional(std::move(facts)));
+  }
+  void apply(const request::invite_to_room& one) {
+    const auto* chat = s_->model->find(one.room);
+    const mux::ui::new_chat_facts facts{.by = one.room.account};
+    if (!chat || !mux::ui::is_group(*chat) || chat->invite || !mux::ui::direct_address(facts, one.user) ||
+        !mux::proto::chat_rights(mux::ui::protocol_state_of(s_->ui, one.room.account), *chat).invite || s_->demo())
+      return;
+    s_->net->manage(one.room, mux::room_action::invite{one.user});
+    mux::ui::show<mux::ui::new_chat_facts>(*s_->showing, std::nullopt);
+  }
+
   // A new chat: its box; a direct chat or a group asked of the account whose
   // chats are listed -- or, for a direct chat with someone it already has
   // one with, that chat shown.
@@ -33,131 +57,181 @@ class rooms_part {
   // one's own link to send.
   void apply(const request::open_new_chat&) {
     const auto& current = s_->root().main().current;
+    if (!current) return;
     std::vector<mux::found_person> known;
     std::string link;
     if (current) {
-      if (const auto found = s_->model->accounts().find(*current); found != s_->model->accounts().end())
-        for (const auto& [key, chat] : found->second.conversations)
+      if (const mux::account* found = s_->model->accounts().find(*current))
+        for (const auto& [key, chat] : found->conversations)
           if (!mux::ui::is_group(chat))
             known.push_back({.id = mux::ui::contact_of(s_->ui, chat), .name = mux::ui::display_name(chat), .avatar = chat.avatar});
       link = mux::proto::share_link(mux::ui::protocol_state_of(s_->ui, *current), current->address).value_or(std::string());
     }
     std::ranges::sort(known, {}, &mux::found_person::name);
-    s_->root().open_new_chat(std::move(known), std::move(link));
+    mux::ui::show(*s_->showing, mux::ui::drawer_shown{false});
+    mux::ui::new_chat_facts facts{std::move(known), std::move(link), {}, {}, current};
+    facts.rows = mux::ui::people_rows(facts);
+    mux::ui::show(*s_->showing, std::optional(std::move(facts)));
   }
   void apply(const request::find_people& one) {
-    const auto by = s_->account_offering(mux::proto::feature::people_directory{});
-    if (!by || s_->demo())
+    // Query changes belong to the shown dialog. Update suggestions even
+    // when this protocol has no server-side people directory.
+    mux::ui::change_shown<std::optional<mux::ui::new_chat_facts>>(*s_->showing, [&](auto& now) {
+      if (!now) return;
+      now->query = one.query;
+      now->found.clear();
+      now->rows = mux::ui::people_rows(*now);
+    });
+    s_->refresh_due = true;
+    const auto& facts = s_->showing->root().new_chat.fValue;
+    const auto by = facts ? facts->by : std::nullopt;
+    if (!by || s_->demo() || !mux::proto::offers(mux::ui::protocol_state_of(s_->ui, *by), mux::proto::feature::people_directory{}))
       return;
     s_->net->search_people(*by, one.query);
   }
   void apply(const request::search_elsewhere& one) {
-    const auto by = s_->account_offering(mux::proto::feature::people_directory{});
-    if (!by || s_->demo())
+    const auto by = one.by ? one.by : s_->root().main().current;
+    if (!by || by != s_->root().main().current || s_->demo())
       return;
-    s_->net->search_directory(*by, std::string(), one.query);
-    s_->net->search_people(*by, one.query);
+    const auto state = mux::ui::protocol_state_of(s_->ui, *by);
+    if (mux::proto::offers(state, mux::proto::feature::room_directory{}))
+      s_->net->search_directory(*by, std::string(), one.query);
+    if (mux::proto::offers(state, mux::proto::feature::people_directory{}))
+      s_->net->search_people(*by, one.query);
   }
   void apply(const request::open_new_room&) {
     const auto by = s_->account_offering(mux::proto::feature::room_creation{});
-    s_->root().open_new_room(by ? by->address.substr(by->address.find(':') + 1) : std::string());
+    if (!by) return;
+    mux::ui::show(*s_->showing, mux::ui::drawer_shown{false});
+    mux::ui::show(*s_->showing, std::optional(mux::ui::new_room_facts{mux::proto::directory_server_of(mux::ui::protocol_state_of(s_->ui, *by), by->address), std::nullopt, by}));
   }
   void apply(const request::open_new_room_in& one) {
     const std::string& address = one.space.account.address;
-    s_->root().open_new_room(address.substr(address.find(':') + 1),
-                             mux::ui::new_room_place{one.space, one.name, one.make_space});
+    mux::ui::show(*s_->showing, mux::ui::drawer_shown{false});
+    mux::ui::show(*s_->showing, std::optional(mux::ui::new_room_facts{address.substr(address.find(':') + 1),
+                             mux::ui::new_room_place{one.space, one.name, one.make_space}, one.space.account}));
   }
-  void apply(const request::close_new_room&) { s_->root().close_new_room(); }
-  void apply(const request::close_new_chat&) { s_->root().close_new_chat(); }
+  void apply(const request::close_new_room&) { mux::ui::show<mux::ui::new_room_facts>(*s_->showing, std::nullopt); }
+  void apply(const request::close_new_chat&) { mux::ui::show<mux::ui::new_chat_facts>(*s_->showing, std::nullopt); }
   void apply(const request::start_direct& one) {
-    const auto& current = s_->root().main().current;
+    const auto& facts = s_->showing->root().new_chat.fValue;
+    const auto current = facts ? facts->by : s_->root().main().current;
     if (!current || s_->demo())
       return;
-    s_->root().close_new_chat();
+    mux::ui::show<mux::ui::new_chat_facts>(*s_->showing, std::nullopt);
     for (const auto& [key, chat] : s_->model->accounts().at(*current).conversations)
       if (!mux::ui::is_group(chat) && mux::ui::contact_of(s_->ui, chat) == one.user) {
         s_->chat_due = chat.id;
         return;
       }
     s_->net->create_direct(*current, one.user);
-    s_->root().show_message("New chat", "Starting a chat with " + one.user + "…");
+    s_->notice("New chat", "Starting a chat with " + one.user + "…");
   }
   // Explore rooms: opened on the account's own server.
   void apply(const request::open_explore&) {
-    const auto by = s_->account_offering(mux::proto::feature::room_directory{});
-    const std::string own = by ? by->address.substr(by->address.find(':') + 1) : std::string();
-    s_->root().open_explore(own);
+    const auto by = s_->root().main().current;
+    if (!by) return;
+    const std::string own = mux::proto::directory_server_of(mux::ui::protocol_state_of(s_->ui, *by), by->address);
+    mux::ui::show(*s_->showing, mux::ui::drawer_shown{false});
+    mux::ui::show<mux::ui::new_chat_facts>(*s_->showing, std::nullopt);
     // What the server lists, at once, as Cinny opens its explorer: its
-    // directory with nothing searched.
-    if (by && !s_->demo()) {
-      s_->root().explore_loading();
+    // directory with nothing searched -- said as asked until it answers.
+    const bool asking = by && !s_->demo();
+    mux::ui::show(*s_->showing, std::optional(mux::ui::explore_facts{own, std::nullopt, asking, std::nullopt, by, own, {}}));
+    if (asking)
       s_->net->search_directory(*by, own, std::string());
-    }
   }
-  void apply(const request::close_explore&) { s_->root().close_explore(); }
+  void apply(const request::close_explore&) {
+    mux::ui::show<mux::ui::explore_facts>(*s_->showing, std::nullopt);
+  }
   // A space's rooms and spaces, in Explore: asked of its account.
   void apply(const request::explore_space& one) {
-    (void)s_->root().main().close_space_menu();
-    const auto by = s_->root().main().current;
+    s_->root().main().close_space_menu_soon();
+    const auto& facts = s_->showing->root().explore.fValue;
+    const auto by = facts ? facts->by : s_->root().main().current;
     if (!by || s_->demo())
       return;
-    s_->root().open_explore(by->address.substr(by->address.find(':') + 1));
+    mux::ui::show(*s_->showing, mux::ui::drawer_shown{false});
+    mux::ui::show<mux::ui::new_chat_facts>(*s_->showing, std::nullopt);
     // Said as the space's: its name and picture over what it holds.
     std::string name = one.name;
     if (const auto& chats = s_->model->accounts().at(*by).conversations; chats.contains(one.room))
       name = mux::ui::display_name(chats.at(one.room));
-    s_->root().explore_as_space(one.room, name.empty() ? one.room : name);
-    s_->root().explore_loading();
+    mux::ui::show(*s_->showing, std::optional(mux::ui::explore_facts{by->address.substr(by->address.find(':') + 1), std::nullopt, true,
+                                                                     mux::ui::explore_space_shown{one.room, name.empty() ? one.room : name}, by, {}, {}}));
     s_->net->explore_space(*by, one.room);
   }
   // A search: an address typed in is gone to, as a link to it would be --
   // its card, or the room where joined; else the directory asked.
   void apply(const request::search_rooms& one) {
-    if (auto link = mux::logic::link_of_id(one.query)) {
-      s_->root().close_explore();
+    const auto& facts = s_->showing->root().explore.fValue;
+    const auto by = facts ? facts->by : std::nullopt;
+    if (!by || s_->demo())
+      return;
+    if (by->speaks == mux::protocol_t(mux::protocol::xmpp{}))
+      if (const auto room = mux::proto::xmpp::room_address(one.query)) {
+        this->apply(request::join_directory_room{room->jid, one.server});
+        return;
+      }
+    if (auto link = mux::logic::link_of_id(one.query); link && mux::proto::owns_address(mux::ui::protocol_state_of(s_->ui, *by), one.query)) {
+      mux::ui::show<mux::ui::explore_facts>(*s_->showing, std::nullopt);
       s_->link_due = *link;
       return;
     }
-    const auto by = s_->account_offering(mux::proto::feature::room_directory{});
-    if (!by || s_->demo())
-      return;
-    s_->net->search_directory(*by, one.server, one.query, one.since);
+    bool space = false;
+    mux::ui::change_shown<std::optional<mux::ui::explore_facts>>(*s_->showing, [&](auto& now) {
+      if (!now) return;
+      space = now->space.has_value();
+      now->server = one.server;
+      now->query = one.query;
+      now->loading = !space;
+    });
+    if (!space) s_->net->search_directory(*by, one.server, one.query, one.since);
   }
   // A room of the directory joined, through the server it was listed by, and
   // opened when it comes.
   void apply(const request::join_directory_room& one) {
-    const auto by = s_->account_offering(mux::proto::feature::room_directory{});
+    const auto& facts = s_->showing->root().explore.fValue;
+    const auto by = one.by ? one.by : facts ? facts->by : s_->root().main().current;
     if (!by || s_->demo())
       return;
     std::vector<std::string> via;
     if (!one.server.empty())
       via.push_back(one.server);
-    s_->joining = mux::logic::link_of_id(one.room);
+    if (by->speaks == mux::protocol_t(mux::protocol::xmpp{}))
+      s_->joining = mux::proto::xmpp::link::room{one.room, by};
+    else if (const auto link = mux::logic::link_of_id(one.room))
+      s_->joining = mux::logic::on_account(*link, *by);
+    else
+      s_->joining.reset();
     s_->net->join(*by, one.room, via);
-    s_->root().close_explore();
+    mux::ui::show<mux::ui::explore_facts>(*s_->showing, std::nullopt);
   }
   // A room made, and opened once the model has it.
   void apply(const request::create_room& one) {
     // In a space: by its account.
+    const auto& facts = s_->showing->root().new_room.fValue;
     const auto by = one.space ? std::optional<mux::account_id>(one.space->account)
-                              : s_->account_offering(mux::proto::feature::room_creation{});
+                              : facts ? facts->by : std::nullopt;
     if (!by || s_->demo())
       return;
-    s_->root().close_new_room();
+    mux::ui::show<mux::ui::new_room_facts>(*s_->showing, std::nullopt);
     // Its alias's local part, as the protocol has it (#name:server, name).
-    const std::string alias = mux::proto::local_part_of(mux::ui::protocol_state_of(s_->ui, *by), one.alias);
-    s_->net->create_room(*by, one.name, one.topic, one.open, one.open ? alias : std::string(), one.federate, one.encrypted,
+    const auto state = mux::ui::protocol_state_of(s_->ui, *by);
+    const auto form = mux::proto::room_creation_form_of(state, std::string());
+    const std::string alias = form.address_required ? one.alias : one.open ? mux::proto::local_part_of(state, one.alias) : std::string();
+    s_->net->create_room(*by, one.name, one.topic, one.open, alias, one.federate, one.encrypted,
                          mux::room_place{one.space ? std::optional<std::string>(one.space->id) : std::nullopt,
                                          one.space_members, one.make_space});
-    s_->root().show_message("New room", "Making " + one.name + "\u2026");
+    s_->notice("New room", "Making " + one.name + "\u2026");
   }
   void apply(const request::start_group& one) {
     const auto& current = s_->root().main().current;
     if (!current || s_->demo())
       return;
-    s_->root().close_new_chat();
+    mux::ui::show<mux::ui::new_chat_facts>(*s_->showing, std::nullopt);
     s_->net->create_group(*current, one.name);
-    s_->root().show_message("New group", "Making " + one.name + "…");
+    s_->notice("New group", "Making " + one.name + "…");
   }
 
  private:

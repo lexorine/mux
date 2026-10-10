@@ -52,6 +52,31 @@ std::optional<std::string> rule_text(const Content* content, Rule Content::* rul
   return content ? std::optional<std::string>(loom::client::choice_text(content->*rule)) : std::nullopt;
 }
 
+// Ephemeral-only responses do not change room metadata or the saved snapshot.
+inline bool room_metadata_changed(const loom::cs::sync::response::rooms_t::joined_room_t& part) {
+  const auto has_events = [](const auto& section) {
+    return section && section->events && !section->events->empty();
+  };
+  return has_events(part.state) || has_events(part.state_after) || has_events(part.account_data) ||
+         part.summary.has_value() || part.unread_notifications.has_value() ||
+         (part.timeline && std::ranges::any_of(part.timeline->events, [](const auto& event) {
+           return event.state_key.has_value();
+         }));
+}
+inline bool sync_changes_snapshot(const loom::cs::sync::response& got) {
+  if (got.account_data && got.account_data->events && !got.account_data->events->empty())
+    return true;
+  if (!got.rooms)
+    return false;
+  if (got.rooms->leave && !got.rooms->leave->empty())
+    return true;
+  return got.rooms->join && std::ranges::any_of(*got.rooms->join, [](const auto& room) {
+    const auto& part = room.second;
+    return room_metadata_changed(part) || (part.timeline &&
+        (!part.timeline->events.empty() || part.timeline->prev_batch || part.timeline->limited.value_or(false)));
+  });
+}
+
 template <class Sink>
 void account<Sink>::say(connection_t state) { sink_(change::connection_changed{id_, std::move(state)}); }
 
@@ -558,7 +583,7 @@ void account<Sink>::run() {
         {"m.room.topic", ""},            {"m.room.encryption", ""},    {"m.room.canonical_alias", ""},
         {"m.room.join_rules", ""},       {"m.room.history_visibility", ""}, {"m.room.power_levels", ""},
         {"m.room.pinned_events", ""},    {"m.room.tombstone", ""},     {"m.space.child", "*"},
-        {"m.space.parent", "*"},         {"im.ponies.room_emotes", "*"}, {"m.room.member", "$LAZY"},
+        {"m.space.parent", "*"}, {"m.room.image_pack", "*"},         {"im.ponies.room_emotes", "*"}, {"m.room.member", "$LAZY"},
         {"m.room.member", "$ME"}};
     const bool sliding_first = sliding_ && !sliding_pos_;
     using sync_result = decltype(perform(syncing, loom::cs::sync{}, std::chrono::seconds(1)));
@@ -665,16 +690,20 @@ void account<Sink>::run() {
         if (part.timeline && part.timeline->limited.value_or(false) && part.timeline->prev_batch)
           if (const auto had = state_.joined.find(room); had != state_.joined.end() && !had->second.timeline.empty())
             gaps.emplace_back(room, *part.timeline->prev_batch, had->second.timeline.back().event_id);
+    snapshot_dirty_ = snapshot_dirty_ || sync_changes_snapshot(*got) ||
+        (got->rooms && got->rooms->join && std::ranges::any_of(*got->rooms->join, [&](const auto& room) {
+          return !state_.joined.contains(room.first);
+        }));
     state_.apply(*got);
     telling_history_ = first || sliding_first;
     tell(*got);
     telling_history_ = false;
     for (auto& [room, from, until] : gaps)
       this->catch_up(std::move(room), std::move(from), std::move(until));
-    // Written every half a minute, and at the end: a restart goes on from
-    // at most that far back.
-    if (first || std::chrono::steady_clock::now() - saved_at > std::chrono::seconds(30)) {
-      this->save_kept();
+    // Checkpoint persistent changes, not typing, presence or empty long polls.
+    // The older token safely replays those transient deltas after a restart.
+    if (first || (snapshot_dirty_ && std::chrono::steady_clock::now() - saved_at > std::chrono::seconds(30))) {
+      snapshot_dirty_ = !this->save_kept();
       saved_at = std::chrono::steady_clock::now();
     }
   }
@@ -692,9 +721,9 @@ auto account<Sink>::kept_file() const -> std::filesystem::path {
 }
 
 template <class Sink>
-void account<Sink>::save_kept() const {
+bool account<Sink>::save_kept() const {
   if (!state_.since)
-    return;
+    return false;
   using response = loom::cs::sync::response;
   using joined_t = response::rooms_t::joined_room_t;
   response out;
@@ -726,8 +755,11 @@ void account<Sink>::save_kept() const {
   // Through the vault: the rooms' events and state, sealed where local data
   // is encrypted.
   const std::filesystem::path where = this->kept_file();
-  if (!how_.vault->write_file(where, knot::to_json_string(out)))
+  if (!how_.vault->write_file(where, knot::to_json_string(out))) {
     log(id_, "the sync could not be kept in {}", where.string());
+    return false;
+  }
+  return true;
 }
 
 template <class Sink>
@@ -765,8 +797,91 @@ void account<Sink>::load_kept() {
           content.status_msg};
 }
 
+struct notification_action {
+  std::string set_tweak;
+  std::optional<knot::raw> value;
+  friend consteval auto json_schema(knot::type<notification_action>) { return knot::schema<notification_action>(); }
+};
+inline bool notification_sound(const auto& rule) {
+  return std::ranges::any_of(rule.actions, [](const knot::raw& raw) {
+    const auto tweak = knot::try_read<notification_action>(raw.text);
+    if (!tweak || tweak->set_tweak != "sound" || !tweak->value) return false;
+    const auto value = knot::try_read<std::string>(tweak->value->text);
+    return value && !value->empty();
+  });
+}
+inline bool notification_enabled(const auto& rule) {
+  return rule.enabled && std::ranges::any_of(rule.actions, [](const knot::raw& raw) {
+    const auto action = knot::try_read<std::string>(raw.text);
+    return action && (*action == "notify" || *action == "coalesce");
+  });
+}
+template <class Sink>
+void account<Sink>::receive_notifications(const loom::ev::account_data_event& event) {
+  spl::visit(spl::overloaded{[&](const loom::ev::m_push_rules_content_t& content) {
+    if (!content.global) return;
+    const auto& rules = *content.global;
+    mux::notification_choices account;
+    account.on = true;
+    account.mentions = true;
+    if (rules.override_)
+      for (const auto& rule : *rules.override_)
+        if (rule.rule_id == ".m.rule.master") account.on = !rule.enabled;
+    if (rules.underride)
+      for (const auto& rule : *rules.underride)
+        if (std::ranges::contains(std::array<std::string_view, 4>{".m.rule.message", ".m.rule.encrypted",
+                ".m.rule.room_one_to_one", ".m.rule.encrypted_room_one_to_one"}, std::string_view(rule.rule_id))) {
+          if (notification_enabled(rule)) account.mentions = false;
+          if (rule.rule_id == ".m.rule.message") account.sound = notification_sound(rule);
+        }
+    if (!pending_notifications_.contains(std::nullopt)) sink_(change::notifications_changed{id_, std::nullopt, account});
+    std::map<std::string, mux::notification_choices> rooms;
+    if (rules.room)
+      for (const auto& rule : *rules.room) {
+        if (!rule.enabled) continue;
+        mux::notification_choices choices;
+        choices.on = true;
+        choices.mentions = !notification_enabled(rule);
+        choices.sound = notification_enabled(rule) ? std::optional<bool>(notification_sound(rule)) : std::nullopt;
+        rooms.insert_or_assign(rule.rule_id, choices);
+      }
+    if (rules.override_)
+      for (const auto& rule : *rules.override_) {
+        if (!rule.enabled || notification_enabled(rule) || !rule.conditions) continue;
+        for (const auto& condition : *rule.conditions)
+          if (condition.kind == "event_match" && condition.key == "room_id" && condition.pattern &&
+              rule.conditions->size() == 1) {
+            mux::notification_choices choices;
+            choices.on = false;
+            rooms.insert_or_assign(*condition.pattern, choices);
+          }
+      }
+    if (rules.override_)
+      for (const auto& rule : *rules.override_) {
+        if (!rule.enabled || !rule.conditions || !rule.rule_id.starts_with("net.mux.room.sound.")) continue;
+        for (const auto& condition : *rule.conditions)
+          if (condition.kind == "event_match" && condition.key == "room_id" && condition.pattern)
+            rooms[*condition.pattern].sound = notification_sound(rule);
+      }
+    for (const auto& room : notification_rooms_)
+      if (!rooms.contains(room)) {
+        mux::notification_choices choices;
+        choices.on.reset(); choices.mentions.reset(); choices.sound.reset();
+        if (!pending_notifications_.contains(room)) sink_(change::notifications_changed{id_, room, choices});
+      }
+    notification_rooms_.clear();
+    for (const auto& [room, choices] : rooms) {
+      notification_rooms_.insert(room);
+      if (!pending_notifications_.contains(room)) sink_(change::notifications_changed{id_, room, choices});
+    }
+  }, [](const auto&) {}}, event.content.data());
+}
+
 template <class Sink>
 void account<Sink>::tell(const loom::cs::sync::response& got) {
+  if (got.account_data && got.account_data->events)
+    for (const auto& event : *got.account_data->events) receive_notifications(event);
+  flush_notifications();
   // Presence: each m.presence is sent by the user it is about.
   if (got.presence && got.presence->events)
     for (const auto& event : *got.presence->events)
@@ -776,6 +891,34 @@ void account<Sink>::tell(const loom::cs::sync::response& got) {
                               },
                               [](const auto&) {}},
                    event.content.data());
+  const auto affects_packs = [](const auto& event) {
+    return spl::visit(spl::overloaded{
+        [](const loom::ev::im_ponies_user_emotes_content_t&) { return true; },
+        [](const loom::ev::im_ponies_emote_rooms_content_t&) { return true; },
+        [](const loom::ev::m_image_pack_rooms_content_t&) { return true; },
+        [](const loom::ev::im_ponies_room_emotes_content_t&) { return true; },
+        [](const loom::ev::m_room_image_pack_content_t&) { return true; },
+        [](const loom::ev::m_space_parent_content_t&) { return true; },
+        [](const loom::ev::m_space_child_content_t&) { return true; },
+        [](const auto&) { return false; }}, event.content.data());
+  };
+  const bool account_packs = got.account_data && got.account_data->events && std::ranges::any_of(*got.account_data->events, affects_packs);
+  const bool room_packs = got.rooms && got.rooms->join && std::ranges::any_of(*got.rooms->join, [&](const auto& room) {
+    const auto has_packs = [&](const auto& section) {
+      return section && section->events && std::ranges::any_of(*section->events, affects_packs);
+    };
+    return has_packs(room.second.state) || has_packs(room.second.state_after) ||
+           (room.second.timeline && std::ranges::any_of(room.second.timeline->events, affects_packs));
+  });
+  // A space pack or an account subscription changes other rooms too, even
+  // when those rooms have no events in this sync response.
+  const bool account_metadata = got.account_data && got.account_data->events &&
+      std::ranges::any_of(*got.account_data->events, [](const auto& event) { return event.type == "m.direct"; });
+  const bool all_metadata = account_metadata || account_packs || room_packs;
+  if (all_metadata)
+    std::ranges::for_each(state_.joined, [&](const auto& room) {
+      conversation(conversation_id{id_, room.first}, room.second);
+    });
   if (!got.rooms)
     return;
   const auto& rooms = *got.rooms;
@@ -785,8 +928,17 @@ void account<Sink>::tell(const loom::cs::sync::response& got) {
       if (found == state_.joined.end())
         continue;
       const conversation_id in{id_, room};
-      conversation(in, found->second);
-      members(in, found->second);
+      const bool first_seen = announced_.insert(room).second;
+      if (!all_metadata && (first_seen || room_metadata_changed(part)))
+        conversation(in, found->second);
+      const auto has_state = [](const auto& section) {
+        return section && section->events && !section->events->empty();
+      };
+      if (first_seen || has_state(part.state) || has_state(part.state_after) ||
+          (part.timeline && std::ranges::any_of(part.timeline->events, [](const auto& event) {
+            return event.state_key.has_value();
+          })))
+        members(in, found->second);
       // Where to page back from: the first time a room is seen -- and every
       // time its timeline comes cut short (limited: more was sent than the
       // sync gives), for between what came before and this is a gap the
@@ -801,10 +953,15 @@ void account<Sink>::tell(const loom::cs::sync::response& got) {
           event(in, one);
       // Who is typing, but the account itself: its own typing, from this or
       // another device, is not news to it (as in Telegram).
-      std::vector<std::string> typing;
-      std::ranges::copy_if(found->second.typing, std::back_inserter(typing),
-                           [&](const std::string& who) { return who != id_.address; });
-      sink_(change::typing_changed{in, std::move(typing)});
+      if (part.ephemeral && part.ephemeral->events &&
+          std::ranges::any_of(*part.ephemeral->events, [](const auto& event) {
+            return event.content.template is<loom::ev::m_typing_content_t>();
+          })) {
+        std::vector<std::string> typing;
+        std::ranges::copy_if(found->second.typing, std::back_inserter(typing),
+                             [&](const std::string& who) { return who != id_.address; });
+        sink_(change::typing_changed{in, std::move(typing)});
+      }
       // The mentions read in another session of this account (theirs, in
       // the room's account data): seen here too.
       if (part.account_data && part.account_data->events)
@@ -874,8 +1031,10 @@ void account<Sink>::tell(const loom::cs::sync::response& got) {
       sink_(std::move(made));
     }
   if (rooms.leave)
-    for (const auto& [room, part] : *rooms.leave)
+    for (const auto& [room, part] : *rooms.leave) {
+      announced_.erase(room);
       sink_(change::conversation_removed{{id_, room}});
+    }
 }
 
 using power_levels_content = loom::ev::m_room_power_levels_content_t;
@@ -1026,17 +1185,48 @@ template <class Sink>
 auto account<Sink>::emotes_of(const loom::client::joined_room& kept, bool stickers) const -> std::vector<mux::emote> {
   const loom::client::image_use_t use = stickers ? loom::client::image_use_t{loom::client::image_use::sticker{}}
                                                  : loom::client::image_use_t{loom::client::image_use::emoticon{}};
+  const auto read = [&](const auto& content, std::optional<std::string> room, const std::string& key) {
+    std::vector<loom::client::pack_image> images;
+    loom::client::detail::add_packs_of(content, use, images);
+    return std::ranges::to<std::vector>(std::views::transform(images, [&](auto& one) {
+      return mux::emote{.shortcode = std::move(one.shortcode), .url = std::move(one.url),
+                        .body = std::move(one.body), .w = one.w, .h = one.h, .size = one.size,
+                        .mimetype = std::move(one.mimetype), .pack = std::move(one.pack),
+                        .pack_avatar = std::move(one.pack_avatar), .pack_room = room, .pack_key = key};
+    }));
+  };
   std::vector<mux::emote> out;
-  for (loom::client::pack_image& one : loom::client::images(state_, kept, use))
-    out.push_back({.shortcode = std::move(one.shortcode),
-                   .url = std::move(one.url),
-                   .body = std::move(one.body),
-                   .w = one.w,
-                   .h = one.h,
-                   .size = one.size,
-                   .mimetype = std::move(one.mimetype),
-                   .pack = std::move(one.pack),
-                   .pack_avatar = std::move(one.pack_avatar)});
+  const auto append = [&](auto images) {
+    // The same source may be inherited and subscribed; keep it once.
+    std::ranges::for_each(images, [&](auto& one) {
+      if (!std::ranges::any_of(out, [&](const auto& old) {
+        return std::tie(old.pack_room, old.pack_key, old.shortcode) == std::tie(one.pack_room, one.pack_key, one.shortcode);
+      }))
+        out.push_back(std::move(one));
+    });
+  };
+  if (const auto own = state_.account_data.find("im.ponies.user_emotes"); own != state_.account_data.end())
+    append(read(own->second.content.data(), std::nullopt, ""));
+  std::ranges::for_each(pack_rooms(state_, kept), [&](const std::string& room) {
+    std::ranges::for_each(state_.joined.at(room).state.events, [&](const auto& event) {
+      append(read(event.second.content.data(), room, event.first.second));
+    });
+  });
+  const auto subscribed = [&](const auto& rooms) {
+    std::ranges::for_each(rooms, [&](const auto& subscription) {
+      if (const auto joined = state_.joined.find(subscription.first); joined != state_.joined.end())
+        std::ranges::for_each(joined->second.state.events, [&](const auto& event) {
+          if (subscription.second.contains(event.first.second))
+            append(read(event.second.content.data(), subscription.first, event.first.second));
+        });
+    });
+  };
+  std::ranges::for_each(state_.account_data, [&](const auto& event) {
+    spl::visit(spl::overloaded{
+        [&](const loom::ev::im_ponies_emote_rooms_content_t& content) { subscribed(content.rooms); },
+        [&](const loom::ev::m_image_pack_rooms_content_t& content) { subscribed(content.rooms); },
+        [](const auto&) {}}, event.second.content.data());
+  });
   return out;
 }
 

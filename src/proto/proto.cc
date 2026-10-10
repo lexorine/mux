@@ -36,6 +36,14 @@ import mux.core;
 
 export namespace mux::proto {
 
+// What differs in the common creation forms, supplied by the protocol.
+struct creation_form {
+  std::string address_hint;
+  bool address_required = false;
+  bool encryption = true;
+  bool federation = true;
+};
+struct chat_form { std::string hint, intro; };
 // What a protocol may have, each a type: asked of it by offers().
 namespace feature {
 struct people_directory {};  // people looked up on its servers
@@ -177,6 +185,16 @@ using style_t = spl::variant<style::bubbles, style::lines>;
 // The defaults: what a protocol that says nothing of a thing comes to.
 namespace mux::proto::defaults {
 constexpr bool available(const auto&) { return true; }
+inline creation_form room_creation_form(const auto&, std::string_view server) {
+  return {"#room-name:" + std::string(server)};
+}
+inline chat_form direct_chat_form(const auto&) {
+  return {"@user:server", "Start a conversation using a name or a full Matrix user ID."};
+}
+inline std::string directory_server(const auto&, std::string_view) { return {}; }
+inline std::vector<room_event_t> room_event_kinds(const auto&) {
+  return std::vector<room_event_t>(all_room_events.begin(), all_room_events.end());
+}
 constexpr bool can_page_back(const auto&) { return true; }
 constexpr bool can_upload(const auto&) { return true; }
 constexpr bool offers(const auto&, const auto&) { return false; }
@@ -237,6 +255,7 @@ inline bool may_delete(const auto&, const conversation&, bool outgoing) { return
 // Removed messages' content is not shown back: what a protocol without the
 // extension (MSC2815) says.
 constexpr bool may_view_redacted(const auto&, const conversation&, std::string_view) { return false; }
+inline bool may_react(const auto&, const conversation&, const message& event) { return !event.id.empty() && !event.redacted; }
 // Any of one's own messages edited.
 inline own_messages edit_rule(const auto&) { return {}; }
 }  // namespace mux::proto::defaults
@@ -496,6 +515,36 @@ inline constexpr struct local_part_t {
     }, state);
   }
 } local_part_of{};
+// The directory starts on the account's protocol-specific domain.
+inline constexpr struct directory_server_t {
+  template <class State>
+  std::string operator()(const State& state, std::string_view address) const {
+    return spl::visit([&](const auto& now) {
+      using defaults::directory_server;
+      return directory_server(now, address);
+    }, state);
+  }
+} directory_server_of{};
+// Only the room events this protocol can report belong in its settings.
+inline constexpr struct room_event_kinds_t {
+  template <class State>
+  std::vector<room_event_t> operator()(const State& state) const {
+    return spl::visit([](const auto& now) {
+      using defaults::room_event_kinds;
+      return room_event_kinds(now);
+    }, state);
+  }
+} room_event_kinds_of{};
+inline constexpr struct room_creation_form_t {
+  template <class State> creation_form operator()(const State& state, std::string_view server) const {
+    return spl::visit([&](const auto& now) { using defaults::room_creation_form; return room_creation_form(now, server); }, state);
+  }
+} room_creation_form_of{};
+inline constexpr struct direct_chat_form_t {
+  template <class State> chat_form operator()(const State& state) const {
+    return spl::visit([](const auto& now) { using defaults::direct_chat_form; return direct_chat_form(now); }, state);
+  }
+} direct_chat_form_of{};
 // A sender's role in the chat, beside their name over their messages, as
 // Telegram's "admin": its protocol's word for it, or none.
 inline constexpr struct sender_role_t {
@@ -564,6 +613,17 @@ inline constexpr struct can_pin_t {
   }
 } can_pin{};
 
+inline constexpr struct may_react_t {
+  template <class State>
+  bool operator()(const State& state, const conversation& chat, const message& event) const {
+    return spl::visit([&](const auto& now) {
+      using defaults::available;
+      using defaults::may_react;
+      return available(now) && may_react(now, chat, event);
+    }, state);
+  }
+} may_react{};
+
 inline constexpr struct may_delete_t {
   template <class State>
   bool operator()(const State& state, const conversation& chat, bool outgoing) const {
@@ -580,7 +640,7 @@ inline constexpr struct may_delete_t {
 inline constexpr struct may_view_redacted_t {
   template <class State>
   bool operator()(const State& state, const conversation& chat, std::string_view who) const {
-    return splice::visit([&](const auto& now) {
+    return spl::visit([&](const auto& now) {
       using defaults::available;
       using defaults::may_view_redacted;
       return available(now) && may_view_redacted(now, chat, who);

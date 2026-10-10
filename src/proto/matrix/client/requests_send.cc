@@ -49,6 +49,7 @@ import mux.http;
 import mux.net;
 import loom.cs.pusher;
 import mux.logic.markdown;
+import mux.logic.reactions;
 import :account;
 import :requests;
 import :requests_more;
@@ -112,17 +113,21 @@ void account<Sink>::remove(std::string room, std::string event) {
 }
 
 template <class Sink>
-void account<Sink>::react(std::string room, std::string target, std::string key, bool on) {
-  this->spawn_sending([this, room = std::move(room), target = std::move(target), key = std::move(key), on] {
+void account<Sink>::react(std::string room, std::string target, std::string key, bool on, std::optional<std::string> shortcode) {
+  this->spawn_sending([this, room = std::move(room), target = std::move(target), key = std::move(key), on,
+                       shortcode = std::move(shortcode)] {
     if (!api_)
       return;
     if (on) {
-      auto content = loom::client::reaction(target, key);
-      if (loom::media::mxc_of(key)) {
-        const auto emotes = emotes_in(room);
-        if (const auto found = std::ranges::find(emotes, key, &mux::emote::url); found != emotes.end())
-          content.rest = as_body(reaction_shortcode{std::format(":{}:", found->shortcode)});
-      }
+      const auto resolved = logic::reaction_text_of(key, emotes_in(room));
+      auto content = loom::client::reaction(target, resolved.key);
+      auto label = shortcode;
+      if (!label && resolved.custom && resolved.label != resolved.key)
+        label = resolved.label;
+      // MSC4027 bounds the label in bytes. Omit oversized optional metadata
+      // rather than cutting a UTF-8 character or rejecting the reaction.
+      if (label && label->size() <= 100)
+        content.rest = as_body(reaction_shortcode{*label, *label});
       (void)this->send_room_event(loom::cs::send_message{.room_id = room,
                                                   .event_type = "m.reaction",
                                                   .txn_id = this->transaction(),
@@ -239,7 +244,7 @@ void account<Sink>::leave(std::string room) {
 // and the room's custom emoji in that; else the emoji alone, where it names
 // any; else nothing -- the text as it is.
 // A run's tags in Matrix's HTML: what each style is written as.
-[[nodiscard]] inline mux::logic::html_run html_run_of(const styled_run& run) {
+[[nodiscard]] inline mux::logic::html_run html_run_of(const styled_run& run, std::string_view body) {
   const auto tags = [&](std::string open, std::string close) {
     return mux::logic::html_run{run.first, run.last, std::move(open), std::move(close)};
   };
@@ -249,6 +254,11 @@ void account<Sink>::leave(std::string room) {
                                     [&](const run_style::strike&) { return tags("<del>", "</del>"); },
                                     [&](const run_style::spoiler&) { return tags("<span data-mx-spoiler>", "</span>"); },
                                     [&](const run_style::code&) { return tags("<code>", "</code>"); },
+                                    [&](const run_style::custom_emoji& one) {
+                                      return mux::logic::html_run{run.first, run.last, {}, {},
+                                          std::format(R"(<img data-mx-emoticon src="{}" alt="{}" height="32">)",
+                                              chevron::escaped(one.url), chevron::escaped(body.substr(run.first, run.last - run.first)))};
+                                    },
                                     [&](const run_style::link& one) {
                                       return tags("<a href=\"" + chevron::escaped(one.url) + "\">", "</a>");
                                     }},
@@ -256,8 +266,11 @@ void account<Sink>::leave(std::string room) {
 }
 [[nodiscard]] inline std::optional<std::string> html_of(std::string_view body, const std::vector<mux::emote>& emotes,
                                                         const std::vector<styled_run>& styles) {
+  const auto valid = std::views::filter(styles, [&](const styled_run& run) {
+    return run.first < run.last && run.last <= body.size();
+  });
   const std::vector<mux::logic::html_run> runs =
-      std::ranges::to<std::vector<mux::logic::html_run>>(std::views::transform(styles, html_run_of));
+      std::ranges::to<std::vector<mux::logic::html_run>>(std::views::transform(valid, [&](const styled_run& run) { return html_run_of(run, body); }));
   if (auto marked = mux::logic::markdown_html(body, runs))
     return emotes.empty() ? *marked : emotes_in_html(*marked, emotes);
   return with_emotes(body, emotes);
@@ -534,12 +547,12 @@ void account<Sink>::load_thread(std::string room, std::string root) {
 }
 
 template <class Sink>
-void account<Sink>::send_in_thread(std::string room, std::string body, std::string root, std::string latest, std::optional<std::string> reply_to) {
+void account<Sink>::send_in_thread(std::string room, std::string body, std::string root, std::string latest, std::optional<std::string> reply_to, std::vector<styled_run> styles) {
   this->spawn_sending([this, room = std::move(room), body = std::move(body), root = std::move(root), latest = std::move(latest),
-                 reply_to = std::move(reply_to)] {
+                 reply_to = std::move(reply_to), styles = std::move(styles)] {
     const std::string txn = this->transaction();
     const conversation_id in{id_, room};
-    const auto html = html_of(body, emotes_in(room));
+    const auto html = html_of(body, emotes_in(room), styles);
     sink_(change::message_added{message{.in = in,
                                         .id = txn,
                                         .sender = id_.address,

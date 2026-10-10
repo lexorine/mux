@@ -841,7 +841,7 @@ void account<Sink>::fetch_unredacted(std::string room, std::string event) {
     // was. Anything else -- a state event, a sticker -- as its JSON, as
     // View Source shows an event. Nothing kept: said, as the server may
     // not implement the MSC, or may erase removed content at once.
-    splice::visit(splice::overloaded{[&](const loom::ev::m_room_message_content_t& content) {
+    spl::visit(spl::overloaded{[&](const loom::ev::m_room_message_content_t& content) {
                                        if (content.body.empty() && !content.formatted_body && !content.url) {
                                          sink_(change::refused{
                                              id_, std::format("The server kept nothing of {}: it may not show removed content, or may erase it at once",
@@ -914,7 +914,7 @@ void account<Sink>::load_newer(std::string room, std::string from) {
 
 template <class Sink>
 void account<Sink>::fetch_avatar(std::string source, std::string of) {
-  this->fetch_media(std::move(source), media_use::avatar{std::move(of)}, 96, true);
+  this->fetch_media(std::move(source), media_use::avatar{std::move(of)}, 512, true);
 }
 
 }  // namespace mux::proto::matrix::client

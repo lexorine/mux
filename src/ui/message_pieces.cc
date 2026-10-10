@@ -8,6 +8,7 @@ import splice;
 import skia;
 import skiff.paint;
 import skiff.scene;
+import skiff.compose;
 import skiff.nodes.box;
 import skiff.nodes.flow;
 import skiff.nodes.icon;
@@ -36,53 +37,25 @@ export namespace mux::ui {
   return said.redacted ? std::string("removed ") : said.edited ? std::string("edited ") : std::string();
 }
 
-// A link to a room or to a message in one, under the message that has it,
-// as a card: a bar in the accent, the room's avatar, its name -- or
-// "Message from" it -- over a second line: what the room is, or who said
-// the message and a line of it where it is here. A press on it is seen by
-// the messages' list, which follows it.
-struct link_card : nodes::Stack {
-  std::string url;
-  struct bar : scene::Node {
-    explicit bar(const palette& colours) {
-      fState.apply({.width = 3.0f, .height = 36.0f, .cornerRadius = 1.5f, .background = colours.accent});
-    }
+// A protocol link's card, composed from its stripe, avatar and two lines.
+inline auto link_card(const palette& colours, std::string where, std::string avatar_id,
+                      std::string avatar_name, std::string title, std::string said) {
+  namespace c = skiff::compose;
+  const auto line = [](std::string text, skia::SkColor colour, bool bold) {
+    auto node = nodes::Text(std::move(text), 13.0f, colour, bold);
+    node.setElided(true);
+    node.setMaxWidth(360.0f);
+    return node;
   };
-  struct texts_column : nodes::Stack {
-    struct parts_t {
-      nodes::Text title;
-      nodes::Text said;
-    } parts;
-    texts_column(const palette& colours, std::string t, std::string s)
-        : parts{.title = nodes::Text(std::move(t), 13.0f, colours.accent, true),
-                .said = nodes::Text(std::move(s), 13.0f, colours.dim)} {
-      this->setGap(1.0f);
-      fState.apply({.autoSize = scene::axes::kBoth, .alignSelf = scene::align::kMiddle});
-      for (nodes::Text* each : {&parts.title, &parts.said}) {
-        each->setElided(true);
-        each->setMaxWidth(360.0f);
-      }
-    }
-  };
-  struct parts_t {
-    bar line;
-    avatar_mark face;
-    texts_column texts;
-  } parts;
-  link_card(const palette& colours, std::string where, std::string avatar_id, std::string avatar_name, std::string title,
-            std::string said)
-      : url(std::move(where)),
-        parts{.line = bar(colours),
-              .face = avatar_mark(std::move(avatar_id), std::move(avatar_name), 32.0f),
-              .texts = texts_column(colours, std::move(title), std::move(said))} {
-    this->setHorizontal();
-    this->setGap(8.0f);
-    fState.apply({.autoSize = scene::axes::kBoth, .margin = {4.0f, 0.0f, 2.0f, 0.0f}});
-    parts.face.apply({.alignSelf = scene::align::kMiddle});
-    fState.setCursor(scene::cursor::hand{});
-  }
-  [[nodiscard]] bool acceptsInput() const { return true; }
-};
+  return c::onClick(request::open_url{std::move(where)},
+      c::row(c::hbox(8.0f, {.autoSize = scene::axes::kBoth, .margin = {4.0f, 0.0f, 2.0f, 0.0f}}),
+          c::styled({.width = 3.0f, .height = 36.0f, .cornerRadius = 1.5f}, nodes::Box<>(colours.accent)),
+          c::styled({.alignSelf = scene::align::kMiddle}, avatar_mark(std::move(avatar_id), std::move(avatar_name), 32.0f)),
+          c::column(c::vbox(1.0f, {.autoSize = scene::axes::kBoth, .alignSelf = scene::align::kMiddle}),
+              line(std::move(title), colours.accent, true), line(std::move(said), colours.dim, false))),
+      "Open linked room or message");
+}
+using link_card_t = decltype(link_card(std::declval<const palette&>(), "", "", "", "", ""));
 
 // The first link a message's text has: what its preview is of.
 [[nodiscard]] inline std::optional<std::string> first_link_of(const message& said) {
@@ -179,25 +152,29 @@ struct link_card : nodes::Stack {
 // A link's preview, as Telegram's: under the text, a stripe in the accent,
 // the site's name in it, the page's title and a few lines about it, and its
 // picture on the right.
-struct page_preview : nodes::Stack {
-  struct column : nodes::Stack {
+struct page_preview : skiff::compose::Stacked {
+  struct column : skiff::compose::Stacked {
     struct parts_t {
       nodes::Text site;
       nodes::Text title;
       nodes::Text about;
     } parts;
-    column(const palette& colours, const link_preview& shown)
-        : parts{.site = nodes::Text(shown.site, 13.0f, colours.accent, true),
-                .title = nodes::Text(shown.title, 13.0f, colours.text, true),
-                .about = nodes::Text(preview_line(shown.description), 13.0f, colours.text)} {
-      this->setGap(1.0f);
-      fState.apply({.autoSize = scene::axes::kY, .grow = scene::axes::kX});
-      parts.site.setVisible(!shown.site.empty());
-      parts.title.setVisible(!shown.title.empty());
-      parts.about.setVisible(!shown.description.empty());
+    column(const palette &colours, const link_preview &shown)
+        : Stacked(skiff::compose::vbox(
+              1.0f, {.autoSize = scene::axes::kY, .grow = scene::axes::kX})),
+          parts{.site = skiff::compose::visible(
+                    !shown.site.empty(),
+                    nodes::Text(shown.site, 13.0f, colours.accent, true)),
+                .title = skiff::compose::visible(
+                    !shown.title.empty(),
+                    nodes::Text(shown.title, 13.0f, colours.text, true)),
+                .about = wrapped(skiff::compose::visible(
+                    !shown.description.empty(),
+                    nodes::Text(preview_line(shown.description), 13.0f,
+                                colours.text)))} {
+
       for (nodes::Text* each : {&parts.site, &parts.title})
         each->setElided(true);
-      parts.about.setWrapped(true);
       for (nodes::Text* each : {&parts.site, &parts.title, &parts.about})
         each->apply({.fillX = true});
     }
@@ -209,16 +186,23 @@ struct page_preview : nodes::Stack {
   } parts;
   // The link it is the preview of: pressed, it is followed.
   std::string url;
-  page_preview(const palette& colours, const link_preview& shown, std::string where)
-      : parts{.stripe = nodes::Box<>(colours.accent), .texts = column(colours, shown)}, url(std::move(where)) {
-    this->setHorizontal();
-    this->setGap(8.0f);
+  page_preview(const palette &colours, const link_preview &shown,
+               std::string where)
+      : Stacked(skiff::compose::hbox(
+            8.0f, {.fillX = true,
+                   .autoSize = scene::axes::kY,
+                   .margin = {6.0f, 0.0f, 2.0f, 0.0f},
+                   .padding = {4.0f, 6.0f, 4.0f, 0.0f},
+                   .cornerRadius = 4.0f,
+                   .background = (colours.accent & 0x00FFFFFFu) | (0x18u << 24),
+                   .hoverBackground =
+                       (colours.accent & 0x00FFFFFFu) | (0x34u << 24)})),
+        parts{.stripe = skiff::compose::styled(
+                  {.fillY = true, .width = 3.0f, .cornerRadius = 1.5f},
+                  nodes::Box<>(colours.accent)),
+              .texts = column(colours, shown)},
+        url(std::move(where)) {
     // Lit under the pointer, as a link is: it is one.
-    fState.apply({.fillX = true, .autoSize = scene::axes::kY, .margin = {6.0f, 0.0f, 2.0f, 0.0f},
-                  .padding = {4.0f, 6.0f, 4.0f, 0.0f}, .cornerRadius = 4.0f,
-                  .background = (colours.accent & 0x00FFFFFFu) | (0x18u << 24),
-                  .hoverBackground = (colours.accent & 0x00FFFFFFu) | (0x34u << 24)});
-    parts.stripe.apply({.fillY = true, .width = 3.0f, .cornerRadius = 1.5f});
     if (shown.image) {
       parts.picture.emplace(from_avatars{*shown.image});
       parts.picture->apply({.width = 56.0f, .height = 56.0f, .cornerRadius = 6.0f});

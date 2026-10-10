@@ -11,6 +11,7 @@
 export module mux.ui;
 
 export import :base;
+export import :requests;
 export import :icons;
 export import :avatars;
 export import :controls;
@@ -33,6 +34,7 @@ export import :proxies;
 export import :appearance;
 export import :storage;
 export import :settings;
+export import :about;
 export import :context_menu;
 export import :sending;
 export import :viewer;

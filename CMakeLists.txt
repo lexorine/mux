@@ -23,6 +23,12 @@ endif()
 
 project(mux VERSION 0.1 LANGUAGES C CXX)
 
+# Keep direct requests distinct from requests made by the libraries themselves.
+macro(mux_find_package mux_requested_package)
+  set_property(GLOBAL APPEND PROPERTY MUX_ABOUT_PRIMARY_PACKAGES "${mux_requested_package}")
+  cme_find_package(${mux_requested_package} ${ARGN})
+endmacro()
+
 # A release build is optimised across its units (ThinLTO with clang), where
 # the toolchain can: mux's own targets, set at the end -- not the libraries
 # fetched for it, whose archives the system's ar cannot index as bitcode.
@@ -91,7 +97,7 @@ cme_declare_port(NAME chevron PROVIDES chevron
 cme_options(chevron "CHEVRON_TESTS OFF")
 cme_declare_port(NAME tern PROVIDES tern
   GITHUB_REPOSITORY j4niwzis/tern
-  GIT_TAG 4178dfe4aa539799a04a71e3c6fde3a62c84d8d8
+  GIT_TAG 9814dbc29f56f43ce0fd60a4a55c5a69ae42aa42
   LICENSE AGPL-3.0-only
   TARGETS tern)
 cme_options(tern "TERN_TESTS OFF" "TERN_EXAMPLES OFF")
@@ -105,8 +111,8 @@ cme_options(loom "LOOM_TESTS OFF")
 
 # Boost: Asio for the sockets and the loop, Beast for Matrix's HTTP,
 # Context for the fibers, and PFR as a module for what reads with it.
-cme_find_package(Boost COMPONENTS asio beast pfr[modules] context REQUIRED)
-cme_find_package(OpenSSL REQUIRED)
+mux_find_package(Boost COMPONENTS asio beast pfr[modules] context REQUIRED)
+mux_find_package(OpenSSL REQUIRED)
 
 # Boost's definitions reach what links Boost, and nothing else, as in the
 # libraries under mux: defined for the whole build they were on the std
@@ -123,14 +129,13 @@ cme_find_package(OpenSSL REQUIRED)
 set(SPLICE_ERASE ${MUX_ERASE_HANDLERS} CACHE BOOL "spl::variant through tables outside a release build, as mux's handlers")
 cme_declare_port(NAME splice PROVIDES splice
   GITHUB_REPOSITORY j4niwzis/splice
-  GIT_TAG 8a7755a335917daf3bbfc54ef8a3a160f8445d15
-  # splice.bytes with the libstdc++ module lookup fix. An older installed
-  # copy has the same failing range-pipe operators as the old source pin.
-  VERSION 0.4.1
+  GIT_TAG db4be11c76c36ac32377cc5e918009b8898223c2
+  # Failed variant/callable replacement must not retain a destroyed object.
+  VERSION 0.4.3
   LICENSE GPL-3.0-only
   TARGETS splice)
 cme_options(splice "SPLICE_TESTS OFF")
-cme_find_package(splice 0.4.1 REQUIRED)
+mux_find_package(splice 0.4.3 REQUIRED)
 
 # alef, which tern reads addresses with and skiff lays text out with, asked
 # for once with all that both of them need, before either asks: a later ask
@@ -143,7 +148,7 @@ cme_declare_port(NAME alef PROVIDES alef
   LICENSE AGPL-3.0-only
   TARGETS alef)
 cme_options(alef "ALEF_TESTS OFF")
-cme_find_package(alef 0.1.1 COMPONENTS precis idna grapheme line bidi emoji REQUIRED)
+mux_find_package(alef 0.1.1 COMPONENTS precis idna grapheme line bidi emoji REQUIRED)
 
 
 # knot, with concrete writer frames and streaming raw JSON: what is not
@@ -151,19 +156,22 @@ cme_find_package(alef 0.1.1 COMPONENTS precis idna grapheme line bidi emoji REQU
 # loom.
 cme_declare_port(NAME knot PROVIDES knot
   GITHUB_REPOSITORY j4niwzis/knot
-  GIT_TAG f915e34f13265ee1302775cd4851dbfdf6201b24
+  GIT_TAG 6389154f394c740520b61b7981fd631c6845dab2
   LICENSE AGPL-3.0-only)
 
 # Found by itself, and linked by itself: mux imports it (a message's HTML),
 # not only tern.
-cme_find_package(chevron 0.2 REQUIRED)
-cme_find_package(tern REQUIRED)
+# knot is linked directly by mux_vault and mux_config, but its package
+# is already resolved through chevron/tern.
+set_property(GLOBAL APPEND PROPERTY MUX_ABOUT_PRIMARY_PACKAGES knot)
+mux_find_package(chevron 0.2 REQUIRED)
+mux_find_package(tern REQUIRED)
 # Of loom, what mux uses: the state a sync leaves, and the parts of the API it
 # calls -- logging in, sending, syncing, finding the homeserver.
-cme_find_package(loom 0.1.1 COMPONENTS state crypto cs-joining cs-leaving cs-login cs-registration cs-oauth_server_metadata cs-message_pagination cs-event_context cs-receipts cs-redaction cs-room_send cs-rooms cs-sync cs-typing cs-wellknown cs-room_state cs-kicking cs-banning cs-inviting cs-create_room cs-account_data cs-content_repo cs-authed_content_repo cs-room_summary cs-list_public_rooms cs-space_hierarchy cs-sliding_sync cs-versions cs-users cs-relations cs-threads_list cs-profile cs-device_management cs-room_upgrades cs-knocking cs-keys cs-to_device cs-cross_signing cs-key_backup cs-pusher cs-voip REQUIRED)
+mux_find_package(loom 0.1.1 COMPONENTS state crypto cs-joining cs-leaving cs-login cs-registration cs-oauth_server_metadata cs-message_pagination cs-event_context cs-receipts cs-redaction cs-room_send cs-rooms cs-sync cs-typing cs-wellknown cs-room_state cs-kicking cs-banning cs-inviting cs-create_room cs-account_data cs-content_repo cs-authed_content_repo cs-room_summary cs-list_public_rooms cs-space_hierarchy cs-sliding_sync cs-versions cs-users cs-relations cs-threads_list cs-profile cs-device_management cs-room_upgrades cs-knocking cs-keys cs-to_device cs-cross_signing cs-key_backup cs-pusher cs-pushrules cs-voip REQUIRED)
 # End-to-end encryption: Olm and Megolm, by vodozemac -- the kazv project's
 # C++ bindings, a Rust library built by cargo through cmake-everywhere.
-cme_find_package(vodozemac REQUIRED)
+mux_find_package(vodozemac REQUIRED)
 
 # One library of mux's modules, as the libraries it stands on have: modules
 # are what separates them. The window's two join it where the window is
@@ -177,8 +185,8 @@ target_sources(mux_modules PUBLIC FILE_SET CXX_MODULES BASE_DIRS src
         src/proto/xmpp/make.cc src/proto/matrix/make.cc src/proto/clients.cc
         src/logic/text.cc src/logic/search.cc src/logic/reading.cc src/logic/drafts.cc src/logic/notifications.cc
         src/logic/link_base.cc src/proto/xmpp/links.cc src/proto/matrix/links.cc src/proto/links.cc
-        src/logic/links.cc src/logic/sending.cc src/logic/messages.cc
-        src/logic/blurhash.cc src/logic/emoji.cc src/logic/markdown.cc src/logic/room_events.cc)
+        src/logic/forwarding.cc src/logic/links.cc src/logic/sending.cc src/logic/messages.cc
+        src/logic/blurhash.cc src/logic/emoji.cc src/logic/reactions.cc src/logic/markdown.cc src/logic/room_events.cc)
 target_compile_features(mux_modules PUBLIC cxx_std_26)
 # The emoji's keywords, as Unicode's CLDR annotates them in English and in
 # Russian -- what the emoji search matches besides the names, as Telegram's
@@ -225,28 +233,22 @@ target_sources(mux_vault PUBLIC FILE_SET CXX_MODULES BASE_DIRS src FILES src/vau
 target_compile_features(mux_vault PUBLIC cxx_std_26)
 target_compile_options(mux_vault PUBLIC ${mux_std_flags})
 target_link_libraries(mux_vault PUBLIC knot splice OpenSSL::Crypto)
-add_library(mux_config)
-# With the protocols' tags and what each keeps in the accounts file: the
-# settings read them, and everything above reads the settings.
-target_sources(mux_config PUBLIC FILE_SET CXX_MODULES BASE_DIRS src
-  FILES src/proto/identity.cc src/proto/tags.cc src/proto/xmpp/kept.cc src/proto/matrix/kept.cc src/proto/kept.cc
-        src/proto/xmpp/state.cc src/proto/matrix/state.cc src/proto/state.cc src/config_choices.cc src/config_settings.cc src/config_looks.cc src/config_limits.cc src/config_accounts.cc src/config.cc)
-target_compile_features(mux_config PUBLIC cxx_std_26)
-target_compile_options(mux_config PUBLIC ${mux_std_flags})
-target_link_libraries(mux_config PUBLIC knot splice mux_vault)
-target_link_libraries(mux_modules PUBLIC mux_config splice)
-foreach(name IN ITEMS core net xmpp http matrix media logic)
-  add_library(mux_${name} ALIAS mux_modules)
-endforeach()
-
+# skiff: skiff.model holds the settings and the program's state, and is
+# there in every build; the rest of skiff, which draws, only with a window.
+# Without one, skiff is built as skiff.model alone, and no Skia is asked for.
+# skiff and skiff-widgets say the rest of what they are in their own trees.
+# Debug-only sharing remains guarded in skiff. Both configurations need the
+# editor menu facts, elapsed-time animation, and held-page binding fixes.
+set(mux_skiff_pin 05afd04da8a1f38fe21197c4828e5dd194f3c116)
+cme_declare_port(NAME skiff PROVIDES skiff
+  GITHUB_REPOSITORY j4niwzis/skiff
+  GIT_TAG ${mux_skiff_pin}
+  VERSION 0.1.0)
+cme_declare_port(NAME skiff-widgets PROVIDES skiff-widgets skiff_widgets
+  GITHUB_REPOSITORY j4niwzis/skiff-widgets
+  GIT_TAG 9755318db703772ec8e736934659912b9e09491d
+  VERSION 0.1.0)
 if(MUX_UI)
-  # skiff and skiff-widgets say the rest of what they are in their own trees.
-  cme_declare_port(NAME skiff PROVIDES skiff
-    GITHUB_REPOSITORY j4niwzis/skiff
-    GIT_TAG 3ccd977a1e4c86a3868d1df27599b8cb384d11c4)
-  cme_declare_port(NAME skiff-widgets PROVIDES skiff-widgets skiff_widgets
-    GITHUB_REPOSITORY j4niwzis/skiff-widgets
-    GIT_TAG dd4713eeaf699a51ba65e74f35fa0b5f27e71f95)
   # Skia's features, each an option asking for its component: GL to draw on
   # the GPU (the software renderer is there either way), and the pictures
   # decoded. A system Skia without one is taken where its option is off.
@@ -267,17 +269,37 @@ if(MUX_UI)
       list(APPEND mux_skiff_components ${feature})
     endif()
   endforeach()
-  cme_find_package(SDL3 REQUIRED)
+else()
+  set(mux_skiff_components)
+  cme_options(skiff "SKIFF_UI OFF")
+endif()
+mux_find_package(skiff 0.1.0 COMPONENTS ${mux_skiff_components} REQUIRED)
+add_library(mux_config)
+# With the protocols' tags and what each keeps in the accounts file: the
+# settings read them, and everything above reads the settings.
+target_sources(mux_config PUBLIC FILE_SET CXX_MODULES BASE_DIRS src
+  FILES src/proto/identity.cc src/proto/tags.cc src/proto/xmpp/kept.cc src/proto/matrix/kept.cc src/proto/kept.cc
+        src/proto/xmpp/state.cc src/proto/matrix/state.cc src/proto/state.cc src/config_choices.cc src/config_settings.cc src/config_looks.cc src/config_limits.cc src/config_accounts.cc src/config.cc)
+target_compile_features(mux_config PUBLIC cxx_std_26)
+target_compile_options(mux_config PUBLIC ${mux_std_flags})
+target_link_libraries(mux_config PUBLIC knot splice mux_vault skiff::model)
+target_link_libraries(mux_modules PUBLIC mux_config splice)
+foreach(name IN ITEMS core net xmpp http matrix media logic)
+  add_library(mux_${name} ALIAS mux_modules)
+endforeach()
+
+if(MUX_UI)
+  mux_find_package(SDL3 REQUIRED)
   # Sound: voice messages are Opus in Ogg; audio files are that or Vorbis.
-  cme_find_package(Opus REQUIRED)
-  cme_find_package(Vorbis REQUIRED)
+  mux_find_package(Opus REQUIRED)
+  mux_find_package(Vorbis REQUIRED)
   # Video, as tdesktop plays it: FFmpeg -- the system's where it has one,
   # else built with only what a chat's videos are in and made of. Off, the
   # client has no FFmpeg, and a video is played by the system's player.
   option(MUX_VIDEO "Videos played in the window, through FFmpeg" ${mux_desktop_default})
   set(mux_video_libraries)
   if(MUX_VIDEO)
-    cme_find_package(FFmpeg COMPONENTS mp4 matroska h264 hevc vp9 aac opus mp3 REQUIRED)
+    mux_find_package(FFmpeg COMPONENTS mp4 matroska h264 hevc vp9 aac opus mp3 REQUIRED)
     set(mux_video_libraries FFmpeg::avformat FFmpeg::avcodec FFmpeg::swscale FFmpeg::swresample FFmpeg::avutil)
   endif()
   # Calls -- voice, for now -- through WebRTC: libdatachannel, and libjuice,
@@ -300,7 +322,7 @@ if(MUX_UI)
     set(mux_calls_libdatachannel_flags "${CMAKE_CXX_FLAGS} -include algorithm")
     string(STRIP "${mux_calls_libdatachannel_flags}" mux_calls_libdatachannel_flags)
     cme_options(libdatachannel "CMAKE_CXX_FLAGS ${mux_calls_libdatachannel_flags}")
-    cme_find_package(LibDataChannel REQUIRED)
+    mux_find_package(LibDataChannel REQUIRED)
     set(mux_calls_sources src/calls/media.cc)
     set(mux_calls_libraries LibDataChannel::LibDataChannel)
   endif()
@@ -378,8 +400,7 @@ if(MUX_UI)
       list(REMOVE_ITEM mux_platform_sources "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/${common_name}")
     endif()
   endforeach()
-  cme_find_package(skiff COMPONENTS ${mux_skiff_components} REQUIRED)
-  cme_find_package(skiff-widgets REQUIRED)
+  mux_find_package(skiff-widgets 0.1.0 REQUIRED)
 
   # The emoji face the window draws emoji with, as tdesktop has its own:
   # Noto Color Emoji, fetched once at a pinned commit and checked, and put
@@ -414,7 +435,7 @@ if(MUX_UI)
   set_property(SOURCE src/telegram_pattern.cc APPEND PROPERTY OBJECT_DEPENDS ${mux_pattern})
   target_sources(mux_modules PUBLIC FILE_SET CXX_MODULES BASE_DIRS src
     FILES ${mux_platform_sources} ${mux_calls_sources} src/ui.cc
-          src/ui/base.cc src/ui/icons.cc src/ui/avatars.cc src/ui/controls.cc src/ui/themes.cc src/ui/names.cc src/ui/html.cc src/ui/chat_list.cc src/ui/message_pieces.cc src/ui/message_media.cc src/ui/message_text.cc src/ui/message.cc src/ui/header.cc src/ui/info_common.cc src/ui/info_cards.cc src/ui/info_reactions.cc src/ui/info_new_chats.cc src/ui/info_looks.cc src/ui/info_threads.cc src/ui/info_packs.cc src/ui/info_explore.cc src/ui/info.cc src/ui/room_settings.cc src/ui/composer.cc src/ui/timeline.cc src/ui/conversations_side.cc src/ui/conversations_screen.cc src/ui/conversations_show.cc src/ui/conversations.cc src/ui/forms.cc src/ui/add_account.cc src/ui/accounts.cc src/ui/drawer.cc src/ui/proxies.cc src/ui/appearance.cc src/ui/storage.cc src/ui/settings.cc src/ui/emoji_kept.cc src/ui/emoji_panels.cc src/ui/emoji_popup.cc src/ui/context_menu.cc src/ui/sending.cc src/ui/viewer.cc src/ui/call_bar.cc src/ui/window.cc
+          src/kept_root.cc src/ui/base.cc src/ui/requests.cc src/ui/icons.cc src/ui/avatars.cc src/ui/controls.cc src/ui/themes.cc src/ui/names.cc src/ui/html.cc src/ui/chat_list.cc src/ui/message_pieces.cc src/ui/message_media.cc src/ui/message_text.cc src/ui/message.cc src/ui/header.cc src/ui/info_common.cc src/ui/info_cards.cc src/ui/info_reactions.cc src/ui/info_new_chats.cc src/ui/info_looks.cc src/ui/info_threads.cc src/ui/info_packs.cc src/ui/info_explore.cc src/ui/info.cc src/ui/room_settings.cc src/ui/composer.cc src/ui/timeline.cc src/ui/conversations_side.cc src/ui/conversations_screen.cc src/ui/conversations_show.cc src/ui/conversations.cc src/ui/forms.cc src/ui/add_account.cc src/ui/accounts.cc src/ui/drawer.cc src/ui/proxies.cc src/ui/appearance.cc src/ui/storage.cc src/ui/about.cc src/ui/settings.cc src/ui/emoji_kept.cc src/ui/emoji_panels.cc src/ui/emoji_popup.cc src/ui/context_menu.cc src/ui/sending.cc src/ui/viewer.cc src/ui/call_bar.cc src/ui/window.cc
           src/proto/xmpp/ui.cc src/proto/matrix/ui_form.cc src/proto/matrix/ui_manage.cc src/proto/matrix/ui_sessions.cc src/proto/matrix/ui_tools.cc src/proto/matrix/ui.cc src/proto/ui.cc)
   target_link_libraries(mux_modules PUBLIC SDL3::SDL3 skiff::skiff skiff::widgets Opus::opus Vorbis::vorbisfile
     ${mux_video_libraries} ${mux_calls_libraries})
@@ -477,13 +498,14 @@ if(MUX_UI)
           src/app/reading.cc src/app/outbox.cc src/app/settings.cc src/app/menu.cc src/app/notices.cc src/app/verification.cc src/app/proxies.cc src/app/packs.cc
           src/app/rooms.cc src/app/room_card.cc src/app/preferences.cc src/app/manage.cc src/app/looks.cc src/app/threads.cc src/app/emoji.cc src/app/accounts.cc
           src/app/local_data.cc src/app/calls.cc src/app/marks.cc src/app/history.cc src/proto/matrix/app.cc src/proto/xmpp/app.cc src/proto/app.cc)
+  target_sources(mux_app PRIVATE src/app/shown_binding.cc)
   target_compile_definitions(mux_app PUBLIC $<${mux_split}:MUX_SPLIT_ACCOUNTS>)
   target_link_libraries(mux_app PUBLIC mux_modules)
   # The program itself: its module, beside its implementation units.
   target_sources(mux PRIVATE FILE_SET CXX_MODULES BASE_DIRS src FILES src/app/program.cc)
   # What the program does, a part each: the module's implementation units.
   target_sources(mux PRIVATE
-    src/app/program_core.cc src/app/program_media.cc
+    src/app/program_core.cc src/app/program_lifetime.cc src/app/program_media.cc
     src/app/program_chats.cc src/app/program_links.cc src/app/program_accounts.cc
     src/app/program_settings.cc src/app/program_sending.cc src/app/program_refresh.cc
     src/app/scene.cc)
@@ -578,4 +600,8 @@ if(mux_ipo)
       endif()
     endforeach()
   endforeach()
+endif()
+
+if(MUX_UI)
+  include(cmake/about.cmake)
 endif()

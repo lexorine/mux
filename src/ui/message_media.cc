@@ -8,6 +8,7 @@ import splice;
 import skia;
 import skiff.paint;
 import skiff.scene;
+import skiff.compose;
 import skiff.nodes.box;
 import skiff.nodes.flow;
 import skiff.nodes.icon;
@@ -38,7 +39,7 @@ export namespace mux::ui {
 // 430 by 430 (maxMediaSize), no side under 100 (minPhotoSize); rounded, the
 // thumbnail drawn when it has come, a plate until then. With no caption,
 // the time is on a dark pill over its corner (msgDateImgBg).
-struct picture_view : scene::Node {
+struct picture_view : skiff::compose::Specced {
   std::string source;
   static constexpr float kMax = 430.0f, kMin = 100.0f;
   // Its own proportions: as its message says them, and as its picture has
@@ -46,28 +47,38 @@ struct picture_view : scene::Node {
   int width = 0, height = 0;
   // Over a video's thumbnail, as Telegram's: a dark disc with the play mark
   // in the middle, and its length on a dark pill at the top left.
-  struct video_marks : nodes::Stack {
-    struct disc : nodes::Stack {
+  struct video_marks : skiff::compose::Stacked {
+    struct disc : skiff::compose::Stacked {
       struct parts_t {
         nodes::Icon mark{shape_of(icon::play{}), skia::colorSetARGB(255, 255, 255, 255)};
       } parts;
-      disc() {
-        fStack.justify = nodes::justify::middle{};
-        fState.apply({.place = scene::anchor::kCentre, .width = 44.0f, .height = 44.0f, .cornerRadius = 22.0f,
-                      .background = skia::colorSetARGB(0x54, 0, 0, 0)});
+      disc()
+          : Stacked(skiff::compose::justified(
+                skiff::compose::vbox(
+                    0.0f, {.place = scene::anchor::kCentre,
+                           .width = 44.0f,
+                           .height = 44.0f,
+                           .cornerRadius = 22.0f,
+                           .background = skia::colorSetARGB(0x54, 0, 0, 0)}),
+                nodes::justify::middle{})) {
         parts.mark.apply({.width = 18.0f, .height = 18.0f, .alignSelf = scene::align::kMiddle});
       }
     };
-    struct length : nodes::Stack {
+    struct length : skiff::compose::Stacked {
       struct parts_t {
         nodes::Text label;
       } parts;
       explicit length(std::int64_t ms)
-          : parts{.label = nodes::Text(std::format("{}:{:02}", ms / 60000, (ms / 1000) % 60), 11.0f,
-                                       skia::colorSetARGB(255, 255, 255, 255))} {
-        fState.apply({.place = scene::anchor::kTopLeft, .autoSize = scene::axes::kBoth,
-                      .margin = {6.0f, 0.0f, 0.0f, 6.0f}, .padding = {2.0f, 8.0f, 2.0f, 8.0f}, .cornerRadius = 9.0f,
-                      .background = skia::colorSetARGB(0x54, 0, 0, 0)});
+          : Stacked(skiff::compose::vbox(
+                0.0f, {.place = scene::anchor::kTopLeft,
+                       .autoSize = scene::axes::kBoth,
+                       .margin = {6.0f, 0.0f, 0.0f, 6.0f},
+                       .padding = {2.0f, 8.0f, 2.0f, 8.0f},
+                       .cornerRadius = 9.0f,
+                       .background = skia::colorSetARGB(0x54, 0, 0, 0)})),
+            parts{.label = nodes::Text(
+                      std::format("{}:{:02}", ms / 60000, (ms / 1000) % 60),
+                      11.0f, skia::colorSetARGB(255, 255, 255, 255))} {
         this->setVisible(ms > 0);
       }
     };
@@ -75,20 +86,23 @@ struct picture_view : scene::Node {
       disc play;
       length runs;
     } parts;
-    explicit video_marks(std::int64_t ms) : parts{.runs = length(ms)} { fState.apply({.fill = true}); }
+    explicit video_marks(std::int64_t ms)
+        : Stacked(skiff::compose::vbox(0.0f, {.fill = true})),
+          parts{.runs = length(ms)} {}
   };
   // The time on a dark pill over its corner, where there is no caption.
-  struct time_pill : nodes::Stack {
+  struct time_pill : skiff::compose::Stacked {
     struct parts_t {
       nodes::Text label{"", 11.0f, skia::colorSetARGB(255, 255, 255, 255)};
     } parts;
-    time_pill() {
-      fState.apply({.place = scene::anchor::kBottomRight,
-                    .autoSize = scene::axes::kBoth,
-                    .margin = {0.0f, 6.0f, 6.0f, 0.0f},
-                    .padding = {2.0f, 8.0f, 2.0f, 8.0f},
-                    .cornerRadius = 9.0f,
-                    .background = skia::colorSetARGB(0x54, 0, 0, 0)});
+    time_pill()
+        : Stacked(skiff::compose::vbox(
+              0.0f, {.place = scene::anchor::kBottomRight,
+                     .autoSize = scene::axes::kBoth,
+                     .margin = {0.0f, 6.0f, 6.0f, 0.0f},
+                     .padding = {2.0f, 8.0f, 2.0f, 8.0f},
+                     .cornerRadius = 9.0f,
+                     .background = skia::colorSetARGB(0x54, 0, 0, 0)})) {
       this->setVisible(false);
     }
   };
@@ -113,30 +127,28 @@ struct picture_view : scene::Node {
 
   // Rounded; a plate until the thumbnail comes, then the thumbnail covering
   // it, cut at the middle where the proportions differ by a rounding.
-  picture_view(const palette& colours, std::string where, int w, int h)
-      : source(where), width(w), height(h),
-        parts{.preview = nodes::Image<from_previews>({where}),
-              .picture = nodes::Image<from_moving_thumbnail>({where})} {
-    fState.apply({.cornerRadius = 10.0f, .background = colours.tile, .masking = true});
-    parts.preview.apply({.fill = true, .cornerRadius = 10.0f});
-    parts.picture.apply({.fill = true, .cornerRadius = 10.0f});
+  picture_view(const palette &colours, std::string where, int w, int h)
+      : Specced({.cornerRadius = 10.0f,
+                 .background = colours.tile,
+                 .masking = true}),
+        source(where), width(w), height(h),
+        parts{.preview =
+                  skiff::compose::styled({.fill = true, .cornerRadius = 10.0f},
+                                         nodes::Image<from_previews>({where})),
+              .picture = skiff::compose::styled(
+                  {.fill = true, .cornerRadius = 10.0f},
+                  nodes::Image<from_moving_thumbnail>({where}))} {
+
     parts.loader.apply({.place = scene::anchor::kCentre});
   }
-  // The loader while the picture has not come; where it moves, drawn again
-  // each frame for the next of its frames.
-  [[nodiscard]] bool settling() const { return animations().has(source); }
-  // Ticked while the picture is coming or moves. Its thumbnail coming is
-  // seen by the picture itself, which marks this; every picture message
-  // was ticked at every frame for as long as its whole picture was not
-  // fetched -- that is, nearly always.
-  [[nodiscard]] bool wantsTick() const { return parts.loader.visible() || animations().has(source); }
+  // The image schedules its own frames. This wrapper only follows loading
+  // state; marking the image every display frame bypasses its frame rate.
+  [[nodiscard]] bool wantsTick() const { return parts.loader.visible(); }
   void update(double) {
-    const bool moving = animations().has(source);
-    const bool coming = has_thumbnail && !moving && !thumbnails().has(source) && !whole_pictures().has(source);
+    const bool moving = (sticker ? sticker_animations() : animations()).has(source);
+    const bool coming = has_thumbnail && !moving && !(sticker ? sticker_images().has(source) : thumbnails().has(source) || whole_pictures().has(source));
     if (coming != parts.loader.visible())
       parts.loader.setVisible(coming);
-    if (moving)
-      parts.picture.markDamaged();
   }
   void show_time(std::string when) {
     parts.time.parts.label.setText(when);
@@ -182,6 +194,7 @@ struct picture_view : scene::Node {
   static constexpr float kStickerMax = 256.0f;
   void as_sticker() {
     sticker = true;
+    parts.picture.setSource(from_moving_thumbnail{source, true});
     fState.apply({.background = skia::SkColor{0}});
     this->invalidateLayout();
   }
@@ -190,24 +203,21 @@ struct picture_view : scene::Node {
 // Several pictures in one message, as tdesktop shows an album: rows filling
 // its width with a thin gap between -- where they are odd, the first alone
 // and wide, then pairs -- each picture cut to fill its cell.
-struct album_view : nodes::Stack {
-  struct row : nodes::Stack {
+struct album_view : skiff::compose::Stacked {
+  struct row : skiff::compose::Stacked {
     struct parts_t {
       std::vector<picture_view> cells;
     } parts;
-    row() {
-      this->setHorizontal();
-      this->setGap(2.0f);
-      fState.apply({.autoSize = scene::axes::kBoth});
-    }
+    row()
+        : Stacked(
+              skiff::compose::hbox(2.0f, {.autoSize = scene::axes::kBoth})) {}
   };
   struct parts_t {
     std::vector<row> rows;
   } parts;
   static constexpr float kWidth = 360.0f, kGap = 2.0f;
-  album_view(const palette& colours, const std::vector<attachment>& items) {
-    this->setGap(kGap);
-    fState.apply({.autoSize = scene::axes::kBoth});
+  album_view(const palette &colours, const std::vector<attachment> &items)
+      : Stacked(skiff::compose::vbox(kGap, {.autoSize = scene::axes::kBoth})) {
     std::vector<std::size_t> per_row;
     std::size_t placed = items.size() % 2 == 1 ? 1 : 0;
     if (placed == 1)
@@ -251,10 +261,9 @@ struct album_view : nodes::Stack {
   }
 };
 
-
 // A file in a message, as tdesktop's row: a round icon in the accent, the
 // name over its size; pressed, it is saved and opened.
-struct file_view : nodes::Stack {
+struct file_view : skiff::compose::Stacked {
   std::string source;
   // tdesktop's msgFileSize: the icon, and so the row, is this high.
   static constexpr float kIcon = 44.0f;
@@ -267,16 +276,17 @@ struct file_view : nodes::Stack {
   // Its name over its size, each as wide as it reads, up to a limit: sized
   // by what they say, so that the bubble is (a block that only grew took
   // nothing in a bubble sized by its content, and showed neither).
-  struct texts_column : nodes::Stack {
+  struct texts_column : skiff::compose::Stacked {
     struct parts_t {
       nodes::Text name;
       nodes::Text size;
     } parts;
-    texts_column(const palette& colours, std::string name, std::string size)
-        : parts{.name = nodes::Text(std::move(name), 14.0f, colours.text, true),
+    texts_column(const palette &colours, std::string name, std::string size)
+        : Stacked(
+              skiff::compose::vbox(4.0f, {.autoSize = scene::axes::kBoth,
+                                          .alignSelf = scene::align::kMiddle})),
+          parts{.name = nodes::Text(std::move(name), 14.0f, colours.text, true),
                 .size = nodes::Text(std::move(size), 12.0f, colours.dim)} {
-      this->setGap(4.0f);
-      fState.apply({.autoSize = scene::axes::kBoth, .alignSelf = scene::align::kMiddle});
       for (nodes::Text* each : {&parts.name, &parts.size}) {
         each->setElided(true);
         each->setMaxWidth(360.0f);
@@ -326,102 +336,85 @@ struct file_view : nodes::Stack {
       return std::format("{:.1f} KB", static_cast<double>(bytes) / 1024.0);
     return std::format("{:.1f} MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
   }
-  file_view(const palette& colours, platform::audio::speaker* speaker, std::string where, std::string name, std::int64_t bytes,
+  file_view(const palette &colours, platform::audio::speaker *speaker,
+            std::string where, std::string name, std::int64_t bytes,
             bool is_sound = false)
-      : source(std::move(where)), parts{.icon = disc(colours), .texts = texts_column(colours, name, size_text(bytes))}, sound(is_sound),
-        size_line(size_text(bytes)), speaker_(speaker) {
+      : Stacked(
+            skiff::compose::hbox(11.0f, {.autoSize = scene::axes::kBoth,
+                                         .minWidth = 268.0f - 24.0f,
+                                         .padding = {2.0f, 0.0f, 2.0f, 0.0f}})),
+        source(std::move(where)),
+        parts{.icon = disc(colours),
+              .texts = texts_column(colours, name, size_text(bytes))},
+        sound(is_sound), size_line(size_text(bytes)), speaker_(speaker) {
     if (sound)
       parts.icon.setShape(shape_of(icon::play{}));
-    this->setHorizontal();
-    this->setGap(11.0f);
-    fState.apply({.autoSize = scene::axes::kBoth, .minWidth = 268.0f - 24.0f, .padding = {2.0f, 0.0f, 2.0f, 0.0f}});
     fState.setCursor(scene::cursor::hand{});
   }
   [[nodiscard]] bool acceptsInput() const { return true; }
 };
 
-// A message's reactions, as tdesktop's: a chip for each, its emoji and
-// how many, the user's own in the accent; a press on one puts or takes back
-// the user's.
-//
-// A reaction is whatever text a client put in it: an emoji mostly; an
-// mxc:// URL where it is a picture -- a custom emoji, shown as the picture,
-// fetched as an avatar is -- and words where it is words, cut to a chip's
-// length.
-struct reaction_chip : nodes::Stack {
-  std::string key;
-  std::size_t count = 0;
-  bool mine = false;
-  struct parts_t {
-    // Frosted, where the bubbles are: what is behind, blurred.
-    std::optional<frost_pane> frost;
-    std::optional<nodes::Image<from_avatars>> picture;
-    nodes::Text label;
-    // Who reacted, as Telegram shows them: their avatars in place of the
-    // count, where they are three or fewer.
-    std::vector<avatar_mark> who;
-  } parts;
-  [[nodiscard]] static bool pictured(std::string_view k) { return proto::is_media(k); }
-  static constexpr std::size_t kFacesShown = 3;
-  // What the chip says: the count beside a picture; else the reaction and
-  // the count -- cut where it is drawn, by its width (kLabelMost), not by
-  // its bytes: cut at 20 bytes, ten Cyrillic letters had an ellipsis with
-  // room to spare.
-  [[nodiscard]] static std::string label_of(std::string_view k, std::size_t n) {
-    if (pictured(k))
-      return std::to_string(n);
-    return std::format("{} {}", k, n);
+// Reactions are local compositions: inline pictures retain their own frame
+// deadlines, and a click sends the original (unmodified) reaction key.
+struct reaction_pictures {
+  static std::optional<scene::PillPicture> pill(std::string_view) { return std::nullopt; }
+  static const skia::Sp<skia::SkImage>* picture(std::string_view target) {
+    if (const auto* moving = emoji_animations().at(target, animation_clock())) return moving;
+    return emoji_images().find(target);
   }
-  static constexpr float kLabelMost = 240.0f;
-  // `people`: who reacted, by id and name.
-  reaction_chip(const palette& colours, const looks_shown& looks, std::string k, std::size_t n, bool own,
-                const std::vector<std::pair<std::string, std::string>>& people = {})
-      : key(std::move(k)), count(n), mine(own),
-        parts{.label = nodes::Text(label_of(key, n), 13.0f, own ? colours.on_accent : colours.text)} {
-    this->setHorizontal();
-    this->setGap(4.0f);
-    fStack.justify = nodes::justify::middle{};
-    fState.apply({.height = 26.0f, .autoSize = scene::axes::kX, .minWidth = 26.0f, .padding = {0.0f, 9.0f, 0.0f, 9.0f},
-                  .cornerRadius = 13.0f,
-                  .background = at_opacity(own ? colours.accent : colours.tile,
-                                           element_opacity_of(looks.bubbles, &config::element_opacity::reactions))});
-    // Frosted, where the bubbles are, as its own blur says.
-    if (frosts(looks.bubbles)) {
-      parts.frost.emplace(frost_source{}, element_blur_of(looks.bubbles, &config::element_blur::reactions, looks.window));
-      parts.frost->apply({.place = scene::anchor::kTopLeft, .fill = true, .margin = {0.0f, -9.0f, 0.0f, -9.0f}, .cornerRadius = 13.0f});
-      // Its colour over the frost: the pane's tint, its own none.
-      parts.frost->setTint(fState.fBackground);
-      fState.apply({.background = skia::SkColor{0}});
-    }
-    if (pictured(key)) {
-      parts.picture.emplace(from_avatars{key});
-      parts.picture->apply({.width = 18.0f, .height = 18.0f, .alignSelf = scene::align::kMiddle});
-    }
-    parts.label.apply({.alignSelf = scene::align::kMiddle});
-    parts.label.setElided(true);
-    parts.label.setMaxWidth(kLabelMost);
-    if (!people.empty() && people.size() <= kFacesShown) {
-      // The count's place taken by the faces: the reaction alone before them.
-      parts.label.setText(pictured(key) ? std::string() : label_of(key, 0).substr(0, label_of(key, 0).size() - 2));
-      parts.label.setVisible(!pictured(key));
-      parts.who.reserve(people.size());
-      for (const auto& [id, name] : people) {
-        parts.who.emplace_back(id, name, 20.0f);
-        parts.who.back().apply({.margin = {0.0f, 0.0f, 0.0f, parts.who.size() == 1 ? 2.0f : -6.0f},
-                                .border = scene::Border{own ? colours.accent : colours.tile, 1.5f}});
-      }
-    }
-  }
-  [[nodiscard]] bool acceptsInput() const { return true; }
+  static bool animated(std::string_view target) { return emoji_animations().has(target); }
+  static double wakeAt(std::string_view target) { return emoji_animations().next_frame_at(target, animation_clock()); }
 };
-struct reaction_row : nodes::Flow<std::vector<reaction_chip>> {
-  reaction_row() : nodes::Flow<std::vector<reaction_chip>>({.direction = nodes::direction::horizontal{}, .spacingX = 4.0f,
-                                                             .spacingY = 4.0f},
-                                                            {}) {
-    fState.apply({.autoSize = scene::axes::kBoth, .maxWidth = 430.0f, .margin = {4.0f, 0.0f, 2.0f, 0.0f}});
+inline auto reaction_chip(const palette& colours, const looks_shown& looks,
+                          std::string message, std::string key, std::size_t count, bool own,
+                          const std::vector<emote>& emotes,
+                          const std::vector<std::pair<std::string, std::string>>& people = {},
+                          std::optional<std::string> shortcode = std::nullopt) {
+  namespace c = skiff::compose;
+  const auto colour = own ? colours.on_accent : colours.text;
+  auto words = emoji_text_of(key, emotes);
+  if (shortcode && words.spans.size() == 1 && words.spans.front().first == 0 && words.spans.front().last == words.text.size())
+    words.spans.front().plain = *shortcode;
+  const bool faces = !people.empty() && people.size() <= 3;
+  if (!faces) words.text += " " + std::to_string(count);
+  auto label = nodes::BasicText<reaction_pictures>(words.text, 13.0f, colour);
+  label.setLinks(std::move(words.spans), colour);
+  label.setSelectable(false);
+  label.setMaxWidth(240.0f);
+  auto avatars = std::ranges::to<std::vector>(std::views::transform(
+      std::views::enumerate(std::views::take(people, faces ? people.size() : 0)), [&](const auto& item) {
+        const auto& [index, person] = item;
+        // Overlap faces with one another, never with the reaction label.
+        return c::styled({.margin = {0.0f, 0.0f, 0.0f, index == 0 ? 0.0f : -6.0f},
+                          .border = scene::Border{own ? colours.accent : colours.tile, 1.5f}},
+                         avatar_mark(person.first, person.second, 20.0f));
+      }));
+  const auto tint = at_opacity(own ? colours.accent : colours.tile,
+      element_opacity_of(looks.bubbles, &config::element_opacity::reactions));
+  std::optional<frost_pane> frost;
+  if (frosts(looks.bubbles)) {
+    frost.emplace(frost_source{}, element_blur_of(looks.bubbles, &config::element_blur::reactions, looks.window));
+    frost->apply({.place = scene::anchor::kTopLeft, .fill = true, .cornerRadius = 13.0f});
+    frost->setTint(tint);
   }
-  std::vector<reaction_chip>& chips() { return std::get<0>(fChildren); }
-  const std::vector<reaction_chip>& chips() const { return std::get<0>(fChildren); }
-};
+  return c::onClick(request::react{std::move(message), std::move(key)}, c::column(
+      c::vbox(0.0f, {.height = 26.0f, .autoSize = scene::axes::kX, .minWidth = 26.0f,
+                    .cornerRadius = 13.0f, .background = frost ? skia::SkColor{0} : tint}),
+      std::move(frost), c::row(c::hbox(4.0f, {.height = 26.0f, .autoSize = scene::axes::kX,
+                        .padding = {0.0f, 9.0f, 0.0f, 9.0f}}),
+        c::styled({.alignSelf = scene::align::kMiddle}, elided(std::move(label))),
+        c::visible(faces, c::many(c::hbox(0.0f, {.height = 20.0f, .autoSize = scene::axes::kX,
+                                               .alignSelf = scene::align::kMiddle}), std::move(avatars))))));
+}
+using reaction_chip_t = decltype(reaction_chip(std::declval<const palette&>(), std::declval<const looks_shown&>(),
+    std::string{}, std::string{}, std::size_t{}, bool{}, std::declval<const std::vector<emote>&>()));
+using reaction_row = nodes::Flow<std::vector<reaction_chip_t>>;
+inline auto reaction_row_of() {
+  auto row = reaction_row({.direction = nodes::direction::horizontal{}, .spacingX = 4.0f, .spacingY = 4.0f}, {});
+  row.apply({.autoSize = scene::axes::kBoth, .maxWidth = 430.0f, .margin = {4.0f, 0.0f, 2.0f, 0.0f}});
+  return row;
+}
+inline auto& reaction_chips(reaction_row& row) { return std::get<0>(row.fChildren); }
+inline const auto& reaction_chips(const reaction_row& row) { return std::get<0>(row.fChildren); }
 
-}  // namespace mux::ui
+} // namespace mux::ui

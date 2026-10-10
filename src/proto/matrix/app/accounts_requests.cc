@@ -42,9 +42,10 @@ template void account<mux::app::post_change>::create_room(std::string name, std:
 template void account<mux::app::post_change>::search_people(std::string term);
 template void account<mux::app::post_change>::list_threads(std::string room);
 template void account<mux::app::post_change>::load_thread(std::string room, std::string root);
-template void account<mux::app::post_change>::send_in_thread(std::string room, std::string body, std::string root, std::string latest, std::optional<std::string> reply_to);
+template void account<mux::app::post_change>::send_in_thread(std::string room, std::string body, std::string root, std::string latest, std::optional<std::string> reply_to, std::vector<styled_run> styles);
 template void account<mux::app::post_change>::list_packs(std::optional<std::string> room);
 template void account<mux::app::post_change>::save_pack(emote_pack pack);
+template void account<mux::app::post_change>::adopt_pack(emote_pack pack);
 template void account<mux::app::post_change>::delete_pack(emote_pack pack);
 template void account<mux::app::post_change>::catch_up(std::string room, std::string from, std::string until);
 template void account<mux::app::post_change>::preview_room(std::string room, std::vector<std::string> via);
@@ -67,7 +68,7 @@ template void account<mux::app::post_change>::fetch_avatar(std::string source, s
 template void account<mux::app::post_change>::edit(std::string room, std::string event, std::string text, std::vector<styled_run> styles);
 template void account<mux::app::post_change>::edit_caption(std::string room, std::string event, std::string caption, mux::attachment picture);
 template void account<mux::app::post_change>::remove(std::string room, std::string event);
-template void account<mux::app::post_change>::react(std::string room, std::string target, std::string key, bool on);
+template void account<mux::app::post_change>::react(std::string room, std::string target, std::string key, bool on, std::optional<std::string> shortcode);
 template void account<mux::app::post_change>::pin(std::string room, std::string target, bool on);
 template void account<mux::app::post_change>::leave(std::string room);
 template void account<mux::app::post_change>::send(std::string room, std::string body, std::optional<std::string> reply_to, std::vector<mention> mentions, std::vector<styled_run> styles);
@@ -97,6 +98,9 @@ template void account<mux::app::post_change>::cross_sign_device(const loom::cs::
 template void account<mux::app::post_change>::cross_sign_user(const std::string& user, const loom::cs::query_keys::response_t::cross_signing_key_t& master);
 template void account<mux::app::post_change>::cut_long_poll();
 template void account<mux::app::post_change>::sync_now();
+template void account<mux::app::post_change>::flush_notifications();
+template bool account<mux::app::post_change>::save_notifications(std::optional<std::string> room, mux::notification_choices choices, mux::notification_choices effective);
+template void account<mux::app::post_change>::set_notifications(std::optional<std::string> room, mux::notification_choices choices, mux::notification_choices effective);
 template void account<mux::app::post_change>::set_pusher(std::optional<std::string> endpoint);
 template void account<mux::app::post_change>::register_pusher();
 }  // namespace mux::proto::matrix::client

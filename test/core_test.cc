@@ -21,6 +21,104 @@ message said(std::string id, std::string text, bool outgoing = false) {
                  .outgoing = outgoing};
 }
 
+TEST(Model, SavedReadMarkerSurvivesOlderAndUnknownReceipts) {
+  model kept;
+  kept.apply(change::conversation_updated{.id = with_juliet});
+  kept.apply(change::message_added{said("old", "older")});
+  kept.apply(change::message_added{said("new", "newer")});
+  kept.read_up_to(with_juliet, "new");
+  kept.apply(change::receipts_changed{with_juliet, {{romeo.address, "old"}}});
+  EXPECT_EQ(kept.find(with_juliet)->read_up_to, std::optional<std::string>("new"));
+  kept.read_up_to(with_juliet, "outside-window");
+  kept.apply(change::receipts_changed{with_juliet, {{romeo.address, "old"}}});
+  EXPECT_EQ(kept.find(with_juliet)->read_up_to, std::optional<std::string>("outside-window"));
+  kept.read_up_to(with_juliet, "old");
+  kept.apply(change::receipts_changed{with_juliet, {{romeo.address, "new"}}});
+  EXPECT_EQ(kept.find(with_juliet)->read_up_to, std::optional<std::string>("new"));
+}
+
+TEST(Model, TypingExpiresAndEmptyUpdateCancelsWake) {
+  model kept;
+  const auto began = std::chrono::steady_clock::now();
+  kept.apply(change::typing_changed{with_juliet, {"juliet@example.com"}});
+  EXPECT_FALSE(kept.expire_typing(began + std::chrono::seconds(29)));
+  EXPECT_FALSE(kept.find(with_juliet)->typing.empty());
+  EXPECT_TRUE(kept.expire_typing(began + std::chrono::seconds(31)));
+  EXPECT_TRUE(kept.find(with_juliet)->typing.empty());
+  EXPECT_FALSE(std::isfinite(kept.typing_wake_in()));
+  kept.apply(change::typing_changed{with_juliet, {"juliet@example.com"}});
+  kept.apply(change::typing_changed{with_juliet, {"juliet@example.com"}});
+  EXPECT_TRUE(std::isfinite(kept.typing_wake_in()));
+  kept.apply(change::typing_changed{with_juliet, {}});
+  EXPECT_TRUE(kept.find(with_juliet)->typing.empty());
+  EXPECT_FALSE(std::isfinite(kept.typing_wake_in()));
+}
+
+TEST(Model, LiveMessageEndsItsSendersTypingButHistoryDoesNot) {
+  model kept;
+  kept.apply(change::typing_changed{with_juliet, {"juliet@example.com", "nurse@example.com"}});
+  kept.apply(change::message_added{said("old", "history"), placement::at_start{}});
+  EXPECT_EQ(kept.find(with_juliet)->typing.size(), 2u);
+  kept.apply(change::message_added{said("new", "finished typing")});
+  EXPECT_EQ(kept.find(with_juliet)->typing, (std::vector<std::string>{"nurse@example.com"}));
+}
+
+TEST(Model, LateHistoryAndTimestampCorrectionsKeepChronologicalOrder) {
+  model kept;
+  const auto timed = [](std::string id, int minutes) {
+    auto one = said(std::move(id), "text");
+    one.at = std::chrono::sys_time<std::chrono::milliseconds>(std::chrono::minutes(minutes));
+    return one;
+  };
+  kept.apply(change::message_added{timed("0037", 37)});
+  kept.apply(change::message_added{timed("0008", 8), placement::in_window{}});
+  kept.apply(change::message_added{timed("0038", 38)});
+  auto timeline = kept.find(with_juliet)->timeline;
+  ASSERT_EQ(timeline.size(), 3u);
+  EXPECT_EQ(timeline[0].id, "0008");
+  EXPECT_EQ(timeline[1].id, "0037");
+  EXPECT_EQ(timeline[2].id, "0038");
+  // A live event a minute behind must not break subsequent history insertion.
+  kept.apply(change::message_added{timed("0036", 36)});
+  kept.apply(change::message_added{timed("0035", 35), placement::at_start{}});
+  EXPECT_TRUE(std::ranges::is_sorted(kept.find(with_juliet)->timeline, {}, &message::at));
+  // The server corrects a timestamp on an event we already have.
+  kept.apply(change::message_added{timed("0037", 7)});
+  EXPECT_EQ(kept.find(with_juliet)->timeline.front().id, "0037");
+  EXPECT_TRUE(std::ranges::is_sorted(kept.find(with_juliet)->timeline, {}, &message::at));
+}
+
+TEST(Model, ConfirmedEchoMovesBeforePendingMessagesByServerTime) {
+  model kept;
+  auto recent = said("recent", "received");
+  recent.at = std::chrono::sys_time<std::chrono::milliseconds>(std::chrono::minutes(37));
+  kept.apply(change::message_added{recent});
+  auto echo = said("echo", "local", true);
+  echo.delivery = delivery::sending{};
+  echo.at = std::chrono::sys_time<std::chrono::milliseconds>(std::chrono::minutes(38));
+  kept.apply(change::message_added{echo});
+  echo.delivery = delivery::sent{};
+  echo.at = std::chrono::sys_time<std::chrono::milliseconds>(std::chrono::minutes(8));
+  kept.apply(change::message_added{echo});
+  EXPECT_EQ(kept.find(with_juliet)->timeline.front().id, "echo");
+  EXPECT_TRUE(std::ranges::is_sorted(kept.find(with_juliet)->timeline, {}, &message::at));
+}
+
+TEST(Model, AcknowledgingAnOlderLocalEchoRestoresChronologicalOrder) {
+  model kept;
+  auto received = said("recent", "received");
+  received.at = std::chrono::sys_time<std::chrono::milliseconds>(std::chrono::minutes(37));
+  kept.apply(change::message_added{received});
+  auto local = said("txn", "sent with a slow local clock", true);
+  local.delivery = delivery::sending{};
+  local.at = std::chrono::sys_time<std::chrono::milliseconds>(std::chrono::minutes(8));
+  kept.apply(change::message_added{local});
+  EXPECT_EQ(kept.find(with_juliet)->timeline.back().id, "txn");
+  kept.apply(change::message_acknowledged{with_juliet, "txn", "confirmed"});
+  EXPECT_EQ(kept.find(with_juliet)->timeline.front().id, "confirmed");
+  EXPECT_TRUE(std::ranges::is_sorted(kept.find(with_juliet)->timeline, {}, &message::at));
+}
+
 TEST(Model, Conversation) {
   model kept;
   kept.apply(change::connection_changed{romeo, connection::online{}});
@@ -199,3 +297,57 @@ TEST(Mailbox, CrossesThreads) {
 }
 
 }  // namespace
+
+TEST(Model, DirectMessageReceiptsNeverMoveBackOrLoseTheirTimestamp) {
+  model kept;
+  kept.apply(change::conversation_updated{.id = with_juliet});
+  kept.apply(change::message_added{said("old", "older")});
+  kept.apply(change::message_added{said("new", "newer")});
+  const auto time = [](int ms) { return std::chrono::sys_time<std::chrono::milliseconds>{std::chrono::milliseconds{ms}}; };
+  kept.apply(change::receipts_changed{with_juliet, {{with_juliet.id, "new"}}, {{with_juliet.id, time(200)}}});
+  kept.apply(change::receipts_changed{with_juliet, {{with_juliet.id, "old"}}, {{with_juliet.id, time(100)}}});
+  EXPECT_EQ(kept.find(with_juliet)->read_by.at(with_juliet.id), "new");
+  EXPECT_EQ(kept.find(with_juliet)->receipt_times.at(with_juliet.id), time(200));
+  kept.apply(change::receipts_changed{with_juliet, {{with_juliet.id, "outside-window"}}, {{with_juliet.id, time(300)}}});
+  kept.apply(change::receipts_changed{with_juliet, {{with_juliet.id, "new"}}, {{with_juliet.id, time(200)}}});
+  EXPECT_EQ(kept.find(with_juliet)->read_by.at(with_juliet.id), "outside-window");
+  EXPECT_EQ(kept.find(with_juliet)->receipt_times.at(with_juliet.id), time(300));
+}
+
+TEST(Model, ReactionsOnAsideEventsDrainAndSurviveTimelinePromotion) {
+  model kept;
+  kept.apply(change::reaction_changed{with_juliet, "$reaction", "👍", romeo.address, true, "$nested"});
+  auto event = said("$reaction", "reaction");
+  kept.apply(change::message_added{event, placement::aside{}});
+  ASSERT_TRUE(kept.find(with_juliet)->quoted.at("$reaction").reactions.contains("👍"));
+  kept.apply(change::message_added{event});
+  ASSERT_EQ(kept.find(with_juliet)->timeline.size(), 1u);
+  EXPECT_TRUE(kept.find(with_juliet)->timeline[0].reactions.contains("👍"));
+  kept.apply(change::reaction_changed{with_juliet, "$reaction", "👍", romeo.address, false});
+  EXPECT_TRUE(kept.find(with_juliet)->timeline[0].reactions.empty());
+}
+TEST(Model, EachEditVersionRetainsTheEventThatWroteIt) {
+  model kept;
+  kept.apply(change::message_added{said("$original", "first")});
+  kept.apply(change::message_edited{with_juliet, "$original", {"second", std::nullopt}, std::nullopt, false, {}, "$edit1"});
+  kept.apply(change::message_edited{with_juliet, "$original", {"third", std::nullopt}, std::nullopt, false, {}, "$edit2"});
+  const auto& message = kept.find(with_juliet)->timeline.front();
+  ASSERT_EQ(message.versions.size(), 2u);
+  EXPECT_EQ(message.versions[0].event, "$original");
+  EXPECT_EQ(message.versions[1].event, "$edit1");
+  EXPECT_EQ(message.latest_edit_event, "$edit2");
+}
+
+TEST(Model, OptimisticEditEchoAssignsItsIdWithoutInventingAnotherVersion) {
+  model kept;
+  kept.apply(change::message_added{said("$original", "first")});
+  kept.apply(change::message_edited{with_juliet, "$original", {"second", std::nullopt}});
+  kept.apply(change::message_edited{with_juliet, "$original", {"second", std::nullopt}, std::nullopt, false, {}, "$edit1"});
+  ASSERT_EQ(kept.find(with_juliet)->timeline.front().versions.size(), 1u);
+  EXPECT_EQ(kept.find(with_juliet)->timeline.front().latest_edit_event, "$edit1");
+  kept.apply(change::message_edited{with_juliet, "$original", {"second", std::nullopt}, std::nullopt, false, {}, "$edit2"});
+  const auto& latest = kept.find(with_juliet)->timeline.front();
+  ASSERT_EQ(latest.versions.size(), 2u);
+  EXPECT_EQ(latest.versions[1].event, "$edit1");
+  EXPECT_EQ(latest.latest_edit_event, "$edit2");
+}

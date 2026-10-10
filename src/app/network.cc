@@ -84,7 +84,6 @@ struct running_account {
 // The accounts, on their loop. Everything here runs on the loop's thread;
 // the window reaches it through post().
 struct network {
-  mux::net::loop loop;
   mux::net::tls tls = mux::net::client_tls();
   mailbox_type* box = nullptr;
   // What is kept on disk is read and written through: the program's.
@@ -94,6 +93,9 @@ struct network {
   // be finishing, and they must not be destroyed under them.
   std::vector<running_account> retired;
   std::thread thread;
+  // Destroyed before the accounts and TLS: suspended fibers unwind when
+  // the loop goes away, and their cleanup still accesses those objects.
+  mux::net::loop loop;
 
   // An account started, through the profile of `proxies` it names.
   void start(const mux::config::account_t& saved, const std::vector<mux::config::proxy_settings>& proxies) {
@@ -127,7 +129,7 @@ struct network {
                                                                [](mux::config::proxy_kind::http) {
                                                                  return mux::net::proxy_kind_t{mux::net::proxy_kind::http{}};
                                                                }},
-                                              mux::config::proxy_kind_of(kept->kind)),
+                                              kept->kind),
                            .host = kept->host,
                            .port = static_cast<std::uint16_t>(kept->port),
                            .username = kept->username,
@@ -244,13 +246,19 @@ struct network {
     });
   }
   // A reaction to a message put or taken back, by the account it is of.
-  void react(const mux::conversation_id& in, std::string target, std::string key, bool on) {
-    loop.post([this, in, target = std::move(target), key = std::move(key), on] {
+  void react(const mux::conversation_id& in, std::string target, std::string key, bool on,
+             std::optional<std::string> shortcode = std::nullopt) {
+    loop.post([this, in, target = std::move(target), key = std::move(key), on, shortcode = std::move(shortcode)] {
       for (auto& one : accounts)
         spl::visit(
             [&](auto& account) {
               if (account->id() == in.account)
-                ask_if_able([&](auto& a) -> decltype(void(a.react(in.id, target, key, on))) { a.react(in.id, target, key, on); }, *account);
+                ask_if_able([&](auto& a) -> decltype(void(a.react(in.id, target, key, on))) {
+                  if constexpr (requires { a.react(in.id, target, key, on, shortcode); })
+                    a.react(in.id, target, key, on, shortcode);
+                  else
+                    a.react(in.id, target, key, on);
+                }, *account);
             },
             one.account);
     });
@@ -513,14 +521,14 @@ struct network {
     });
   }
   void send_in_thread(const mux::conversation_id& in, std::string body, std::string root, std::string latest,
-                      std::optional<std::string> reply_to) {
+                      std::optional<std::string> reply_to, std::vector<mux::styled_run> styles) {
     loop.post([this, in, body = std::move(body), root = std::move(root), latest = std::move(latest),
-               reply_to = std::move(reply_to)] {
+               reply_to = std::move(reply_to), styles = std::move(styles)] {
       for (auto& one : accounts)
         spl::visit(
             [&](auto& account) {
               if (account->id() == in.account)
-                ask_if_able([&](auto& a) -> decltype(void(a.send_in_thread(in.id, body, root, latest, reply_to))) { a.send_in_thread(in.id, body, root, latest, reply_to); }, *account);
+                ask_if_able([&](auto& a) -> decltype(void(a.send_in_thread(in.id, body, root, latest, reply_to, styles))) { a.send_in_thread(in.id, body, root, latest, reply_to, styles); }, *account);
             },
             one.account);
     });
@@ -546,6 +554,16 @@ struct network {
                 ask_if_able([&](auto& a) -> decltype(void(a.save_pack(pack))) { a.save_pack(pack); }, *account);
             },
             one.account);
+    });
+  }
+  void adopt_pack(const mux::account_id& by, emote_pack pack) {
+    loop.post([this, by, pack = std::move(pack)] {
+      std::ranges::for_each(accounts, [&](auto& one) {
+        spl::visit([&](auto& account) {
+          if (account->id() == by)
+            ask_if_able([&](auto& a) -> decltype(void(a.adopt_pack(pack))) { a.adopt_pack(pack); }, *account);
+        }, one.account);
+      });
     });
   }
   void delete_pack(const mux::account_id& by, emote_pack pack) {
@@ -662,6 +680,12 @@ struct network {
                 ask_if_able(ask, *account);
             },
             one.account);
+    });
+  }
+  void set_notifications(const mux::account_id& by, std::optional<std::string> room,
+                         mux::notification_choices choices, mux::notification_choices effective) {
+    this->on_account(by, [room, choices, effective](auto& account) -> decltype(void(account.set_notifications(room, choices, effective))) {
+      account.set_notifications(room, choices, effective);
     });
   }
   void verify_start(const mux::account_id& by, std::string user, std::optional<std::string> device) {

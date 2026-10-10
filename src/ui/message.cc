@@ -8,6 +8,7 @@ import splice;
 import skia;
 import skiff.paint;
 import skiff.scene;
+import skiff.compose;
 import skiff.nodes.box;
 import skiff.nodes.flow;
 import skiff.nodes.icon;
@@ -33,6 +34,46 @@ export import :message_media;
 export import :message_text;
 
 export namespace mux::ui {
+
+[[nodiscard]] inline skia::SkColor quote_tint(skia::SkColor colour, float alpha) {
+  return (colour & 0x00FFFFFFu) | (static_cast<skia::SkColor>(std::lround(alpha * 255.0f)) << 24);
+}
+[[nodiscard]] inline auto quote_row(const palette& colours, skia::SkColor colour,
+                                    std::string who, std::string said,
+                                    std::optional<std::string> picture = std::nullopt,
+                                    bool quoted = false, bool sticker = false) {
+  namespace c = skiff::compose;
+  std::optional<nodes::Text> tag;
+  if (quoted)
+    tag.emplace(c::styled({.alignSelf = scene::align::kStart,
+                           .margin = {1.0f, 0.0f, 0.0f, 0.0f}},
+                          nodes::Text("quoted", 11.0f, colours.dim)));
+  std::optional<nodes::Image<from_thumbnails>> thumb;
+  if (picture)
+    thumb.emplace(c::styled({.width = 32.0f, .height = 32.0f, .alignSelf = scene::align::kMiddle,
+                              .margin = {2.0f, 0.0f, 2.0f, 0.0f}, .cornerRadius = 3.0f,
+                              .background = colours.tile},
+                             nodes::Image<from_thumbnails>({*picture, sticker})));
+  auto text = nodes::Text(std::move(said), 13.0f, colours.text);
+  if (quoted)
+    text = wrapped(std::move(text));
+  else
+    text = elided(std::move(text));
+  return c::row(c::hbox(4.0f, {.fillX = true, .autoSize = scene::axes::kY,
+      .margin = {2.0f, 0.0f, 4.0f, 0.0f},
+      .padding = {2.0f, 6.0f, 2.0f, picture ? 7.0f : 11.0f}, .cornerRadius = 5.0f,
+      .background = quote_tint(colour, 0.12f), .masking = true}),
+    c::styled({.place = scene::anchor::kTopLeft, .x = picture ? -7.0f : -11.0f,
+                .y = -2.0f, .fillY = true, .width = 3.0f}, nodes::Box<>(quote_tint(colour, 0.9f))),
+    std::move(thumb),
+    c::column(c::vbox(0.0f, {.autoSize = scene::axes::kY, .grow = scene::axes::kX,
+                             .alignSelf = scene::align::kMiddle}),
+      c::row(c::hbox(8.0f, {.fillX = true, .autoSize = scene::axes::kY}),
+        c::styled({.grow = scene::axes::kX}, elided(nodes::Text(std::move(who), 13.0f, colour, true))),
+        std::move(tag)),
+      c::styled({.fillX = true}, std::move(text))));
+}
+using quote_row_t = decltype(quote_row(std::declval<const palette&>(), skia::SkColor{}, std::string{}, std::string{}));
 
 // A protocol's own sticker nodes, and its making of one for a message:
 // none by default -- the picture.
@@ -74,8 +115,7 @@ constexpr auto message_views_for(const State& state, type_tag<Actions> tag) {
 // A message as the chat shows it. A template on the program's Actions, made
 // where every protocol's UI module is seen: its sticker part is the basic
 // picture or one of a protocol's own sticker nodes (sticker_views).
-template <class Actions>
-struct message_bubble : nodes::Stack {
+template <class Actions> struct message_bubble : skiff::compose::Stacked {
   // ---- the protocols' own sticker nodes -------------------------------------
   template <class List>
   struct sticker_nodes;
@@ -102,24 +142,25 @@ struct message_bubble : nodes::Stack {
   };
   using their_view_t = typename variant_of_types<
       typename joined<type_list<nodes::Text>, typename protocol_message_nodes<protocols>::type>::type>::type;
-  struct view_holder : nodes::Stack {
+  struct view_holder : skiff::compose::Stacked {
     struct parts_t {
       their_view_t shown;
     } parts;
     template <class View>
-    explicit view_holder(View made) : parts{.shown = their_view_t(std::move(made))} {
-      fState.apply({.fillX = true, .autoSize = scene::axes::kY});
-    }
+    explicit view_holder(View made)
+        : Stacked(skiff::compose::vbox(
+              0.0f, {.fillX = true, .autoSize = scene::axes::kY})),
+          parts{.shown = their_view_t(std::move(made))} {}
   };
   // As a node: the protocol's sticker in it.
-  struct sticker_holder : nodes::Stack {
+  struct sticker_holder : skiff::compose::Stacked {
     struct parts_t {
       their_sticker_t shown;
     } parts;
     template <class View>
-    explicit sticker_holder(View made) : parts{.shown = their_sticker_t(std::move(made))} {
-      fState.apply({.autoSize = scene::axes::kBoth});
-    }
+    explicit sticker_holder(View made)
+        : Stacked(skiff::compose::vbox(0.0f, {.autoSize = scene::axes::kBoth})),
+          parts{.shown = their_sticker_t(std::move(made))} {}
   };
   // The message as it was shown, and where in its sender's run: while
   // these are the same, the bubble is kept.
@@ -149,97 +190,30 @@ struct message_bubble : nodes::Stack {
   [[nodiscard]] static skia::SkColor with_alpha(skia::SkColor colour, float alpha) {
     return (colour & 0x00FFFFFFu) | (static_cast<skia::SkColor>(std::lround(alpha * 255.0f)) << 24);
   }
-  struct quote_row : nodes::Stack {
-    // Who said it, and "quoted" after the name -- thin and grey, at the
-    // right: what it shows is the part the reply quoted, not the message's
-    // text. In the line's flow, so the name is cut before it rather than
-    // drawn under it, and the quote is at least as wide as both.
-    struct who_row : nodes::Stack {
-      struct parts_t {
-        nodes::Text who;
-        std::optional<nodes::Text> tag;
-      } parts;
-      who_row(const palette& colours, skia::SkColor colour, std::string name, bool quoted)
-          : parts{.who = nodes::Text(std::move(name), 13.0f, colour, true)} {
-        auto& [who, tag] = parts;
-        this->setHorizontal();
-        this->setGap(8.0f);
-        fState.apply({.fillX = true, .autoSize = scene::axes::kY});
-        who.setElided(true);
-        who.apply({.grow = scene::axes::kX});
-        if (quoted) {
-          tag.emplace("quoted", 11.0f, colours.dim);
-          tag->apply({.alignSelf = scene::align::kStart, .margin = {1.0f, 0.0f, 0.0f, 0.0f}});
-        }
-      }
-    };
-    // Who said it over a line of it, each cut at the bubble's width.
-    struct said_column : nodes::Stack {
-      struct parts_t {
-        who_row who;
-        nodes::Text said;
-      } parts;
-      said_column(const palette& colours, skia::SkColor colour, std::string name, std::string line, bool quoted)
-          : parts{.who = who_row(colours, colour, std::move(name), quoted),
-                  .said = nodes::Text(std::move(line), 13.0f, colours.text)} {
-        auto& [who, said] = parts;
-        fState.apply({.autoSize = scene::axes::kY, .grow = scene::axes::kX, .alignSelf = scene::align::kMiddle});
-        // As wide as the quote, cut where it ends: the quote is as wide as
-        // its bubble.
-        said.setElided(true);
-        said.apply({.fillX = true});
-      }
-    };
-    struct parts_t {
-      nodes::Box<> bar;
-      // A picture quoted: its thumbnail.
-      std::optional<nodes::Image<from_thumbnails>> thumb;
-      said_column texts;
-    } parts;
-    quote_row(const palette& colours, skia::SkColor colour, std::string who, std::string said,
-              std::optional<std::string> picture = std::nullopt, bool quoted = false)
-        : parts{.bar = nodes::Box<>(with_alpha(colour, 0.9f)),
-                .texts = said_column(colours, colour, std::move(who), std::move(said), quoted)} {
-      auto& [bar, thumb, texts] = parts;
-      this->setHorizontal();
-      this->setGap(4.0f);
-      fState.apply({.fillX = true,
-                    .autoSize = scene::axes::kY,
-                    .margin = {2.0f, 0.0f, 4.0f, 0.0f},
-                    .padding = {2.0f, 6.0f, 2.0f, picture ? 7.0f : 11.0f},
-                    .cornerRadius = 5.0f,
-                    .background = with_alpha(colour, 0.12f),
-                    .masking = true});
-      bar.apply({.place = scene::anchor::kTopLeft, .x = picture ? -7.0f : -11.0f, .y = -2.0f, .fillY = true, .width = 3.0f});
-      if (picture) {
-        thumb.emplace(from_thumbnails{*picture});
-        thumb->apply({.width = 32.0f, .height = 32.0f, .alignSelf = scene::align::kMiddle,
-                      .margin = {2.0f, 0.0f, 2.0f, 0.0f}, .cornerRadius = 3.0f, .background = colours.tile});
-      }
-    }
-  };
   // The bubble: as wide as what it says, up to its largest.
-  struct body_column : nodes::Stack {
+  struct body_column : skiff::compose::Stacked {
     bool outgoing = false;
     // The sender's name over their run, in their colour, and after it their
     // role in the room, dim, as Telegram shows "admin".
-    struct name_row : nodes::Stack {
+    struct name_row : skiff::compose::Stacked {
       struct parts_t {
         nodes::Text name;
         nodes::Text role;
       } parts;
-      name_row(const palette& colours, std::string who, skia::SkColor colour, std::string role)
-          : parts{.name = nodes::Text(std::move(who), 13.0f, colour, true),
-                  .role = nodes::Text(std::move(role), 12.0f, colours.dim)} {
-        this->setHorizontal();
-        this->setGap(10.0f);
-        fState.apply({.autoSize = scene::axes::kBoth});
+      name_row(const palette &colours, std::string who, skia::SkColor colour,
+               std::string role)
+          : Stacked(
+                skiff::compose::hbox(10.0f, {.autoSize = scene::axes::kBoth})),
+            parts{.name =
+                      elided(nodes::Text(std::move(who), 13.0f, colour, true)),
+                  .role = skiff::compose::styled(
+                      {.alignSelf = scene::align::kEnd},
+                      nodes::Text(std::move(role), 12.0f, colours.dim))} {
+
         // Sized as the name alone was: cut where it passes the bubble's
         // widest, the role's room kept.
-        parts.name.setElided(true);
         parts.name.setMaxWidth(kMaxWidth - 60.0f);
         parts.role.setVisible(!parts.role.text().empty());
-        parts.role.apply({.alignSelf = scene::align::kEnd});
       }
     };
     struct parts_t {
@@ -248,16 +222,15 @@ struct message_bubble : nodes::Stack {
       std::optional<name_row> name;
       // Forwarded: from whom, in the accent, as Telegram's.
       std::optional<forward_line> forwarded;
-      std::optional<quote_row> quote;
+      std::optional<quote_row_t> quote;
       std::optional<picture_view> picture;
       // A sticker its protocol draws itself, in the picture's place.
       std::optional<sticker_holder> their_sticker;
       std::optional<album_view> album;
       std::optional<file_view> file;
       nodes::BasicText<message_pictures> text;
-      // Its blocks of code, each with the words after it.
-      std::vector<code_piece> blocks;
-      std::vector<link_card> cards;
+      // Code blocks and link cards in text order, each with the words after it.
+      std::vector<message_piece> blocks;
       std::optional<page_preview> preview;
       std::optional<reaction_row> reactions;
       // A thread's root: its summary -- how many answers, the latest -- as
@@ -271,9 +244,6 @@ struct message_bubble : nodes::Stack {
       // The time inside the last line of the text, where that line leaves
       // room for it, as Telegram's: out of the column's flow, at its end.
       nodes::Text inline_time;
-      // The last of a run's tail, as Telegram's: out of the flow, at the
-      // corner on the sender's side, in the bubble's colour.
-      std::optional<nodes::Icon> tail;
     } parts;
     skia::SkColor plate = 0;
     // A protocol's sticker placed, where it made one.
@@ -338,6 +308,22 @@ struct message_bubble : nodes::Stack {
       if (parts.quote)
         parts.quote->apply({.maxWidth = side ? beside_room : 0.0f});
       this->nodes::Stack::layoutChildren();
+      // The column can wrap again in its final box. Position its overlay
+      // here, after that layout, rather than keeping a pre-layout offset.
+      if (parts.inline_time.visible()) {
+        const auto last = parts.reactions ? parts.reactions->bounds() : parts.text.bounds();
+        if (!last.isEmpty()) {
+          parts.inline_time.apply({.y = last.fBottom - fState.contentBox().fBottom + kTimeLower});
+          scene::layout(parts.inline_time, fState.contentBox());
+        }
+      }
+      if (time_placed && parts.text.visible() && parts.blocks.empty() && !parts.preview && !beside) {
+        const auto last = parts.reactions ? parts.reactions->bounds() : parts.text.bounds();
+        if (last != placed_beside) {
+          time_placed = false;
+          this->markDamaged();
+        }
+      }
       if (!side)
         return;
       const skia::SkRect sticker = parts.picture->bounds();
@@ -392,7 +378,7 @@ struct message_bubble : nodes::Stack {
     // where it is narrower; on a line of its own only where they do not.
     // Decided from the last layout; a change is laid out at the next.
     void update(double now_ms) {
-      auto& [frost, name, forwarded, quote, picture, their_sticker, album, file, text, blocks, cards, preview, reactions, thread, protocol_lines, their_view, time, inline_time, tail] = parts;
+      auto& [frost, name, forwarded, quote, picture, their_sticker, album, file, text, blocks, preview, reactions, thread, protocol_lines, their_view, time, inline_time] = parts;
       // A sticker's time is over it, and nowhere else: placed beside its
       // reactions too, it was shown twice.
       if (picture && picture->sticker) {
@@ -428,7 +414,7 @@ struct message_bubble : nodes::Stack {
         }
         return;
       }
-      if (!blocks.empty() || !cards.empty() || preview || (!text.visible() && !reactions)) {
+      if (!blocks.empty() || preview || (!text.visible() && !reactions)) {
         time_placed = true;  // under it, as it is
         return;
       }
@@ -447,7 +433,7 @@ struct message_bubble : nodes::Stack {
       time_placed = true;
       float last_width = text.lastLineWidth();
       if (reactions)
-        last_width = reactions->chips().empty() ? 0.0f : reactions->chips().back().bounds().fRight - last.fLeft;
+        last_width = reaction_chips(*reactions).empty() ? 0.0f : reaction_chips(*reactions).back().bounds().fRight - last.fLeft;
       // Measured again only where what it goes beside moved or changed: not
       // a font's measuring for every bubble in view, every frame.
       // The widest the text can be here: the bubble's widest, or what the
@@ -471,52 +457,21 @@ struct message_bubble : nodes::Stack {
         inline_time.setVisible(inside);
         widened = widest;
         fState.apply({.minWidth = std::max(base_min, widest)});
+        time_placed = false;
         this->invalidateLayout();
       }
-      // On the last line: its bottom where the text's is, wherever the text
-      // ends in the bubble -- anchored to the bubble's bottom alone, it stood
-      // above the line it is beside.
-      if (inside) {
-        const float drop = last.fBottom - fState.contentBox().fBottom;
-        if (std::abs(drop - time_drop) > 0.25f) {
-          time_drop = drop;
-          inline_time.apply({.y = drop + kTimeLower});
-          this->invalidateLayout();
-        }
-      }
     }
-    float time_drop = 0.0f;
     skia::SkRect placed_beside = skia::SkRect::MakeEmpty();
     float placed_width = -1.0f;
     std::string placed_time;
-    // The tail: 10 by 12, its straight side on the bubble's edge, curving
-    // down and out to its tip at the bubble's bottom.
-    static IconShape tail_shape(bool mine) {
-      const float side = mine ? -5.0f : 5.0f, tip = -side;
-      return {{{marks::path{{steps::move{side + (mine ? -1.0f : 1.0f), -6.0f}, steps::line{side, -6.0f},
-                             steps::cubic{side, 1.0f, side * 0.2f, 5.0f, tip, 6.0f},
-                             steps::line{side + (mine ? -1.0f : 1.0f), 6.0f}, steps::close{}}},
-                0.0f, true}}};
-    }
     void grow_tail(bool mine) {
       const scene::Corners squared = mine ? scene::Corners{12.0f, 12.0f, 0.0f, 12.0f} : scene::Corners{12.0f, 12.0f, 12.0f, 0.0f};
       // The bubble's own fill and its tail one shape (skiff's Tail): a
       // see-through bubble is so once, with no seam -- a tail of its own
       // over the bubble's edge showed both through, darker where they met.
-      if (!parts.frost) {
-        fState.apply({.corners = squared,
-                      .tail = scene::Tail{.side = mine ? scene::TailSide{scene::tail_side::right{}} : scene::TailSide{scene::tail_side::left{}}}});
-        return;
-      }
-      // Frosted, the fill is the pane's, under the bubble's own: the tail a
-      // shape of its own, in the pane's tint.
-      parts.tail.emplace(tail_shape(mine), plate);
-      parts.tail->apply({.place = mine ? scene::anchor::kBottomRight : scene::anchor::kBottomLeft,
-                         .x = mine ? kPadX + 10.0f : -(kPadX + 10.0f),
-                         .y = kPadY,
-                         .width = 10.0f,
-                         .height = 12.0f});
-      fState.apply({.corners = squared});
+      fState.apply({.corners = squared,
+                    .tail = scene::Tail{.side = mine ? scene::TailSide{scene::tail_side::right{}} : scene::TailSide{scene::tail_side::left{}}}});
+      // The backdrop and its tint use the same shape, including its tail.
       this->sync_frost();
     }
     // Before its first layout, where the time goes is guessed from the text
@@ -527,7 +482,7 @@ struct message_bubble : nodes::Stack {
     // checks the guess, above.
     bool guessed = false;
     void guess_time(skia::SkFont& font) {
-      auto& [frost, name, forwarded, quote, picture, their_sticker, album, file, text, blocks, cards, preview, reactions, thread, protocol_lines, their_view, time, inline_time, tail] = parts;
+      auto& [frost, name, forwarded, quote, picture, their_sticker, album, file, text, blocks, preview, reactions, thread, protocol_lines, their_view, time, inline_time] = parts;
       if (std::exchange(guessed, true) || text.text().empty())
         return;
       const skiff::paint::Painter p(nullptr, font);
@@ -553,6 +508,10 @@ struct message_bubble : nodes::Stack {
     // Frosted as much as `blur` says: a pane behind all of it, filling it to
     // its edges, in its corners.
     void frosted(float blur) {
+      if (parts.frost) {
+        parts.frost->setBlur(blur);
+        return;
+      }
       parts.frost.emplace(frost_source{}, blur);
       parts.frost->apply({.place = scene::anchor::kTopLeft, .fill = true, .margin = {-kPadY, -kPadX, -kPadY, -kPadX},
                           .cornerRadius = 12.0f});
@@ -570,16 +529,27 @@ struct message_bubble : nodes::Stack {
         return;
       const scene::Margin& pad = fState.fPadding;
       parts.frost->apply({.margin = {-pad.fTop, -pad.fRight, -pad.fBottom, -pad.fLeft}, .cornerRadius = fState.fCornerRadius,
-                          .corners = fState.fCorners});
+                          .corners = fState.fCorners, .tail = fState.fTail});
     }
-    body_column(const palette& colours, const looks_shown& looks, bool mine, std::string said, std::string when)
-        : outgoing(mine),
-          parts{.text = nodes::BasicText<message_pictures>(std::move(said), 13.0f, colours.text),
-                .time = nodes::Text(when, 11.0f, mine ? colours.sent_time : colours.dim),
-                .inline_time = nodes::Text(when, 11.0f, mine ? colours.sent_time : colours.dim)},
+    body_column(const palette &colours, const looks_shown &looks, bool mine,
+                std::string said, std::string when)
+        : Stacked(skiff::compose::vbox(2.0f, {})), outgoing(mine),
+          parts{.text = skiff::compose::styled(
+                    {.maxWidth = kMaxWidth},
+                    wrapped(nodes::BasicText<message_pictures>(
+                        std::move(said), 13.0f, colours.text))),
+                .time = skiff::compose::styled(
+                    {.alignSelf = scene::align::kEnd},
+                    nodes::Text(when, 11.0f,
+                                mine ? colours.sent_time : colours.dim)),
+                .inline_time = skiff::compose::visible(
+                    false,
+                    skiff::compose::styled(
+                        {.place = scene::anchor::kBottomRight, .y = kTimeLower},
+                        nodes::Text(when, 11.0f,
+                                    mine ? colours.sent_time : colours.dim)))},
           plate(plate_of(colours, looks.bubbles, mine)) {
-      auto& [frost, name, forwarded, quote, picture, their_sticker, album, file, text, blocks, cards, preview, reactions, thread, protocol_lines, their_view, time, inline_time, tail] = parts;
-      this->setGap(2.0f);
+      auto& [frost, name, forwarded, quote, picture, their_sticker, album, file, text, blocks, preview, reactions, thread, protocol_lines, their_view, time, inline_time] = parts;
       fState.apply({.autoSize = scene::axes::kBoth, .maxWidth = kMaxWidth + 2.0f * kPadX,
                     .padding = {kPadY, kPadX, kPadY, kPadX}, .cornerRadius = 12.0f, .background = plate});
       // Frosted: what is behind blurred under the tint; glass: a light edge.
@@ -589,37 +559,42 @@ struct message_bubble : nodes::Stack {
                                        },
                                        [](const auto&) {}},
                     looks.bubbles.kind);
-      text.setWrapped(true);
       text.setShrinksToLines(true);
       // Wrapped at the bubble's width however wide the room it is first
       // measured in: not at the chat's, the bubble then capped narrower
       // than its lines.
-      text.apply({.maxWidth = kMaxWidth});
-      time.apply({.alignSelf = scene::align::kEnd});
+
       // Shown once the last line is found to leave room for it.
-      inline_time.apply({.place = scene::anchor::kBottomRight, .y = kTimeLower});
-      inline_time.setVisible(false);
     }
   };
 
   // tdesktop's bar over the first unread: its words in the middle of a band
   // the width of the chat.
-  struct unread_bar_t : nodes::Stack {
+  struct unread_bar_t : skiff::compose::Stacked {
     static constexpr float kHeight = 26.0f;
     struct parts_t {
       nodes::Text label;
     } parts;
-    explicit unread_bar_t(const palette& colours) : parts{.label = nodes::Text("Unread messages", 13.0f, colours.dim, true)} {
-      fStack.justify = nodes::justify::middle{};
-      fState.apply({.place = scene::anchor::kTopLeft, .y = -(kHeight + 4.0f), .fillX = true, .height = kHeight,
-                    .background = colours.sidebar});
-      parts.label.apply({.alignSelf = scene::align::kMiddle});
+    explicit unread_bar_t(const palette &colours)
+        : Stacked(skiff::compose::justified(
+              skiff::compose::vbox(0.0f, {.place = scene::anchor::kTopLeft,
+                                          .y = -(kHeight + 4.0f),
+                                          .fillX = true,
+                                          .height = kHeight,
+                                          .background = colours.sidebar}),
+              nodes::justify::middle{})),
+          parts{.label = skiff::compose::styled(
+                    {.alignSelf = scene::align::kMiddle},
+                    nodes::Text("Unread messages", 13.0f, colours.dim, true))} {
     }
   };
   // The colours it is made in: handed down, kept for what it makes later.
   const palette* colours_ = nullptr;
   // The looks shown: the program's.
   const looks_shown* looks_ = nullptr;
+  // The inherited blur used to make the panes: changing the window's
+  // Frosted setting changes a row even when its message stays the same.
+  double frost_shown = 10.0;
   // What the window's parts share: the accounts' protocol states.
   const ui_shared* shared_ = nullptr;
   struct parts_t {
@@ -680,13 +655,31 @@ struct message_bubble : nodes::Stack {
       : message_bubble(n, in, with_actor(in, given), first_of_run, last_of_run, now, show_events, show_preview, made_t{}) {}
   // What the one above makes it of: the message with its pills.
   struct made_t {};
-  message_bubble(const needs& n, const conversation& in, const message& said, bool first_of_run, bool last_of_run, const model* now,
+  message_bubble(const needs &n, const conversation &in, const message &said,
+                 bool first_of_run, bool last_of_run, const model *now,
                  bool show_events, bool show_preview, made_t)
-      : said(said), first(first_of_run), last(last_of_run), message_id(said.id), plain(said.body.plain),
-        outgoing(said.outgoing), sender(said.sender), colours_(n.colours), looks_(n.looks), shared_(n.shared),
-        parts{.face = avatar_mark(said.sender, sender_name(in, said.sender), kAvatar),
-              .body = body_column(*n.colours, *n.looks, said.outgoing, said.body.plain, mark_of(said) + clock_of(said.at)),
-              .swipe_mark = nodes::Icon(shape_of(icon::back{}), n.colours->dim)} {
+      : Stacked(skiff::compose::hbox(8.0f, {})), said(said),
+        first(first_of_run), last(last_of_run), message_id(said.id),
+        plain(said.body.plain), outgoing(said.outgoing), sender(said.sender),
+        colours_(n.colours), looks_(n.looks), frost_shown(n.looks->window.frost), shared_(n.shared),
+        parts{.face = skiff::compose::styled(
+                  {.place = scene::anchor::kBottomLeft,
+                   .x = -(kAvatar + 8.0f),
+                   .y = -1.0f},
+                  avatar_mark(said.sender, sender_name(in, said.sender),
+                              kAvatar)),
+              .body = body_column(*n.colours, *n.looks, said.outgoing,
+                                  said.body.plain,
+                                  mark_of(said) + clock_of(said.at)),
+              .swipe_mark = skiff::compose::styled(
+                  {.place = scene::anchor::kCentreRight,
+                   .x = -6.0f,
+                   .width = 28.0f,
+                   .height = 28.0f,
+                   .cornerRadius = 14.0f,
+                   .background = colours_->tile,
+                   .alpha = 0.0f},
+                  nodes::Icon(shape_of(icon::back{}), n.colours->dim))} {
     // Drawn once and played back until something in it changes: a strip of
     // the list repainted went through every part of every message in it.
     // Not one with a picture or a file: a loader turns in it while it comes,
@@ -699,15 +692,7 @@ struct message_bubble : nodes::Stack {
                                        looks_->bubbles.kind);
     fState.setRecorded(!said.attachment && said.album.empty() && !frosted);
     auto& [face, body, swipe_mark, unread_bar, readers] = parts;
-    swipe_mark.apply({.place = scene::anchor::kCentreRight,
-                      .x = -6.0f,
-                      .width = 28.0f,
-                      .height = 28.0f,
-                      .cornerRadius = 14.0f,
-                      .background = colours_->tile,
-                      .alpha = 0.0f});
-    this->setHorizontal();
-    this->setGap(8.0f);
+
     // As tdesktop: a sender's messages one under the other nearly touch;
     // where the sender changes, a gap.
     const bool group = is_group(in);
@@ -729,7 +714,6 @@ struct message_bubble : nodes::Stack {
       body.apply({.fillX = true, .maxWidth = 0.0f, .cornerRadius = 0.0f, .background = skia::SkColor{0}});
     face.setVisible(with_face);
     // Placed in the content box: back over the padding kept for it.
-    face.apply({.place = scene::anchor::kBottomLeft, .x = -(kAvatar + 8.0f), .y = -1.0f});
     if (!(group && !outgoing && last_of_run))
       face.fState.setAlpha(0.0f);  // its room kept, so the run's bubbles line up
     else
@@ -866,13 +850,26 @@ struct message_bubble : nodes::Stack {
     // its href says, and the addresses in a plain text.
     // Removed, but its content fetched back by a moderator (MSC2815): the
     // kept content shown, still marked removed.
-    const mux::body& words = said.redacted && said.unredacted ? *said.unredacted : said.body;
+    mux::body readable = said.redacted && said.unredacted ? *said.unredacted : said.body;
+    if (!said.reaction_key.empty() && said.service) {
+      std::optional<std::string> label;
+      if (said.replies_to)
+        if (const auto* parent = held_message(in, *said.replies_to))
+          if (const auto event = std::ranges::find(parent->reaction_events, said.id, &message::reaction_event::event);
+              event != parent->reaction_events.end()) label = event->shortcode;
+      auto reaction = reaction_body_of(said.reaction_key, in.emotes, label);
+      if (reaction.html) {
+        readable.plain = sender_name(in, said.sender) + " reacted " + reaction.plain;
+        readable.html = std::format(R"(<a href="https://matrix.to/#/{}">{}</a> reacted )",
+            chevron::escaped(said.sender), chevron::escaped(sender_name(in, said.sender))) + *reaction.html;
+      }
+    }
     mentioned shown;
-    if (words.html) {
-      auto read = read_html(*words.html);
-      shown = with_mentions(std::move(read.text), std::move(read.spans), in, now, std::move(read.styles));
+    if (readable.html) {
+      auto read = read_html(*readable.html);
+      shown = with_mentions(std::move(read.text), std::move(read.spans), in, now, std::move(read.styles), std::move(read.disclosures));
     } else {
-      shown = with_mentions(words.plain, link_spans_in(words.plain), in, now);
+      shown = with_mentions(readable.plain, link_spans_in(readable.plain), in, now);
     }
     rooms_waiting = std::move(shown.waiting);
     rooms_unknown = std::move(shown.unknown);
@@ -894,17 +891,23 @@ struct message_bubble : nodes::Stack {
       // The quote's colour: the accent on theirs; on one's own, the text's,
       // as tdesktop's outgoing blockquote -- not the accent on its accent.
       const skia::SkColor quote_colour = outgoing ? colours_->text : colours_->accent;
-      // Cut at its blocks of code: the first words here, each block with the
-      // words after it below.
-      const std::vector<text_piece> pieces = pieces_of(shown.text, shown.links, shown.styles);
+      // Keep words, code blocks and link cards in their original order.
+      const std::vector<text_piece> pieces = pieces_of(shown.text, shown.links, shown.styles, shown.cards, shown.disclosures);
       body.parts.text.setText(pieces.front().text);
       body.parts.text.setLinks(pieces.front().links, colours_->accent);
       body.parts.text.setStyles(pieces.front().styles, quote_colour);
       body.parts.text.setVisible(!pieces.front().text.empty());
-      for (std::size_t i = 1; i + 1 < pieces.size(); i += 2)
-        body.parts.blocks.emplace_back(*colours_, pieces[i], &pieces[i + 1], quote_colour, quote_colour, colours_->text);
-      for (const auto& [url, room] : shown.cards)
-        body.parts.cards.push_back(card_of(*colours_, url, room, now));
+      for (std::size_t i = 1; i + 1 < pieces.size(); i += 2) {
+        if (pieces[i].disclosure)
+          body.parts.blocks.emplace_back(std::in_place_type<disclosure_piece_t>,
+              disclosure_piece(*colours_, shown, pieces[i + 1], now, quote_colour));
+        else if (pieces[i].card)
+          body.parts.blocks.emplace_back(std::in_place_type<link_piece_t>,
+              link_piece(*colours_, *pieces[i].card, pieces[i + 1], now, quote_colour));
+        else
+          body.parts.blocks.emplace_back(std::in_place_type<code_piece_t>,
+              code_piece(*colours_, pieces[i], pieces[i + 1], quote_colour, quote_colour, colours_->text));
+      }
     }
     // The last of a run: its bottom corner on the sender's side squared and
     // a tail grown from it, as Telegram draws one -- not for a line of what
@@ -934,12 +937,13 @@ struct message_bubble : nodes::Stack {
         if (line.empty())
           line = is_picture(found->attachment->kind) ? std::string("Photo") : found->attachment->name;
       }
-      std::ranges::replace(line, '\n', ' ');
+      if (!header_quote)
+        std::ranges::replace(line, '\n', ' ');
       const bool with_picture = picture.has_value();
-      body.parts.quote.emplace(*colours_, known ? avatar_colour(found->sender) : colours_->accent,
+      body.parts.quote.emplace(quote_row(*colours_, known ? avatar_colour(found->sender) : colours_->accent,
                          known ? (found->outgoing ? std::string("You") : sender_name(in, found->sender))
                                : std::string("A message"),
-                         std::move(line), header_quote ? std::nullopt : std::move(picture), header_quote.has_value());
+                         std::move(line), header_quote ? std::nullopt : std::move(picture), header_quote.has_value(), known && found->sticker));
       // The quote spans its bubble, as tdesktop's; the bubble is at least as
       // wide as the quote asks -- its name and its line, the line counted up
       // to maxSignatureSize (240), so that a short answer to a long message
@@ -947,13 +951,14 @@ struct message_bubble : nodes::Stack {
       float asks = 160.0f;
       if (skia::SkFont* font = skiff::paint::defaultFont()) {
         skiff::paint::Painter measure(nullptr, *font);
-        const auto& texts = body.parts.quote->parts.texts.parts;
+        const auto& texts = std::get<2>(body.parts.quote->fParts).fParts;
+        const auto& name = std::get<0>(texts).fParts;
         // The name line with "quoted" after it, whole: the bubble widened for
         // the tag, rather than the tag drawn over the name.
-        const auto& tag = texts.who.parts.tag;
-        const float who = measure.measure(texts.who.parts.who.text(), 13.0f) +
+        const auto& tag = std::get<1>(name);
+        const float who = measure.measure(std::get<0>(name).text(), 13.0f) +
                           (tag ? 8.0f + std::ceil(measure.measure(tag->text(), 11.0f)) : 0.0f);
-        const float words = std::max(who, std::min(measure.measure(texts.said.text(), 13.0f), kReplyLineMax));
+        const float words = std::max(who, std::min(measure.measure(std::get<1>(texts).text(), 13.0f), kReplyLineMax));
         const float around = (with_picture ? 7.0f + 32.0f + 4.0f : 11.0f) + 6.0f + 2.0f * kPadX;
         asks = std::min(std::ceil(words) + around, kMaxWidth + 2.0f * kPadX);
       }
@@ -986,7 +991,8 @@ struct message_bubble : nodes::Stack {
       std::string line = std::format("\U0001F4AC {} {}", summary.count, summary.count == 1 ? "reply" : "replies");
       if (!summary.last_text.empty())
         line += std::format(" \u00b7 {}: {}", sender_name(in, summary.last_sender), summary.last_text);
-      std::ranges::replace(line, '\n', ' ');
+      if (!header_quote)
+        std::ranges::replace(line, '\n', ' ');
       body.parts.thread.emplace(std::move(line), 13.0f, colours_->accent, true);
       body.parts.thread->setElided(true);
       body.parts.thread->apply({.fillX = true, .margin = {4.0f, 0.0f, 0.0f, 0.0f}});
@@ -1003,15 +1009,18 @@ struct message_bubble : nodes::Stack {
         },
         protocol_state_of(*shared_, in.id.account));
     if (!said.reactions.empty()) {
-      body.parts.reactions.emplace();
+      body.parts.reactions.emplace(reaction_row_of());
       for (const auto& [key, who] : said.reactions)
         if (!who.empty())
-          body.parts.reactions->chips().emplace_back(*colours_, *looks_, key, who.size(), who.contains(said.in.account.address), [&] {
+          reaction_chips(*body.parts.reactions).push_back(reaction_chip(*colours_, *looks_, message_id, key, who.size(), who.contains(said.in.account.address), in.emotes, [&] {
             std::vector<std::pair<std::string, std::string>> people;
             for (const std::string& one : who)
               people.emplace_back(one, sender_name(in, one));
             return people;
-          }());
+          }(), [&]() -> std::optional<std::string> {
+            const auto found = std::ranges::find_if(said.reaction_events, [&](const auto& event) { return event.key == key && event.shortcode.has_value(); });
+            return found == said.reaction_events.end() ? std::nullopt : found->shortcode;
+          }()));
     }
   }
 

@@ -24,6 +24,13 @@ export namespace mux {
 
 namespace change {
 
+struct notifications_changed {
+  account_id by;
+  std::optional<std::string> room;
+  notification_choices choices;
+  bool sound_shared = true;
+};
+
 struct connection_changed {
   account_id account;
   connection_t state;
@@ -204,6 +211,7 @@ struct message_edited {
   // When it was edited, where the protocol says: what replaced the text
   // before it, in the message's edit history. Now, where it does not.
   std::chrono::sys_time<std::chrono::milliseconds> at{};
+  std::string event;  // the replacement event, not the original message
 };
 
 // A message that came encrypted and was read so.
@@ -267,6 +275,7 @@ struct reaction_changed {
   std::chrono::sys_time<std::chrono::milliseconds> at{};
   // Come as it happened -- not read back from the history.
   bool live = false;
+  std::optional<std::string> shortcode;
 };
 
 // A message that mentions the user, come as it happened.
@@ -411,7 +420,7 @@ struct call_servers {
 // The changes every protocol says, here; and each protocol's own, from its
 // change list -- changes_type(state), found by ADL in its folder (mux.proto.
 // <p>.changes), none where it gives none -- all one variant.
-using core_changes = spl::variant<change::protocol_state_changed, change::trust_changed, change::devices_listed, change::message_encrypted, change::connection_changed, change::refused, change::notice, change::account_removed, change::conversation_updated, change::conversation_removed, change::presence_changed, change::message_added, change::message_edited, change::message_redacted, change::message_unredacted, change::message_acknowledged, change::delivery_changed, change::message_discarded, change::reaction_changed, change::typing_changed, change::history_position, change::event_missing, change::members_changed, change::avatar_loaded, change::receipts_changed, change::window_opened, change::window_extended, change::media_progress, change::room_created, change::preview_loaded, change::room_previewed, change::mentioned, change::marks_shown, change::mark_taken, change::marks_seen, change::reacted_to_mine, change::directory_listed, change::people_found, change::profile_found, change::threads_listed, change::call_signalled, change::call_servers>;
+using core_changes = spl::variant<change::notifications_changed, change::protocol_state_changed, change::trust_changed, change::devices_listed, change::message_encrypted, change::connection_changed, change::refused, change::notice, change::account_removed, change::conversation_updated, change::conversation_removed, change::presence_changed, change::message_added, change::message_edited, change::message_redacted, change::message_unredacted, change::message_acknowledged, change::delivery_changed, change::message_discarded, change::reaction_changed, change::typing_changed, change::history_position, change::event_missing, change::members_changed, change::avatar_loaded, change::receipts_changed, change::window_opened, change::window_extended, change::media_progress, change::room_created, change::preview_loaded, change::room_previewed, change::mentioned, change::marks_shown, change::mark_taken, change::marks_seen, change::reacted_to_mine, change::directory_listed, change::people_found, change::profile_found, change::threads_listed, change::call_signalled, change::call_servers>;
 namespace changes_defaults {
 constexpr type_tag<change_list<>> changes_type(const auto&) { return {}; }
 }  // namespace changes_defaults
@@ -457,6 +466,15 @@ namespace model_defaults {
 inline void changed_in(auto&, const auto&) {}
 }  // namespace model_defaults
 
+// The chats, as the model keeps them: every account, by its id, and each
+// account's conversations, by theirs -- lists of a skiff model, changed by
+// its edits, so that what shows one chat is told of that chat's changes.
+struct chats_root {
+  skiff::model::Keyed<account_id, account> accounts;
+};
+struct chats_reactions {};
+using chats_model = skiff::model::Model<chats_root, chats_reactions>;
+
 class model {
  public:
   // A message deleted is shown where it was, marked -- or taken out.
@@ -468,7 +486,10 @@ class model {
   // asked this session.
   std::map<std::string, std::string, std::less<>> rooms_found;
 
-  const std::map<account_id, account>& accounts() const noexcept { return accounts_; }
+  const skiff::model::Keyed<account_id, account>& accounts() const noexcept { return chats_.root().accounts; }
+  // The chats as the skiff model holds them: what binds to them.
+  [[nodiscard]] const chats_model& chats() const noexcept { return chats_; }
+  [[nodiscard]] chats_model& chats() noexcept { return chats_; }
   // What an account knows of a person's encryption identity, where it said.
   // How many times what is known of anyone's identity changed: what shows
   // it is made again when it moves.
@@ -484,28 +505,25 @@ class model {
     return found == trust_.end() ? std::nullopt : std::optional<trust_t>(found->second);
   }
 
-  account& add(account_id id, std::string display_name = {}) {
-    account& made = accounts_[id];
-    made.id = std::move(id);
-    made.display_name = std::move(display_name);
-    return made;
+  void add(account_id id, std::string display_name = {}) {
+    this->in_account(id, [&](account& made) { made.display_name = std::move(display_name); });
   }
 
   // A chat, where the model has it: as const as the model it is asked of.
-  template <class Self>
-  [[nodiscard]] auto* chat_in(this Self& self, const conversation_id& id) {
-    using found_t = std::conditional_t<std::is_const_v<Self>, const conversation, conversation>;
-    const auto found = self.accounts_.find(id.account);
-    if (found == self.accounts_.end())
-      return static_cast<found_t*>(nullptr);
-    const auto in = found->second.conversations.find(id.id);
-    return in == found->second.conversations.end() ? static_cast<found_t*>(nullptr) : &in->second;
+  [[nodiscard]] const conversation* chat_in(const conversation_id& id) const {
+    const account* found = this->accounts().find(id.account);
+    return found == nullptr ? nullptr : found->conversations.find(id.id);
   }
   const conversation* find(const conversation_id& id) const { return this->chat_in(id); }
   // For a protocol's own change (changed_in): a chat it changes, where the
   // model has it, and a message in it -- a room's part, a poll's counts in a
-  // message's part.
-  [[nodiscard]] conversation* chat_to_change(const conversation_id& id) { return this->chat_in(id); }
+  // message's part. Only while the change is applied: the edit it is made in.
+  [[nodiscard]] conversation* chat_to_change(const conversation_id& id) {
+    if (editing_ == nullptr)
+      return nullptr;
+    account* found = editing_->accounts.find(id.account);
+    return found == nullptr ? nullptr : found->conversations.find(id.id);
+  }
   [[nodiscard]] message* message_to_change(const conversation_id& in, std::string_view id) {
     conversation* chat = this->chat_to_change(in);
     if (chat == nullptr)
@@ -518,17 +536,46 @@ class model {
     spl::visit([this](const auto& one) { on(one); }, what);
   }
 
+  // Typing is transient. Schedule its expiry without polling or drawing frames.
+  [[nodiscard]] double typing_wake_in() const {
+    if (typing_until_.empty())
+      return std::numeric_limits<double>::infinity();
+    const auto next = std::ranges::min_element(typing_until_, {}, [](const auto& one) { return one.second; });
+    return std::max(0.0, std::chrono::duration<double, std::milli>(next->second - std::chrono::steady_clock::now()).count());
+  }
+  bool expire_typing(std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()) {
+    bool changed = false;
+    for (auto it = typing_until_.begin(); it != typing_until_.end();) {
+      if (it->second > now) {
+        ++it;
+        continue;
+      }
+      if (const auto* chat = find(it->first); chat && !chat->typing.empty()) {
+        this->in_chat(it->first, [](conversation& chat) { chat.typing.clear(); });
+        changed = true;
+      }
+      it = typing_until_.erase(it);
+    }
+    return changed;
+  }
+
   // The user has read a chat up to a message: kept, sent or not.
   void read_up_to(const conversation_id& id, std::string message) {
-    if (const auto found = accounts_.find(id.account); found != accounts_.end())
-      if (const auto in = found->second.conversations.find(id.id); in != found->second.conversations.end())
-        in->second.read_up_to = std::move(message);
+    if (this->chat_in(id) != nullptr)
+      this->in_chat(id, [&](conversation& where) {
+        if (where.read_up_to) {
+          const auto before = std::ranges::find(where.timeline, *where.read_up_to, &mux::message::id);
+          const auto after = std::ranges::find(where.timeline, message, &mux::message::id);
+          if (before != where.timeline.end() && after != where.timeline.end() && after < before)
+            return;
+        }
+        where.read_up_to = std::move(message);
+      });
   }
   // A chat read now: the last to lose its history.
   void touch(const conversation_id& id) {
-    if (const auto found = accounts_.find(id.account); found != accounts_.end())
-      if (const auto in = found->second.conversations.find(id.id); in != found->second.conversations.end())
-        in->second.read_at = ++read_tick_;
+    if (this->chat_in(id) != nullptr)
+      this->in_chat(id, [&](conversation& where) { where.read_at = ++read_tick_; });
   }
   // The messages held, least recently used first out: past `budget` in
   // all, the chats read longest ago keep only their last message -- what
@@ -537,9 +584,9 @@ class model {
   // read, keeps all of its.
   void trim(std::size_t budget, const std::optional<conversation_id>& keep) {
     std::size_t held = 0;
-    std::vector<conversation*> order;
-    for (auto& [id, one] : accounts_)
-      for (auto& [key, chat] : one.conversations) {
+    std::vector<const conversation*> order;
+    for (const auto& [id, one] : this->accounts())
+      for (const auto& [key, chat] : one.conversations) {
         held += chat.timeline.size();
         if (chat.timeline.size() > 1 && (!keep || chat.id != *keep))
           order.push_back(&chat);
@@ -547,30 +594,55 @@ class model {
     if (held <= budget)
       return;
     std::ranges::sort(order, {}, &conversation::read_at);
-    for (conversation* chat : order) {
+    std::vector<conversation_id> trimmed;
+    for (const conversation* chat : order) {
       if (held <= budget)
         break;
       held -= chat->timeline.size() - 1;
-      // Its newest kept -- the newest there is, where it is a window away
-      // from it, which is let go with the rest: it is live again.
-      const message last = newest(*chat) ? *newest(*chat) : chat->timeline.back();
-      chat->timeline.assign(1, last);
-      chat->detached = false;
-      chat->future_from.reset();
-      chat->history_from = std::string();  // from the newest
+      trimmed.push_back(chat->id);
     }
+    // Each trimmed in its place: its newest kept -- the newest there is,
+    // where it is a window away from it, which is let go with the rest: it
+    // is live again.
+    chats_.beginBatch();
+    for (const conversation_id& id : trimmed)
+      this->in_chat(id, [](conversation& chat) {
+        const message last = newest(chat) ? *newest(chat) : chat.timeline.back();
+        chat.timeline.assign(1, last);
+        chat.detached = false;
+        chat.future_from.reset();
+        chat.history_from = std::string();  // from the newest
+      });
+    chats_.endBatch();
+  }
+  // Changes applied as one batch: what binds to the model told once, after.
+  template <std::ranges::input_range Changes>
+  void apply_all(const Changes& all) {
+    chats_.beginBatch();
+    for (const change_t& one : all)
+      this->apply(one);
+    chats_.endBatch();
   }
 
  private:
-  account& of(const account_id& id) {
-    account& made = accounts_[id];
-    made.id = id;
-    return made;
+  // An account changed in its place, made where it is not there yet.
+  template <class F>
+  void in_account(const account_id& id, F&& change) {
+    if (!this->accounts().contains(id))
+      (void)chats_.apply(skiff::model::put<account>(id, account{.id = id}));
+    (void)chats_.apply(skiff::model::edit(skiff::model::placeOf<account, chats_root>(id), [&](account& kept) { change(kept); }));
   }
-  conversation& of(const conversation_id& id) {
-    conversation& made = of(id.account).conversations[id.id];
-    made.id = id;
-    return made;
+  // A chat changed in its place, made where it is not there yet: only it is
+  // told of the change, nothing else in the model.
+  template <class F>
+  void in_chat(const conversation_id& id, F&& change) {
+    if (this->chat_in(id) == nullptr)
+      this->in_account(id.account, [&](account& kept) {
+        if (!kept.conversations.contains(id.id))
+          kept.conversations.put(id.id, conversation{.id = id});
+      });
+    (void)chats_.apply(skiff::model::edit(skiff::model::placeOf<conversation, chats_root>(id.account, id.id),
+                                          [&](conversation& kept) { change(kept); }));
   }
   // The copy of the newest kept while the chat is a window elsewhere, where it
   // is the message changed: changed as the timeline's is, the list saying
@@ -620,12 +692,14 @@ class model {
   }
 
   void on(const change::connection_changed& one) {
-    account& kept = of(one.account);
-    kept.state = one.state;
+    this->in_account(one.account, [&](account& kept) { kept.state = one.state; });
   }
-  void on(const change::account_removed& one) { accounts_.erase(one.account); }
+  void on(const change::account_removed& one) {
+    std::erase_if(typing_until_, [&](const auto& pending) { return pending.first.account == one.account; });
+    (void)chats_.apply(skiff::model::take<account>(one.account));
+  }
   void on(const change::conversation_updated& one) {
-    conversation& kept = of(one.id);
+    this->in_chat(one.id, [&](conversation& kept) {
     kept.kind = one.kind;
     kept.name = one.name;
     kept.avatar = one.avatar;
@@ -645,9 +719,16 @@ class model {
     kept.theirs = one.theirs;
     kept.other_aliases = one.other_aliases;
     kept.invite = one.invite;
+  });
   }
-  void on(const change::conversation_removed& one) { of(one.id.account).conversations.erase(one.id.id); }
-  void on(const change::presence_changed& one) { of(one.account).presences[one.contact] = one.now; }
+  void on(const change::conversation_removed& one) {
+    typing_until_.erase(one.id);
+    if (this->accounts().contains(one.id.account))
+      this->in_account(one.id.account, [&](account& kept) { (void)kept.conversations.take(one.id.id); });
+  }
+  void on(const change::presence_changed& one) {
+    this->in_account(one.account, [&](account& kept) { kept.presences[one.contact] = one.now; });
+  }
   // Reactions come before the message they are on is here (it is further
   // back, or in a thread not loaded): kept until it comes, then put on it.
   // Dropped, they were lost for good -- the event seen in the history, the
@@ -672,10 +753,36 @@ class model {
         (!show_deleted || one.message.outgoing ||
          (one.message.body.plain.empty() && !one.message.body.html && !one.message.attachment)))
       return;
-    conversation& where = of(one.message.in);
+    this->in_chat(one.message.in, [&](conversation& where) {
+      auto merged = one;
+      if (const auto quoted = where.quoted.find(one.message.id); quoted != where.quoted.end()) {
+        for (const auto& [key, who] : quoted->second.reactions)
+          merged.message.reactions[key].insert(who.begin(), who.end());
+        for (const auto& event : quoted->second.reaction_events)
+          if (!std::ranges::contains(merged.message.reaction_events, event)) merged.message.reaction_events.push_back(event);
+      }
+      this->add_to(where, merged);
+    });
+  }
+  static bool pending(const message& one) {
+    return spl::visit(spl::overloaded{[](const delivery::sending&) { return true; }, [](const auto&) { return false; }},
+                      one.delivery);
+  }
+  static bool message_before(const message& a, const message& b) {
+    if (pending(a) != pending(b))
+      return !pending(a);
+    return a.at < b.at;
+  }
+  void add_to(conversation& where, const change::message_added& one) {
+    if (spl::visit(spl::overloaded{[](placement::at_end) { return true; }, [](const auto&) { return false; }}, one.where)) {
+      std::erase(where.typing, one.message.sender);
+      if (where.typing.empty())
+        typing_until_.erase(one.message.in);
+    }
     if (message* kept = one.message.id.empty() ? nullptr : message_in(where, one.message.id)) {
       // Come again -- a page, the disk, a window around it: its reactions
       // kept, which what came may not carry.
+      const bool moved = kept->at != one.message.at || pending(*kept) != pending(one.message);
       auto reactions = std::move(kept->reactions);
       auto reaction_events = std::move(kept->reaction_events);
       *kept = one.message;
@@ -691,6 +798,8 @@ class model {
       if (one.message.thread)
         if (const auto found = where.threads.find(*one.message.thread); found != where.threads.end())
           std::ranges::stable_sort(found->second, {}, &message::at);
+      if (!one.message.thread && moved)
+        std::ranges::stable_sort(where.timeline, message_before);
       return;
     }
     // An answer in a thread: with the thread's, in time's order, not in the
@@ -705,41 +814,19 @@ class model {
     }
     // In the timeline now: what was fetched for a quote is not needed.
     where.quoted.erase(one.message.id);
-    // In the timeline by its time, wherever it was said to go: the newest at
-    // the end as they come, history before the rest -- but one that is older
-    // than its place says (a sliding sync sending a room's last events again
-    // as it is followed, a page arriving after newer ones) goes where its
-    // time puts it, not after the newest, shown as new until the chat was
-    // made again.
-    const auto in_time = [&](auto at) {
+    // Both history and live events use the same chronological insertion.
+    // A linear search also tolerates clock-skewed entries from an older client;
+    // upper_bound requires a sorted range. Unconfirmed local echoes stay last.
+    const auto in_time = [&] {
       auto& timeline = where.timeline;
-      // Answered already by something shown -- come late, after the reply to
-      // it (a sync giving a room's newest first, the rest after): before the
-      // first answer, whatever the clocks say. Within the minutes allowed
-      // for clocks it went at the end, below the reply that quoted it.
-      if (const auto answer = std::ranges::find_if(timeline, [&](const message& said) {
-            return said.replies_to == one.message.id;
-          });
-          answer != timeline.end()) {
-        timeline.insert(answer, one.message);
+      if (timeline.empty() || !message_before(one.message, timeline.back())) {
+        timeline.push_back(one.message);
         return;
       }
-      const auto by_time = [&] {
-        timeline.insert(std::ranges::upper_bound(timeline, one.message.at, {}, &message::at), one.message);
-      };
-      // Live, a little older than the newest: as the server sends it, after
-      // it. Each server stamps its own users' messages by its own clock, and
-      // a reply from one a few seconds behind went above what it answered.
-      // Only what is older by more than any clock is off goes by its time.
-      constexpr std::chrono::minutes kClocksDiffer{2};
-      if (timeline.empty())
-        timeline.push_back(one.message);
-      else if (at == timeline.end() && one.message.at + kClocksDiffer >= timeline.back().at)
-        timeline.push_back(one.message);
-      else if (at == timeline.begin() && one.message.at <= timeline.front().at)
-        timeline.insert(timeline.begin(), one.message);
-      else
-        by_time();
+      const auto at = std::ranges::find_if(timeline, [&](const message& said) {
+        return message_before(one.message, said);
+      });
+      timeline.insert(at, one.message);
     };
     spl::visit(spl::overloaded{[&](placement::at_end) {
                             if (!where.latest || one.message.at >= where.latest->at)
@@ -758,28 +845,10 @@ class model {
                               where.timeline.push_back(one.message);
                               return;
                             }
-                            // One's own, from the server, while some of one's
-                            // own are still being sent: before the first of
-                            // those -- it was sent before them. After them, a
-                            // message sent a second before another, its copy
-                            // come by the sync unmatched to its echo, stood
-                            // below the next one until that one's came too.
-                            if (one.message.outgoing) {
-                              const auto pending = std::ranges::find_if(where.timeline, [](const message& said) {
-                                return said.outgoing &&
-                                       spl::visit(spl::overloaded{[](const delivery::sending&) { return true; },
-                                                                        [](const auto&) { return false; }},
-                                                     said.delivery);
-                              });
-                              if (pending != where.timeline.end()) {
-                                where.timeline.insert(pending, one.message);
-                                return;
-                              }
-                            }
-                            in_time(where.timeline.end());
+                            in_time();
                           },
-                          [&](placement::at_start) { in_time(where.timeline.begin()); },
-                          [&](placement::in_window) { in_time(where.timeline.end()); },
+                          [&](placement::at_start) { in_time(); },
+                          [&](placement::in_window) { in_time(); },
                           [&](placement::aside) {
                             // Held to a number: what nothing here quotes or
                             // pins goes first, then one more -- never all at
@@ -801,47 +870,56 @@ class model {
                one.where);
   }
   void on(const change::window_opened& one) {
-    conversation& where = of(one.in);
+    this->in_chat(one.in, [&](conversation& where) {
     where.timeline.clear();
     where.history_from = one.history_from;
     where.future_from = one.future_from;
     where.detached = one.future_from.has_value();
+  });
   }
   void on(const change::window_extended& one) {
-    conversation& where = of(one.in);
+    this->in_chat(one.in, [&](conversation& where) {
     where.future_from = one.future_from;
     where.detached = one.future_from.has_value();
+  });
   }
   void on(const change::message_encrypted& one) {
+    this->in_chat(one.in, [&](conversation& where) {
     const auto mark = [&](message& kept) {
       kept.encrypted = true;
       kept.unverified = !one.verified;
       kept.unauthenticated = one.imported;
     };
-    if (message* kept = message_in(of(one.in), one.id))
+    if (message* kept = message_in(where, one.id))
       mark(*kept);
-    in_latest(of(one.in), one.id, mark);
+    in_latest(where, one.id, mark);
+  });
   }
   void on(const change::message_edited& one) {
-    conversation& where = of(one.in);
+    this->in_chat(one.in, [&](conversation& where) {
     if (message* kept = message_in(where, one.id)) {
       if ((one.by && *one.by != kept->sender) || (one.plain && kept->encrypted))
         return;
-      // What it said until now, kept in its edit history: once for each edit
-      // that changed it -- the same edit come again changes nothing.
-      if (kept->body != one.now)
-        kept->versions.push_back(
-            {kept->body, one.at != std::chrono::sys_time<std::chrono::milliseconds>{}
-                             ? one.at
-                             : std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now())});
+      // Keep each distinct edit event, including an edit with unchanged
+      // text. A local optimistic edit has no event ID until its echo arrives.
+      const bool changed = kept->body != one.now;
+      const bool another_event = !one.event.empty() && one.event != kept->latest_edit_event &&
+          (kept->versions.empty() || !kept->latest_edit_event.empty());
+      if (changed || another_event) {
+        const std::string previous = kept->versions.empty() ? kept->id : kept->latest_edit_event;
+        kept->versions.push_back({kept->body, one.at != std::chrono::sys_time<std::chrono::milliseconds>{}
+            ? one.at : std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now()), previous});
+      }
       kept->body = one.now;
       kept->edited = true;
+      if (changed || !one.event.empty()) kept->latest_edit_event = one.event;
     }
     in_latest(where, one.id, [&](message& kept) {
       if ((one.by && *one.by != kept.sender) || (one.plain && kept.encrypted))
         return;
       kept.body = one.now;
       kept.edited = true;
+      if (!one.event.empty()) kept.latest_edit_event = one.event;
     });
     // And the copy fetched aside for the replies quoting it: what they quote
     // is what it says now.
@@ -850,13 +928,15 @@ class model {
         !(one.plain && aside->second.encrypted)) {
       aside->second.body = one.now;
       aside->second.edited = true;
+      if (!one.event.empty()) aside->second.latest_edit_event = one.event;
     }
+  });
   }
   // A message deleted: where deleted messages are kept, it stays where it
   // was with all it said and its time, marked -- someone else's; the user's
   // own, and every one where they are not kept, is taken out.
   void on(const change::message_redacted& one) {
-    conversation& where = of(one.in);
+    this->in_chat(one.in, [&](conversation& where) {
     // A mark on the event taken back -- a reaction to the user's own,
     // removed where the message it was on is not here to match it: gone too.
     for (auto* marks : {&where.unread_reactions, &where.unread_mentions})
@@ -875,42 +955,46 @@ class model {
       std::erase_if(answers, [&](const message& each) { return each.id == one.id; });
     if (where.latest && where.latest->id == one.id)
       where.latest.reset();
+  });
+  }
+  void on(const change::threads_listed& one) {
+    this->in_chat(one.in, [&](conversation& where) { where.thread_roots = one.roots; });
   }
   // A removed message's content fetched back (MSC2815): where the message
   // is kept, it is shown again, still marked removed; where it is not --
   // taken out where removed messages are not kept -- it is put back where
   // its time puts it, as removed, with its content.
   void on(const change::message_unredacted& one) {
-    conversation& where = of(one.in);
-    if (message* kept = message_in(where, one.id)) {
-      kept->unredacted = one.now;
-      in_latest(where, one.id, [&](message& latest) { latest.unredacted = one.now; });
-      return;
-    }
-    // And the copy fetched aside for the replies quoting it: what they quote
-    // is what the server kept of it.
-    if (const auto aside = where.quoted.find(one.id); aside != where.quoted.end()) {
-      aside->second.unredacted = one.now;
-      return;
-    }
-    message made{.in = one.in,
-                 .id = one.id,
-                 .sender = one.sender,
-                 .at = one.at,
-                 .body = {},
-                 .redacted = true,
-                 .unredacted = one.now};
-    made.outgoing = one.sender == where.id.account.address;
-    where.timeline.insert(std::ranges::upper_bound(where.timeline, made.at, {}, &message::at), made);
-    if (!where.detached && (!where.latest || made.at >= where.latest->at))
-      where.latest = std::move(made);
+    this->in_chat(one.in, [&](conversation& where) {
+      if (message* kept = message_in(where, one.id)) {
+        kept->unredacted = one.now;
+        in_latest(where, one.id, [&](message& latest) { latest.unredacted = one.now; });
+        return;
+      }
+      // And the copy fetched aside for the replies quoting it: what they quote
+      // is what the server kept of it.
+      if (const auto aside = where.quoted.find(one.id); aside != where.quoted.end()) {
+        aside->second.unredacted = one.now;
+        return;
+      }
+      message made{.in = one.in,
+                   .id = one.id,
+                   .sender = one.sender,
+                   .at = one.at,
+                   .body = {},
+                   .redacted = true,
+                   .unredacted = one.now};
+      made.outgoing = one.sender == where.id.account.address;
+      where.timeline.insert(std::ranges::upper_bound(where.timeline, made.at, {}, &message::at), made);
+      if (!where.detached && (!where.latest || made.at >= where.latest->at))
+        where.latest = std::move(made);
+    });
   }
-  void on(const change::threads_listed& one) { of(one.in).thread_roots = one.roots; }
   // A call's: the program's calls part's (mux.app.calls), not the model's.
   void on(const change::call_signalled&) {}
   void on(const change::call_servers&) {}
   void on(const change::message_acknowledged& one) {
-    conversation& where = of(one.in);
+    this->in_chat(one.in, [&](conversation& where) {
     in_latest(where, one.local_id, [&](message& kept) {
       kept.id = one.id;
       kept.delivery = delivery::sent{};
@@ -924,21 +1008,41 @@ class model {
     if (message* kept = message_in(where, one.local_id)) {
       kept->id = one.id;
       kept->delivery = delivery::sent{};
+      if (kept->thread) {
+        if (const auto found = where.threads.find(*kept->thread); found != where.threads.end())
+          std::ranges::stable_sort(found->second, {}, &message::at);
+      } else {
+        std::ranges::stable_sort(where.timeline, message_before);
+      }
     }
+  });
   }
   void on(const change::delivery_changed& one) {
-    if (message* kept = message_in(of(one.in), one.id))
+    this->in_chat(one.in, [&](conversation& where) {
+    if (message* kept = message_in(where, one.id)) {
+      const bool was_pending = pending(*kept);
       kept->delivery = one.now;
-    in_latest(of(one.in), one.id, [&](message& kept) { kept.delivery = one.now; });
+      if (!kept->thread && was_pending != pending(*kept))
+        std::ranges::stable_sort(where.timeline, message_before);
+    }
+    in_latest(where, one.id, [&](message& kept) { kept.delivery = one.now; });
+  });
   }
   void on(const change::message_discarded& one) {
-    conversation& where = of(one.in);
+    this->in_chat(one.in, [&](conversation& where) {
     std::erase_if(where.timeline, [&](const message& each) { return each.id == one.id; });
     if (where.latest && where.latest->id == one.id)
       where.latest.reset();
+  });
+  }
+  static message* reaction_target(conversation& where, std::string_view id) {
+    if (auto* event = message_in(where, id)) return event;
+    if (const auto quoted = where.quoted.find(std::string(id)); quoted != where.quoted.end()) return &quoted->second;
+    return nullptr;
   }
   void on(const change::reaction_changed& one) {
-    if (message_in(of(one.in), one.id) == nullptr) {
+    this->in_chat(one.in, [&](conversation& where) {
+    if (reaction_target(where, one.id) == nullptr) {
       auto& waiting = waiting_reactions_[{one.in, one.id}];
       if (one.added) {
         if (waiting.size() < kReactionsWaiting)
@@ -948,30 +1052,31 @@ class model {
       }
       return;
     }
-    if (message* kept = message_in(of(one.in), one.id)) {
+    if (message* kept = reaction_target(where, one.id)) {
       auto& who = kept->reactions[one.key];
       // Taken back: its mark too -- a reaction changed for another was
       // counted twice by the heart, the one taken back still in it.
       if (!one.added)
         for (const message::reaction_event& each : kept->reaction_events)
           if (each.key == one.key && each.who == one.who)
-            std::erase_if(of(one.in).unread_reactions, [&](const unread_mark& mark) { return mark.event == each.event; });
+            std::erase_if(where.unread_reactions, [&](const unread_mark& mark) { return mark.event == each.event; });
       std::erase_if(kept->reaction_events, [&](const message::reaction_event& each) {
         return each.key == one.key && each.who == one.who;
       });
       if (one.added) {
         who.insert(one.who);
         if (!one.event.empty())
-          kept->reaction_events.push_back({one.event, one.key, one.who, one.at});
+          kept->reaction_events.push_back({one.event, one.key, one.who, one.at, one.shortcode});
         // Another's reaction to the user's own, as it happened: for them.
         if (one.live && kept->outgoing && one.who != one.in.account.address && !one.event.empty())
-          keep_mark(of(one.in), of(one.in).unread_reactions, {one.event, one.id, one.at});
+          keep_mark(where, where.unread_reactions, {one.event, one.id, one.at});
       } else {
         who.erase(one.who);
         if (who.empty())
           kept->reactions.erase(one.key);
       }
     }
+  });
   }
   // Marks kept to a number, the oldest going first: a flood of them cannot
   // grow a chat without end.
@@ -984,8 +1089,9 @@ class model {
       marks.erase(marks.begin());
   }
   void on(const change::mentioned& one) {
-    conversation& where = of(one.in);
+    this->in_chat(one.in, [&](conversation& where) {
     keep_mark(where, where.unread_mentions, {one.event, one.event, one.at});
+  });
   }
   static void mark_seen(conversation& where, const std::string& event) {
     if (std::ranges::contains(where.seen_marks, event))
@@ -995,7 +1101,7 @@ class model {
       where.seen_marks.erase(where.seen_marks.begin());
   }
   void on(const change::marks_seen& one) {
-    conversation& where = of(one.in);
+    this->in_chat(one.in, [&](conversation& where) {
     for (const std::string& event : one.events)
       mark_seen(where, event);
     // Seen is seen, whichever came first: a mention caught up from the
@@ -1004,6 +1110,7 @@ class model {
     const auto seen = [&](const unread_mark& mark) { return std::ranges::contains(where.seen_marks, mark.event); };
     std::erase_if(where.unread_mentions, seen);
     std::erase_if(where.unread_reactions, seen);
+  });
   }
   void on(const change::directory_listed&) {}  // the window's: the Explore dialog
   void on(const change::people_found&) {}  // the window's: the Start chat dialog
@@ -1022,10 +1129,12 @@ class model {
   std::map<std::pair<account_id, std::string>, trust_t> trust_;
   void on(const change::notice&) {}
   void on(const change::reacted_to_mine& one) {
-    keep_mark(of(one.in), of(one.in).unread_reactions, {one.event, one.target, one.at});
+    this->in_chat(one.in, [&](conversation& where) {
+    keep_mark(where, where.unread_reactions, {one.event, one.target, one.at});
+  });
   }
   void on(const change::marks_shown& one) {
-    conversation& where = of(one.in);
+    this->in_chat(one.in, [&](conversation& where) {
     const auto shown = [&](const unread_mark& mark) { return std::ranges::contains(one.shown, mark.target); };
     for (const auto* marks : {&where.unread_mentions, &where.unread_reactions})
       for (const unread_mark& mark : *marks)
@@ -1033,9 +1142,10 @@ class model {
           mark_seen(where, mark.event);
     std::erase_if(where.unread_mentions, shown);
     std::erase_if(where.unread_reactions, shown);
+  });
   }
   void on(const change::mark_taken& one) {
-    conversation& where = of(one.in);
+    this->in_chat(one.in, [&](conversation& where) {
     auto& marks = spl::visit(spl::overloaded{[&](mark_kind::mention) -> std::vector<unread_mark>& { return where.unread_mentions; },
                                         [&](mark_kind::reaction) -> std::vector<unread_mark>& { return where.unread_reactions; }},
                              one.kind);
@@ -1046,20 +1156,33 @@ class model {
       mark_seen(where, marks.front().event);
       marks.erase(marks.begin());
     }
+  });
   }
-  void on(const change::typing_changed& one) { of(one.in).typing = one.who; }
-  void on(const change::history_position& one) { of(one.in).history_from = one.from; }
+  std::map<conversation_id, std::chrono::steady_clock::time_point> typing_until_;
+  void on(const change::typing_changed& one) {
+    if (one.who.empty())
+      typing_until_.erase(one.in);
+    else
+      typing_until_.insert_or_assign(one.in, std::chrono::steady_clock::now() + std::chrono::seconds(30));
+    if (const auto* chat = find(one.in); chat && chat->typing == one.who)
+      return;
+    this->in_chat(one.in, [&](conversation& where) { where.typing = one.who; });
+  }
+  void on(const change::history_position& one) {
+    this->in_chat(one.in, [&](conversation& where) { where.history_from = one.from; });
+  }
   void on(const change::event_missing& one) {
-    conversation& where = of(one.in);
+    this->in_chat(one.in, [&](conversation& where) {
     for (auto* marks : {&where.unread_mentions, &where.unread_reactions})
       for (const unread_mark& gone : *marks)
         if (gone.target == one.id && !std::ranges::contains(where.seen_marks, gone.event))
           where.seen_marks.push_back(gone.event);
     for (auto* marks : {&where.unread_mentions, &where.unread_reactions})
       std::erase_if(*marks, [&](const unread_mark& mark) { return mark.target == one.id; });
+  });
   }
   void on(const change::members_changed& one) {
-    conversation& where = of(one.in);
+    this->in_chat(one.in, [&](conversation& where) {
     // Who was in it and is no longer -- left, kicked, banned -- types no
     // more: their typing, said before they went, stayed under the name.
     std::erase_if(where.typing, [&](const std::string& who) {
@@ -1068,41 +1191,71 @@ class model {
     where.members = one.members;
     where.knocking = one.knocking;
     ++where.members_revision;
+  });
   }
   void on(const change::avatar_loaded&) {}  // the window's to show, not the model's
+  void on(const change::notifications_changed&) {}
   void on(const change::protocol_state_changed&) {}  // the window's: what it offers
   // A protocol's own change: what its changed_in(model, change) makes of the
   // model, found by ADL -- nothing by default (the window's, then).
   template <protocol_change Change>
   void on(const Change& one) {
     using model_defaults::changed_in;
-    changed_in(*this, one);
+    // In an edit of the whole: what the protocol changes is changed there.
+    (void)chats_.apply(skiff::model::edit(skiff::model::placeOf<chats_root, chats_root>(), [&](chats_root& root) {
+      editing_ = &root;
+      changed_in(*this, one);
+      editing_ = nullptr;
+    }));
   }
   void on(const change::media_progress&) {}  // the window's too
   void on(const change::room_created&) {}    // the program's: it shows it
   void on(const change::room_previewed&) {}  // the window's: the room's card
   void on(const change::preview_loaded& one) { previews.insert_or_assign(one.url, one.preview); }
   void on(const change::receipts_changed& one) {
-    conversation& kept = of(one.in);
-    for (const auto& [user, event] : one.read_by)
+    this->in_chat(one.in, [&](conversation& kept) {
+    const auto place = [&](const std::string& id) { return std::ranges::find(kept.timeline, id, &message::id); };
+    for (const auto& [user, event] : one.read_by) {
+      const auto previous = kept.read_by.find(user);
+      bool accept = previous == kept.read_by.end() || previous->second == event;
+      if (!accept) {
+        const auto before = place(previous->second), after = place(event);
+        if (before != kept.timeline.end() && after != kept.timeline.end())
+          accept = after > before;
+        else {
+          const auto old_time = kept.receipt_times.find(user);
+          const auto new_time = one.read_at.find(user);
+          if (old_time != kept.receipt_times.end() && new_time != one.read_at.end())
+            accept = new_time->second > old_time->second;
+        }
+        // Without either positions or timestamps, an unknown event cannot
+        // prove that an existing receipt moved forward.
+      }
+      if (!accept) continue;
       kept.read_by.insert_or_assign(user, event);
+      if (const auto time = one.read_at.find(user); time != one.read_at.end()) {
+        const auto old = kept.receipt_times.find(user);
+        if (old == kept.receipt_times.end() || time->second > old->second)
+          kept.receipt_times.insert_or_assign(user, time->second);
+      }
+    }
     // The user's own, from another device (or this one's, echoed): where it
     // is past the position kept here -- or there is none -- the position
     // moves on to it. Never back: a receipt older than what was read here.
     if (const auto mine = one.read_by.find(one.in.account.address); mine != one.read_by.end()) {
-      const auto place = [&](const std::string& id) { return std::ranges::find(kept.timeline, id, &message::id); };
       const auto theirs = place(mine->second);
       const bool past = !kept.read_up_to ||
                         (theirs != kept.timeline.end() &&
-                         (place(*kept.read_up_to) == kept.timeline.end() || theirs > place(*kept.read_up_to)));
+                         (place(*kept.read_up_to) != kept.timeline.end() && theirs > place(*kept.read_up_to)));
       if (past)
         kept.read_up_to = mine->second;
     }
-    for (const auto& [user, when] : one.read_at)
-      kept.receipt_times.insert_or_assign(user, when);
+  });
   }
 
-  std::map<account_id, account> accounts_;
+  chats_model chats_;
+  // The root being changed by a protocol's own change, while it is.
+  chats_root* editing_ = nullptr;
   std::uint64_t read_tick_ = 0;
 };
 

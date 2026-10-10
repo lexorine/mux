@@ -39,6 +39,41 @@ export import :names;
 
 export namespace mux::proto::matrix::client {
 
+// Joined ancestors only, in breadth-first order. A removed relation has no
+// via servers; visited rooms make cycles and diamonds harmless. A space's
+// child relation also covers rooms that do not publish a reciprocal parent.
+inline std::vector<std::string> pack_rooms(const loom::client::state& all, const loom::client::joined_room& room) {
+  const auto first = std::ranges::find_if(all.joined, [&](const auto& one) { return &one.second == &room; });
+  if (first == all.joined.end())
+    return {};
+  std::vector<std::string> rooms{first->first};
+  std::set<std::string> visited{first->first};
+  for (std::size_t at = 0; at < rooms.size(); ++at) {
+    const std::string current = rooms[at];
+    const auto add = [&](const std::string& id) {
+      if (all.joined.contains(id) && visited.insert(id).second)
+        rooms.push_back(id); // the graph's work queue, not a conversion
+    };
+    std::ranges::for_each(all.joined.at(current).state.events, [&](const auto& event) {
+      spl::visit(spl::overloaded{
+          [&](const loom::ev::m_space_parent_content_t& parent) { if (!parent.via.empty()) add(event.first.second); },
+          [](const auto&) {}}, event.second.content.data());
+    });
+    std::ranges::for_each(all.joined, [&](const auto& candidate) {
+      if (!candidate.second.state.is_space())
+        return;
+      const bool parent = std::ranges::any_of(candidate.second.state.events, [&](const auto& event) {
+        return event.first.second == current && spl::visit(spl::overloaded{
+            [](const loom::ev::m_space_child_content_t& child) { return !child.via.empty(); },
+            [](const auto&) { return false; }}, event.second.content.data());
+      });
+      if (parent)
+        add(candidate.first);
+    });
+  }
+  return rooms;
+}
+
 // What mux reads of the secrets asked of it, by their names: read once,
 // where the name comes in, into a kind -- its own, or any other, passed over.
 namespace own_secret {
@@ -115,6 +150,15 @@ class account {
   // the endpoint's own Matrix gateway where its push server has one -- once
   // logged in; none: forgotten here (the distributor drops it, and the
   // gateway refuses the server from then on).
+  void set_notifications(std::optional<std::string> room, mux::notification_choices choices, mux::notification_choices effective);
+  void receive_notifications(const loom::ev::account_data_event& event);
+  void flush_notifications();
+  bool save_notifications(std::optional<std::string> room, mux::notification_choices choices, mux::notification_choices effective);
+  struct notification_edit { mux::notification_choices own, effective; std::uint64_t revision; };
+  std::map<std::optional<std::string>, notification_edit> pending_notifications_;
+  std::uint64_t notification_revision_ = 0;
+  bool notifications_busy_ = false;
+  std::set<std::string> notification_rooms_;
   void set_pusher(std::optional<std::string> endpoint);
   // A push come: the long poll cut short, and the sync gone again at once.
   void sync_now();
@@ -165,13 +209,14 @@ class account {
   // an image uploaded for one.
   void list_packs(std::optional<std::string> room);
   void save_pack(emote_pack pack);
+  void adopt_pack(emote_pack pack);
   void delete_pack(emote_pack pack);
   void upload_pack_picture(pack_picture picture, std::string bytes);
   // Threads (m.thread): a room's roots listed; a thread's answers loaded,
   // each as a message in it; an answer sent in one.
   void list_threads(std::string room);
   void load_thread(std::string room, std::string root);
-  void send_in_thread(std::string room, std::string body, std::string root, std::string latest, std::optional<std::string> reply_to);
+  void send_in_thread(std::string room, std::string body, std::string root, std::string latest, std::optional<std::string> reply_to, std::vector<styled_run> styles = {});
   // The user directory searched: people_found for what was asked.
   void search_people(std::string term);
   // What this account knows of a person's encryption identity, said
@@ -356,7 +401,8 @@ class account {
 
   // A reaction to a message put, or taken back: m.reaction with its key,
   // or the redaction of the account's own.
-  void react(std::string room, std::string target, std::string key, bool on);
+  void react(std::string room, std::string target, std::string key, bool on,
+             std::optional<std::string> shortcode = std::nullopt);
   // A message pinned in its room, or unpinned: the room's list as the last
   // sync had it, with it put in or taken out, set as the room's state.
   void pin(std::string room, std::string target, bool on);
@@ -660,7 +706,7 @@ class account {
   // its timeline since its last gap and where that pages back from, its
   // summary, unread counts and data; the account's data; and the token to
   // go on from. Read back, it is applied as an answer is.
-  void save_kept() const;
+  bool save_kept() const;
   void load_kept();
 
   // What the rooms a sync named look like now, and what their timelines
@@ -769,8 +815,10 @@ class account {
   std::optional<std::string> token_;
   // The rooms whose place to page back from was told.
   std::set<std::string> paged_;
+  std::set<std::string> announced_;
   http::pool* api_ = nullptr;
   loom::client::state state_;
+  bool snapshot_dirty_ = false;
   // Simplified sliding sync (MSC4186), where the server has it: whether it
   // is used, where its last answer left off, and how many rooms its list
   // holds.
