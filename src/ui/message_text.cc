@@ -8,6 +8,8 @@ import splice;
 import skia;
 import skiff.paint;
 import skiff.scene;
+import skiff.compose;
+import skiff.model;
 import skiff.nodes.box;
 import skiff.nodes.flow;
 import skiff.nodes.icon;
@@ -58,6 +60,11 @@ struct mentioned;
                   chevron::escaped(std::string_view(said.body.plain).substr(name.size()));
   return out;
 }
+struct mentioned_card {
+  std::size_t at;
+  std::string url;
+  logic::link_t where;
+};
 struct mentioned {
   // Rooms named in it whose picture is still to come, and rooms not known
   // to be there: made again when the one comes or the other is found.
@@ -65,12 +72,14 @@ struct mentioned {
   std::vector<std::string> unknown;
   std::string text;
   std::vector<nodes::Text::Link> links;
-  std::vector<std::pair<std::string, logic::link_t>> cards;  // the link, and the place it is to
+  std::vector<mentioned_card> cards;
+  std::vector<html_disclosure> disclosures;
   std::vector<nodes::Text::Styled> styles;
 };
 [[nodiscard]] inline mentioned with_mentions(std::string text, std::vector<nodes::Text::Link> links,
                                              const conversation& in, const model* now,
-                                             std::vector<nodes::Text::Styled> styles = {}) {
+                                             std::vector<nodes::Text::Styled> styles = {},
+                                             std::vector<html_disclosure> disclosures = {}) {
   // What a mention is called here, and what it links to: a person by their
   // name in the chat, a room by its name where it is known.
   const auto name_of = [&](const logic::link_t& what) -> std::pair<std::string, std::string> {
@@ -106,6 +115,21 @@ struct mentioned {
   std::vector<nodes::Text::Link> kept;
   mentioned out;
   for (auto& link : links) {
+    // A disclosure's summary remains inline, including its linked words.
+    // Turning those words into a separate card would remove the heading.
+    if (std::ranges::any_of(disclosures, [&](const auto& detail) {
+          return link.first >= detail.summary_first && link.last <= detail.summary_last;
+        })) {
+      kept.push_back(std::move(link));
+      continue;
+    }
+    // Code stays literal, including protocol links inside it.
+    if (std::ranges::any_of(styles, [&](const auto& style) {
+          return style.block && link.first < style.last && link.last > style.first;
+        })) {
+      kept.push_back(std::move(link));
+      continue;
+    }
     const auto what = logic::link_of(link.target);
     const std::string_view label = std::string_view(text).substr(link.first, link.last - link.first);
     const bool bare = label == link.target;  // the URL itself, not words over it
@@ -120,7 +144,7 @@ struct mentioned {
                           [&](const logic::mention::place& one) {
                             if (bare || one.event) {
                               spans.push_back({link.first, link.last, std::nullopt});
-                              out.cards.emplace_back(link.target, *what);
+                              out.cards.push_back({link.first, link.target, *what});
                             } else {
                               spans.push_back({link.first, link.last, what});
                             }
@@ -190,17 +214,20 @@ struct mentioned {
         // its protocol says is no name (a Matrix room's !id): by the name.
         const bool by_address =
             span.as_written && proto::id_reads_as_name(state_before(protocol_of(*span.as_written)), *span.as_written);
-        shown = (pictured ? std::string("\u2002\u2002") : std::string()) + (by_address ? words : name);
+        shown = (pictured ? std::string("\u2003\u2002") : std::string()) + (by_address ? words : name);
         pill = nodes::Text::Link{span.first, span.first + shown.size(), opens, true};
       }
     } else if (span.pill) {
       const auto [name, target] = name_of(*span.pill);
-      shown = "\u2002\u2002" + name;  // room for its avatar
+      shown = "\u2003\u2002" + name;  // room for its avatar
       pill = nodes::Text::Link{span.first, span.first + shown.size(), opens, true};
     }
     const std::ptrdiff_t grew =
         static_cast<std::ptrdiff_t>(shown.size()) - static_cast<std::ptrdiff_t>(span.last - span.first);
     text.replace(span.first, span.last - span.first, shown);
+    for (auto& card : out.cards)
+      if (card.at >= span.last)
+        card.at = static_cast<std::size_t>(static_cast<std::ptrdiff_t>(card.at) + grew);
     for (auto* list : {&kept, &out.links})
       for (auto& link : *list)
         if (link.first >= span.last) {
@@ -215,6 +242,17 @@ struct mentioned {
       if (style.last >= span.last)
         style.last = static_cast<std::size_t>(static_cast<std::ptrdiff_t>(style.last) + grew);
     }
+    const auto moved = [&](std::size_t offset) {
+      if (offset >= span.last)
+        return static_cast<std::size_t>(static_cast<std::ptrdiff_t>(offset) + grew);
+      return offset > span.first ? span.first + shown.size() : offset;
+    };
+    for (auto& detail : disclosures) {
+      detail.first = moved(detail.first);
+      detail.last = moved(detail.last);
+      detail.summary_first = moved(detail.summary_first);
+      detail.summary_last = moved(detail.summary_last);
+    }
     if (pill)
       out.links.push_back(std::move(*pill));
   }
@@ -227,7 +265,17 @@ struct mentioned {
     style.last = std::min(style.last, text.size());
   std::erase_if(styles, [](const auto& style) { return style.first >= style.last; });
   out.styles = std::move(styles);
+  for (auto& card : out.cards)
+    card.at = std::min(card.at, text.size());
+  std::ranges::stable_sort(out.cards, {}, &mentioned_card::at);
   out.text = std::move(text);
+  for (auto& detail : disclosures) {
+    detail.first = std::min(detail.first, out.text.size());
+    detail.last = std::min(detail.last, out.text.size());
+    detail.summary_first = std::clamp(detail.summary_first, detail.first, detail.last);
+    detail.summary_last = std::clamp(detail.summary_last, detail.summary_first, detail.last);
+  }
+  out.disclosures = std::move(disclosures);
   return out;
 }
 
@@ -250,6 +298,8 @@ struct mentioned {
 // what is left; what it said, trimmed. Nothing where the text does not
 // open with a quote, or has another.
 [[nodiscard]] inline std::optional<std::string> take_opening_quote(mentioned& shown) {
+  if (!shown.disclosures.empty())
+    return std::nullopt;  // Disclosure contents must stay in their own sections.
   std::size_t end = 0;
   bool opens = false;
   for (const auto& one : shown.styles) {
@@ -279,9 +329,11 @@ struct mentioned {
   };
   moved(shown.links);
   moved(shown.styles);
+  std::erase_if(shown.cards, [cut](const auto& card) { return card.at < cut; });
+  for (auto& card : shown.cards)
+    card.at -= cut;
   while (!quoted.empty() && std::isspace(static_cast<unsigned char>(quoted.back())))
     quoted.pop_back();
-  std::ranges::replace(quoted, '\n', ' ');
   return quoted;
 }
 
@@ -297,14 +349,14 @@ struct mentioned {
     shown = with_mentions(said.body.plain, link_spans_in(said.body.plain), in, now);
   }
   std::string out = std::move(shown.text);
-  for (std::size_t at = out.find("\u2002\u2002"); at != std::string::npos; at = out.find("\u2002\u2002", at))
-    out.erase(at, std::string_view("\u2002\u2002").size());
+  for (std::size_t at = out.find("\u2003\u2002"); at != std::string::npos; at = out.find("\u2003\u2002", at))
+    out.erase(at, std::string_view("\u2003\u2002").size());
   return out;
 }
 
 // A card for a link to a room, or to a message in one: as the chat it is of
 // is known here, or as a room not joined.
-[[nodiscard]] inline link_card card_of(const palette& colours, const std::string& url, const logic::link_t& where, const model* now) {
+[[nodiscard]] inline link_card_t card_of(const palette& colours, const std::string& url, const logic::link_t& where, const model* now) {
   const logic::mention::place room = spl::visit(
       spl::overloaded{[](const logic::mention::place& one) { return one; }, [](const auto&) { return logic::mention::place{}; }},
       logic::mention_in(where));
@@ -329,7 +381,6 @@ struct mentioned {
   return link_card(colours, url, id, name, "Message from " + name, said);
 }
 
-
 // What a message's text draws of the program's: a pill's avatar -- the one
 // of what it names, else its initials on its colours -- and a custom
 // emoji's picture, fetched as an avatar is. Given to its text as a type.
@@ -351,8 +402,12 @@ struct message_pictures {
     const auto [top, bottom] = userpic_colours(id);
     return skiff::scene::PillPicture{avatar_images().find(id), top, bottom, initials_of(id)};
   }
+  static bool animated(std::string_view target) { return emoji_animations().has(target); }
+  static double wakeAt(std::string_view target) { return emoji_animations().next_frame_at(target, animation_clock()); }
   static const skia::Sp<skia::SkImage>* picture(std::string_view target) {
-    return avatar_images().find(std::string(target));
+    if (const auto* moving = emoji_animations().at(target, animation_clock()))
+      return moving;
+    return emoji_images().find(target);
   }
 };
 
@@ -360,7 +415,7 @@ struct message_pictures {
 // quote's colour with a bar at its left; over the code, its language in the
 // colour and a Copy at the right; the code in the monospace face, wrapped,
 // selectable.
-struct code_block : nodes::Stack {
+struct code_block : skiff::compose::Stacked {
   // Copy: the block's code, as it is, onto the clipboard.
   struct copy_mark : nodes::Text {
     std::string code;
@@ -373,56 +428,73 @@ struct code_block : nodes::Stack {
       return true;
     }
   };
-  struct head_row : nodes::Stack {
+  struct head_row : skiff::compose::Stacked {
     struct parts_t {
       nodes::Text language;
       copy_mark copy;
     } parts;
     head_row(std::string language, std::string code, skia::SkColor colour)
-        : parts{.language = nodes::Text(language.empty() ? std::string("Code") : std::move(language), 12.0f, colour, true),
-                .copy = copy_mark(std::move(code), colour)} {
-      this->setHorizontal();
-      fState.apply({.fillX = true, .autoSize = scene::axes::kY});
-      parts.language.setElided(true);
-      parts.language.apply({.grow = scene::axes::kX});
-    }
+        : Stacked(skiff::compose::hbox(
+              0.0f, {.fillX = true, .autoSize = scene::axes::kY})),
+          parts{.language = skiff::compose::styled(
+                    {.grow = scene::axes::kX},
+                    elided(nodes::Text(language.empty() ? std::string("Code")
+                                                        : std::move(language),
+                                       12.0f, colour, true))),
+                .copy = copy_mark(std::move(code), colour)} {}
   };
   struct parts_t {
     nodes::Box<> bar;
     head_row head;
     nodes::BasicText<message_pictures> code;
   } parts;
-  code_block(const palette& colours, std::string code, std::string language, skia::SkColor colour, skia::SkColor text)
-      : parts{.bar = nodes::Box<>(colour),
+  code_block(const palette &colours, std::string code, std::string language,
+             skia::SkColor colour, skia::SkColor text)
+      : Stacked(skiff::compose::vbox(
+            4.0f, {.autoSize = scene::axes::kBoth,
+                   .minWidth = 120.0f,
+                   .margin = {4.0f, 0.0f, 4.0f, 0.0f},
+                   .padding = {6.0f, 8.0f, 6.0f, 12.0f},
+                   .cornerRadius = 5.0f,
+                   .background = (colour & 0x00FFFFFFu) | (0x1Fu << 24),
+                   .masking = true})),
+        parts{.bar = skiff::compose::styled({.place = scene::anchor::kTopLeft,
+                                             .x = -12.0f,
+                                             .y = -6.0f,
+                                             .fillY = true,
+                                             .width = 3.0f},
+                                            nodes::Box<>(colour)),
               .head = head_row(std::move(language), code, colour),
-              .code = nodes::BasicText<message_pictures>(code, 13.0f, text)} {
-    this->setGap(4.0f);
+              .code = wrapped(
+                  nodes::BasicText<message_pictures>(code, 13.0f, text))} {
     // As wide as its code (and its head), within the bubble: filling a
     // bubble that takes its width from what it holds, neither said a width,
     // and a short block was squeezed to a few letters a line.
-    fState.apply({.autoSize = scene::axes::kBoth, .minWidth = 120.0f, .margin = {4.0f, 0.0f, 4.0f, 0.0f},
-                  .padding = {6.0f, 8.0f, 6.0f, 12.0f}, .cornerRadius = 5.0f,
-                  .background = (colour & 0x00FFFFFFu) | (0x1Fu << 24), .masking = true});
-    parts.bar.apply({.place = scene::anchor::kTopLeft, .x = -12.0f, .y = -6.0f, .fillY = true, .width = 3.0f});
+
     parts.code.setMonospace(true);
-    parts.code.setWrapped(true);
     parts.code.setSelectable(true);
     parts.code.setSelectionColour((colours.accent & 0x00FFFFFFu) | (110u << 24));
     parts.code.setShrinksToLines(true);
   }
 };
-// A message's text cut at its blocks of code: words, a block, words...
+// A message's text split around code blocks and positioned link cards.
 struct text_piece {
   bool code = false;
   std::string text;
   std::string language;
   std::vector<nodes::Text::Link> links;
   std::vector<nodes::Text::Styled> styles;
+  std::optional<mentioned_card> card;
+  bool disclosure = false;
 };
 [[nodiscard]] inline std::vector<text_piece> pieces_of(const std::string& text, const std::vector<nodes::Text::Link>& links,
-                                                      const std::vector<nodes::Text::Styled>& styles) {
-  std::vector<nodes::Text::Styled> blocks =
-      std::ranges::to<std::vector>(std::views::filter(styles, [](const nodes::Text::Styled& one) { return one.block; }));
+                                                      const std::vector<nodes::Text::Styled>& styles,
+                                                      const std::vector<mentioned_card>& cards = {},
+                                                      const std::vector<html_disclosure>& disclosures = {}) {
+  if (!disclosures.empty())
+    return {text_piece{}, text_piece{.disclosure = true}, text_piece{}};
+  std::vector<nodes::Text::Styled> blocks = std::ranges::to<std::vector>(
+      std::views::filter(styles, [](const auto& one) { return one.block; }));
   std::ranges::sort(blocks, {}, &nodes::Text::Styled::first);
   // Words from `a` to `b`: their links and styles cut to them, counted from
   // their start; the line breaks around a block gone.
@@ -446,44 +518,220 @@ struct text_piece {
   };
   std::vector<text_piece> out;
   std::size_t at = 0;
+  std::size_t next_card = 0;
+  const auto add_cards = [&](std::size_t until) {
+    while (next_card < cards.size() && cards[next_card].at <= until) {
+      const auto& card = cards[next_card++];
+      if (card.at < at)
+        continue;
+      out.push_back(words(at, card.at));
+      out.push_back(text_piece{.card = card});
+      at = card.at;
+    }
+  };
   for (const nodes::Text::Styled& block : blocks) {
     if (block.first < at)
       continue;
+    add_cards(block.first);
     out.push_back(words(at, block.first));
     out.push_back(text_piece{.code = true, .text = text.substr(block.first, block.last - block.first), .language = block.language});
     at = block.last;
   }
+  add_cards(text.size());
   out.push_back(words(at, text.size()));
   return out;
 }
-// After the first words: a block, then the words after it, as many times
-// as the text has blocks.
-struct code_piece : nodes::Stack {
-  struct parts_t {
-    code_block block;
-    std::optional<nodes::BasicText<message_pictures>> after;
-  } parts;
-  code_piece(const palette& colours, const text_piece& code, const text_piece* words, skia::SkColor colour, skia::SkColor quote,
-             skia::SkColor text)
-      : parts{.block = code_block(colours, code.text, code.language, colour, text)} {
-    fState.apply({.autoSize = scene::axes::kBoth});
-    if (words && !words->text.empty()) {
-      parts.after.emplace(words->text, 13.0f, text);
-      parts.after->setWrapped(true);
-      parts.after->setSelectable(true);
-      parts.after->setSelectionColour((colours.accent & 0x00FFFFFFu) | (110u << 24));
-      parts.after->setLinks(words->links, colours.accent);
-      parts.after->setStyles(words->styles, quote);
-      parts.after->setShrinksToLines(true);
-    }
+// A code block and the words after it, composed in their text order.
+inline auto code_piece(const palette& colours, const text_piece& code, const text_piece& words,
+                       skia::SkColor colour, skia::SkColor quote, skia::SkColor text) {
+  auto after = nodes::BasicText<message_pictures>(words.text, 13.0f, text);
+  after.setWrapped(true);
+  after.setSelectable(true);
+  after.setSelectionColour((colours.accent & 0x00FFFFFFu) | (110u << 24));
+  after.setLinks(words.links, colours.accent);
+  after.setStyles(words.styles, quote);
+  after.setShrinksToLines(true);
+  return skiff::compose::column(skiff::compose::vbox(0.0f, {.autoSize = scene::axes::kBoth}),
+      code_block(colours, code.text, code.language, colour, text),
+      skiff::compose::visible(!words.text.empty(), std::move(after)));
+}
+using code_piece_t = decltype(code_piece(std::declval<const palette&>(), std::declval<const text_piece&>(),
+    std::declval<const text_piece&>(), skia::SkColor{}, skia::SkColor{}, skia::SkColor{}));
+
+// A card and the words after it are one composed part of the message,
+// interleaved with code blocks rather than appended below them.
+inline auto link_piece(const palette& colours, const mentioned_card& card, const text_piece& words,
+                       const model* now, skia::SkColor quote) {
+  auto after = nodes::BasicText<message_pictures>(words.text, 13.0f, colours.text);
+  after.setWrapped(true);
+  after.setSelectable(true);
+  after.setSelectionColour((colours.accent & 0x00FFFFFFu) | (110u << 24));
+  after.setLinks(words.links, colours.accent);
+  after.setStyles(words.styles, quote);
+  after.setShrinksToLines(true);
+  return skiff::compose::column(skiff::compose::vbox(0.0f, {.autoSize = scene::axes::kBoth}),
+      card_of(colours, card.url, card.where, now), skiff::compose::visible(!words.text.empty(), std::move(after)));
+}
+using link_piece_t = decltype(link_piece(std::declval<const palette&>(), std::declval<const mentioned_card&>(),
+    std::declval<const text_piece&>(), nullptr, skia::SkColor{}));
+// Disclosure controls use local model state, with ordinary composed rows.
+// The flat rows retain their ancestor path, so nesting needs no erased UI tree.
+struct disclosure_state { std::vector<bool> open; };
+struct toggle_disclosure { std::size_t index; };
+struct disclosure_events {
+  std::vector<html_disclosure> sections;
+  auto on(toggle_disclosure event, const disclosure_state& state) const {
+    auto open = state.open;
+    open[event.index] = !open[event.index];
+    if (open[event.index] && !sections[event.index].group.empty())
+      for (std::size_t i = 0; i < sections.size(); ++i)
+        if (i != event.index && sections[i].group == sections[event.index].group)
+          open[i] = false;
+    return skiff::model::over<skiff::model::Field<&disclosure_state::open>>(skiff::model::setTo(std::move(open)));
   }
 };
+struct disclosure_visible {
+  std::vector<std::size_t> ancestors;
+  bool operator()(const disclosure_state& state) const {
+    return std::ranges::all_of(ancestors, [&](std::size_t index) { return state.open[index]; });
+  }
+};
+inline auto piece_text(const palette& colours, const text_piece& words, skia::SkColor colour, skia::SkColor quote) {
+  auto node = nodes::BasicText<message_pictures>(words.text, 13.0f, colour);
+  node.setWrapped(true);
+  node.setSelectable(true);
+  node.setSelectionColour((colours.accent & 0x00FFFFFFu) | (110u << 24));
+  node.setLinks(words.links, colours.accent);
+  node.setStyles(words.styles, quote);
+  node.setShrinksToLines(true);
+  return node;
+}
+template <class Node> auto disclosure_row(Node node, const std::vector<std::size_t>& ancestors) {
+  return skiff::compose::shown_for<disclosure_state>(disclosure_visible{ancestors},
+      skiff::compose::styled({.margin = {2.0f, 0.0f, 2.0f, 12.0f * static_cast<float>(ancestors.size())}}, std::move(node)));
+}
+inline auto disclosure_header(const palette& colours, const text_piece& summary, std::size_t index,
+                              const std::vector<std::size_t>& ancestors, skia::SkColor quote) {
+  namespace c = skiff::compose;
+  auto label = piece_text(colours, summary, colours.text, quote);
+  label.setSelectable(false);
+  label.setBold(true);
+  return disclosure_row(c::onClick(toggle_disclosure{index},
+      c::row(c::hbox(6.0f, {.autoSize = scene::axes::kBoth, .padding = {4.0f, 4.0f, 4.0f, 4.0f},
+                           .hoverBackground = colours.chosen}),
+          c::projected<disclosure_state>([index](const disclosure_state& state) {
+            return state.open[index] ? std::string("▾") : std::string("▸");
+          }, c::TextOf(nodes::Text("▸", 13.0f, colours.dim))), std::move(label)), summary.text), ancestors);
+}
+using disclosure_header_t = decltype(disclosure_header(std::declval<const palette&>(), std::declval<const text_piece&>(),
+    std::size_t{}, std::declval<const std::vector<std::size_t>&>(), skia::SkColor{}));
+using disclosure_words_t = decltype(disclosure_row(std::declval<nodes::BasicText<message_pictures>>(),
+    std::declval<const std::vector<std::size_t>&>()));
+using disclosure_code_t = decltype(disclosure_row(std::declval<code_block>(), std::declval<const std::vector<std::size_t>&>()));
+using disclosure_link_t = decltype(disclosure_row(card_of(std::declval<const palette&>(), std::string{},
+    std::declval<const logic::link_t&>(), nullptr), std::declval<const std::vector<std::size_t>&>()));
+using disclosure_row_t = spl::variant<disclosure_header_t, disclosure_words_t, disclosure_code_t, disclosure_link_t>;
+inline auto disclosure_piece(const palette& colours, const mentioned& shown,
+                             const text_piece& after, const model* now, skia::SkColor quote) {
+  namespace c = skiff::compose;
+  // Slice already parsed content; links, pictures and code retain their offsets.
+  const auto slice = [&](std::size_t a, std::size_t b) {
+    mentioned part;
+    b = std::min(b, shown.text.size());
+    a = std::min(a, b);
+    part.text = shown.text.substr(a, b - a);
+    for (auto link : shown.links)
+      if (link.first >= a && link.last <= b) {
+        link.first -= a; link.last -= a; part.links.push_back(std::move(link));
+      }
+    for (auto style : shown.styles)
+      if (style.first < b && style.last > a) {
+        style.first = std::max(style.first, a) - a;
+        style.last = std::min(style.last, b) - a;
+        part.styles.push_back(std::move(style));
+      }
+    for (auto card : shown.cards)
+      if (card.at >= a && (card.at < b || (card.at == b && b == shown.text.size()))) { card.at -= a; part.cards.push_back(std::move(card)); }
+    return part;
+  };
+  std::vector<disclosure_row_t> rows;
+  const auto words = [&](std::size_t a, std::size_t b, const std::vector<std::size_t>& ancestors) {
+    const auto part = slice(a, b);
+    for (const auto& piece : pieces_of(part.text, part.links, part.styles, part.cards)) {
+      if (piece.card)
+        rows.emplace_back(std::in_place_type<disclosure_link_t>, disclosure_row(
+            card_of(colours, piece.card->url, piece.card->where, now), ancestors));
+      else if (piece.code)
+        rows.emplace_back(std::in_place_type<disclosure_code_t>, disclosure_row(
+            code_block(colours, piece.text, piece.language, quote, colours.text), ancestors));
+      else if (!piece.text.empty())
+        rows.emplace_back(std::in_place_type<disclosure_words_t>, disclosure_row(
+            piece_text(colours, piece, colours.text, quote), ancestors));
+    }
+  };
+  const auto append = [&](auto&& self, std::size_t index, std::vector<std::size_t> ancestors) -> void {
+    const auto& detail = shown.disclosures[index];
+    const auto summary = slice(detail.summary_first, detail.summary_last);
+    text_piece title{.text = summary.text.empty() ? std::string("Details") : summary.text,
+                     .links = summary.links, .styles = summary.styles};
+    rows.emplace_back(std::in_place_type<disclosure_header_t>, disclosure_header(colours, title, index, ancestors, quote));
+    ancestors.push_back(index);
+    const auto body = [&](std::size_t first, std::size_t last) {
+      auto at = first;
+      for (const auto& [child_index, child] : std::views::enumerate(shown.disclosures))
+        if (child.parent == index && child.first >= first && child.last <= last) {
+          words(at, child.first, ancestors);
+          self(self, static_cast<std::size_t>(child_index), ancestors);
+          at = child.last;
+        }
+      words(at, last, ancestors);
+    };
+    body(detail.first, detail.summary_first);
+    body(detail.summary_last, detail.last);
+  };
+  std::size_t at = 0;
+  for (const auto& [index, detail] : std::views::enumerate(shown.disclosures))
+    if (!detail.parent) {
+      words(at, detail.first, {});
+      append(append, static_cast<std::size_t>(index), {});
+      at = detail.last;
+    }
+  words(at, shown.text.size(), {});
+  disclosure_state initial{std::ranges::to<std::vector<bool>>(std::views::transform(shown.disclosures,
+      [](const auto& detail) { return detail.open; }))};
+  for (std::size_t i = 0; i < shown.disclosures.size(); ++i)
+    if (initial.open[i] && !shown.disclosures[i].group.empty())
+      for (std::size_t earlier = 0; earlier < i; ++earlier)
+        if (initial.open[earlier] && shown.disclosures[earlier].group == shown.disclosures[i].group)
+          initial.open[i] = false;
+  return c::column(c::vbox(0.0f, {.autoSize = scene::axes::kBoth}),
+      c::local<disclosure_state>(disclosure_events{shown.disclosures},
+          c::many(c::vbox(0.0f, {.autoSize = scene::axes::kBoth}), std::move(rows)), std::move(initial)),
+      c::visible(!after.text.empty(), piece_text(colours, after, colours.text, quote)));
+}
+using disclosure_piece_t = decltype(disclosure_piece(std::declval<const palette&>(),
+    std::declval<const mentioned&>(), std::declval<const text_piece&>(), nullptr, skia::SkColor{}));
+using message_piece = spl::variant<code_piece_t, link_piece_t, disclosure_piece_t>;
+
+[[nodiscard]] inline std::optional<std::string> message_link_at(const std::vector<message_piece>& pieces, float x, float y) {
+  for (const auto& piece : pieces) {
+    const auto url = spl::visit(spl::overloaded{[](const code_piece_t&) -> std::optional<std::string> { return std::nullopt; },
+        [](const disclosure_piece_t&) -> std::optional<std::string> { return std::nullopt; },
+        [&](const link_piece_t& link) -> std::optional<std::string> {
+          const auto& card = std::get<0>(link.fParts);
+          return card.bounds().contains(x, y) ? std::optional{card.fEvent.url} : std::nullopt;
+        }}, piece);
+    if (url)
+      return url;
+  }
+  return std::nullopt;
+}
 
 // A forward's line over its message, as Telegram's: "Forwarded from" and
 // the sender -- a person's pill, its avatar drawn by the message's pictures,
 // as a mention's -- each a node of its own: the pill pressed opens them,
 // the words the original.
-struct forward_line : nodes::Stack {
+struct forward_line : skiff::compose::Stacked {
   // Whose picture its pill waits for, where it has none yet: drawn again
   // when it comes.
   std::string from;
@@ -492,21 +740,24 @@ struct forward_line : nodes::Stack {
     nodes::Text label;
     nodes::BasicText<message_pictures> who;
   } parts;
-  forward_line(const palette& colours, std::string who, std::vector<nodes::Text::Link> links, skia::SkColor colour,
+  forward_line(const palette &colours, std::string who,
+               std::vector<nodes::Text::Link> links, skia::SkColor colour,
                std::string sender = {})
-      : from(std::move(sender)), parts{.label = nodes::Text("Forwarded from", 13.0f, colour, true),
-              .who = nodes::BasicText<message_pictures>(std::move(who), 13.0f, colour)} {
-    this->setHorizontal();
-    this->setGap(4.0f);
-    fState.apply({.autoSize = scene::axes::kBoth});
-    parts.label.apply({.alignSelf = scene::align::kMiddle});
+      : Stacked(skiff::compose::hbox(4.0f, {.autoSize = scene::axes::kBoth})),
+        from(std::move(sender)),
+        parts{.label = skiff::compose::styled(
+                  {.alignSelf = scene::align::kMiddle},
+                  nodes::Text("Forwarded from", 13.0f, colour, true)),
+              .who = skiff::compose::styled(
+                  {.alignSelf = scene::align::kMiddle},
+                  wrapped(nodes::BasicText<message_pictures>(std::move(who),
+                                                             13.0f, colour)))} {
+
     parts.who.setBold(true);
     // Wrapped, as a message text is: one on a single line draws its words
     // plain, its links and pills not at all -- no plate, no picture.
-    parts.who.setWrapped(true);
     parts.who.setShrinksToLines(true);
     parts.who.setLinks(std::move(links), colours.accent);
-    parts.who.apply({.alignSelf = scene::align::kMiddle});
     had = from.empty() || avatar_images().has(from);
     if (!had)
       avatar_images().waiting.wait(fState.fId);
@@ -526,24 +777,28 @@ struct forward_line : nodes::Stack {
 
 // Who has read up to a message, as Element shows it: their small faces at
 // the row's right under it, three at most and the rest counted.
-struct readers_row : nodes::Stack {
+struct readers_row : skiff::compose::Stacked {
   static constexpr float kFace = 14.0f;  // Element's read receipt avatar
   static constexpr std::size_t kMost = 3;
   struct parts_t {
     std::vector<avatar_mark> faces;
     nodes::Text more;
   } parts;
-  readers_row(const palette& colours, const conversation& in, const std::vector<std::string>& users)
-      : parts{.more = nodes::Text(users.size() > kMost ? std::format("+{}", users.size() - kMost) : std::string(),
-                                  10.0f, colours.dim)} {
-    this->setHorizontal();
-    this->setGap(2.0f);
-    fState.apply({.autoSize = scene::axes::kBoth});
+  readers_row(const palette &colours, const conversation &in,
+              const std::vector<std::string> &users)
+      : Stacked(skiff::compose::hbox(2.0f, {.autoSize = scene::axes::kBoth})),
+        parts{.more = skiff::compose::styled(
+                  {.alignSelf = scene::align::kMiddle},
+                  skiff::compose::visible(
+                      users.size() > kMost,
+                      nodes::Text(users.size() > kMost
+                                      ? std::format("+{}", users.size() - kMost)
+                                      : std::string(),
+                                  10.0f, colours.dim)))} {
+
     parts.faces.reserve(std::min(users.size(), kMost));
     for (std::size_t i = 0; i < users.size() && i < kMost; ++i)
       parts.faces.emplace_back(users[i], sender_name(in, users[i]), kFace);
-    parts.more.setVisible(users.size() > kMost);
-    parts.more.apply({.alignSelf = scene::align::kMiddle});
   }
 };
 

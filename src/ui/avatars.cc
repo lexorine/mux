@@ -71,9 +71,8 @@ export namespace mux::ui {
 // A round avatar: the colour of `id`, and the initials of `name` in it.
 // Pictures fetched, decoded, by what they are of. Least recently drawn
 // first out, past a number of bytes; what is out is read from the disk
-// again when it is wanted. Three of them, so that one kind never pushes
-// another out: avatars (by a chat's id, a person's), the thumbnails of the
-// pictures in messages, and whole pictures (both by their source).
+// again when it is wanted. Each kind has its own store and budget:
+// avatars, emoji, stickers, message thumbnails, and whole pictures.
 class avatar_cache {
  public:
   // Held to this many bytes; set from Storage. What was drawn in this frame
@@ -84,8 +83,30 @@ class avatar_cache {
   skiff::scene::Waiters waiting;
   void clear() {
     images_.clear();
+    sources_.clear();
     order_.clear();
     bytes_ = 0;
+  }
+
+  [[nodiscard]] bool source_known(std::string_view key) const { return sources_.contains(key); }
+  // Identity is stable, but its avatar URL is not. A removed avatar is a
+  // source change too; keep that tombstone to reject an older download.
+  bool use_source(const std::string& key, const std::optional<std::string>& source) {
+    const auto known = sources_.find(key);
+    if (known != sources_.end() && known->second == source)
+      return false;
+    sources_.insert_or_assign(key, source);
+    if (const auto found = images_.find(key); found != images_.end()) {
+      bytes_ -= found->second.bytes;
+      order_.erase(found->second.used);
+      images_.erase(found);
+    }
+    waiting.wake();
+    return true;
+  }
+  [[nodiscard]] bool accepts_source(std::string_view key, std::string_view source) const {
+    const auto known = sources_.find(key);
+    return known == sources_.end() || (known->second && *known->second == source);
   }
 
   // A picture, counted as used now: in this frame.
@@ -139,12 +160,24 @@ class avatar_cache {
   };
   std::list<std::string> order_;  // the most recently used first
   std::map<std::string, entry, std::less<>> images_;
+  std::map<std::string, std::optional<std::string>, std::less<>> sources_;
   std::size_t bytes_ = 0;
 };
 using image_cache = avatar_cache;
 inline image_cache& avatar_images() {
   static image_cache images;
   return images;
+}
+inline image_cache& emoji_images() {
+  static image_cache images;
+  return images;
+}
+inline image_cache& sticker_images() {
+  static image_cache images;
+  return images;
+}
+inline image_cache& emote_images(emote_kind kind = emote_kind::emoji) {
+  return kind == emote_kind::emoji ? emoji_images() : sticker_images();
 }
 inline image_cache& thumbnails() {
   static image_cache images;
@@ -187,7 +220,8 @@ class animation_cache {
     if (frames.size() < 2)
       return;
     animation made;
-    for (const skia::Frame& one : frames) {
+    for (skia::Frame& one : frames) {
+      one.durationMs = std::max(one.durationMs, 1);
       made.total_ms += one.durationMs;
       made.bytes += static_cast<std::size_t>(one.image->width()) * static_cast<std::size_t>(one.image->height()) * 4u;
     }
@@ -224,6 +258,21 @@ class animation_cache {
     }
     return &one.frames.back().image;
   }
+  // Absolute deadline on the same steady clock used to choose the frame.
+  // Frame durations may differ within one animation.
+  [[nodiscard]] double next_frame_at(std::string_view key, double ms) const {
+    const auto found = all_.find(key);
+    if (found == all_.end() || found->second.total_ms <= 0)
+      return std::numeric_limits<double>::infinity();
+    const animation& one = found->second;
+    double into = std::fmod(ms, static_cast<double>(one.total_ms));
+    for (const skia::Frame& each : one.frames) {
+      if (into < each.durationMs)
+        return ms + each.durationMs - into;
+      into -= each.durationMs;
+    }
+    return ms + one.frames.front().durationMs;
+  }
   void clear() {
     all_.clear();
     bytes_ = 0;
@@ -243,6 +292,17 @@ inline animation_cache& animations() {
   static animation_cache all;
   return all;
 }
+inline animation_cache& emoji_animations() {
+  static animation_cache all;
+  return all;
+}
+inline animation_cache& sticker_animations() {
+  static animation_cache all;
+  return all;
+}
+inline animation_cache& emote_animations(emote_kind kind = emote_kind::emoji) {
+  return kind == emote_kind::emoji ? emoji_animations() : sticker_animations();
+}
 // The clock animations are shown by.
 [[nodiscard]] inline double animation_clock() {
   return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -252,10 +312,22 @@ inline animation_cache& animations() {
 // looked up -- asked for each frame, so one that comes later is shown.
 // Values of types of their own, not functions kept.
 using picture_ptr = const skia::Sp<skia::SkImage>*;
-struct from_avatars {  // a chat's or a person's, a custom emoji's, a sticker's
+struct from_avatars {  // a chat's or a person's
   std::string key;
   picture_ptr operator()() const { return avatar_images().find(key); }
   skiff::scene::Waiters& waiters() const { return avatar_images().waiting; }
+};
+struct from_emotes {
+  std::string key;
+  emote_kind kind = emote_kind::emoji;
+  picture_ptr operator()() const {
+    if (picture_ptr moving = emote_animations(kind).at(key, animation_clock()))
+      return moving;
+    return emote_images(kind).find(key);
+  }
+  [[nodiscard]] bool animated() const { return emote_animations(kind).has(key); }
+  [[nodiscard]] double wakeAt() const { return emote_animations(kind).next_frame_at(key, animation_clock()); }
+  skiff::scene::Waiters& waiters() const { return emote_images(kind).waiting; }
 };
 struct from_previews {  // blurred, from a blurhash, until the picture comes
   std::string key;
@@ -263,13 +335,24 @@ struct from_previews {  // blurred, from a blurhash, until the picture comes
 };
 struct from_thumbnails {
   std::string key;
-  picture_ptr operator()() const { return thumbnails().find(key); }
-  skiff::scene::Waiters& waiters() const { return thumbnails().waiting; }
+  bool sticker = false;
+  picture_ptr operator()() const { return (sticker ? sticker_images() : thumbnails()).find(key); }
+  skiff::scene::Waiters& waiters() const { return (sticker ? sticker_images() : thumbnails()).waiting; }
 };
 // Where it moves, the frame for now; else its thumbnail.
 struct from_moving_thumbnail {
   std::string key;
+  bool emote = false;
+  [[nodiscard]] bool animated() const { return (emote ? sticker_animations() : animations()).has(key); }
+  [[nodiscard]] double wakeAt() const {
+    return (emote ? sticker_animations() : animations()).next_frame_at(key, animation_clock());
+  }
   picture_ptr operator()() const {
+    if (emote) {
+      if (picture_ptr moving = sticker_animations().at(key, animation_clock()))
+        return moving;
+      return sticker_images().find(key);
+    }
     if (picture_ptr moving = animations().at(key, animation_clock()))
       return moving;
     // Its thumbnail; else the whole of it, where that came first -- opened
@@ -282,6 +365,8 @@ struct from_moving_thumbnail {
 // Where it moves, the frame for now; else it whole.
 struct from_moving_whole {
   std::string key;
+  [[nodiscard]] bool animated() const { return animations().has(key); }
+  [[nodiscard]] double wakeAt() const { return animations().next_frame_at(key, animation_clock()); }
   picture_ptr operator()() const {
     if (picture_ptr moving = animations().at(key, animation_clock()))
       return moving;

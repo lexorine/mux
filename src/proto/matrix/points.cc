@@ -12,6 +12,9 @@ import mux.proto.matrix.requests;
 
 export namespace mux::proto::matrix {
 
+inline std::string directory_server(const state&, std::string_view address) {
+  return std::string(address.substr(address.find(':') + 1));
+}
 constexpr bool offers(const state&, feature::people_directory) { return true; }
 constexpr bool offers(const state&, feature::room_directory) { return true; }
 constexpr bool offers(const state&, feature::room_creation) { return true; }
@@ -187,6 +190,15 @@ inline std::vector<banner> composer_banners(const state& now, const conversation
       *trust);
 }
 constexpr bool can_pin(const state&, std::string_view event) { return event.starts_with('$'); }
+
+// Annotation targets are events, including state and reaction events. Local
+// transaction IDs cannot be related to until acknowledged by the server.
+inline bool may_react(const state&, const conversation& chat, const message& event) {
+  const auto& rules = rules_of(chat);
+  const auto asked = rules.needs.events.find("m.reaction");
+  const auto required = asked == rules.needs.events.end() ? rules.needs.events_default : asked->second;
+  return event.id.starts_with('$') && !event.redacted && level_of(chat, chat.id.account.address) >= required;
+}
 
 // As the room's power levels allow it: one's own where one may send a
 // redaction; another's where one may also redact.

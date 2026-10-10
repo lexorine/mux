@@ -10,6 +10,7 @@ import std;
 import splice;
 export import mux.proto.tags;
 export import mux.proto.state;
+export import skiff.model;
 
 export namespace mux {
 
@@ -32,6 +33,12 @@ struct conversation_id {
   std::string id;
   friend bool operator==(const conversation_id&, const conversation_id&) = default;
   friend auto operator<=>(const conversation_id&, const conversation_id&) = default;
+};
+
+// Preferences shared with another client; transport and device tokens stay local.
+struct notification_choices {
+  std::optional<bool> on, mentions, sound;
+  friend bool operator==(const notification_choices&, const notification_choices&) = default;
 };
 
 namespace conversation_kind {
@@ -314,9 +321,11 @@ struct message {
   struct version {
     mux::body body;
     std::chrono::sys_time<std::chrono::milliseconds> until{};
+    std::string event;  // the event that wrote this version, where known
     friend bool operator==(const version&, const version&) = default;
   };
   std::vector<version> versions;
+  std::string latest_edit_event;
   bool redacted = false;
   // Removed, but its content fetched back by a moderator (MSC2815): what
   // the server still kept of it, shown where the message was.
@@ -352,6 +361,7 @@ struct message {
     std::string key;
     std::string who;
     std::chrono::sys_time<std::chrono::milliseconds> at{};
+    std::optional<std::string> shortcode;
     friend bool operator==(const reaction_event&, const reaction_event&) = default;
   };
   std::vector<reaction_event> reaction_events;
@@ -433,6 +443,10 @@ struct emote {
   std::optional<std::string> mimetype;
   std::string pack;
   std::optional<std::string> pack_avatar;
+  // Identity stays separate from the display name: equally named packs
+  // from different spaces must have their own section and subscription.
+  std::optional<std::string> pack_room;
+  std::string pack_key;
   friend bool operator==(const emote&, const emote&) = default;
 };
 
@@ -556,9 +570,13 @@ struct link {
   std::string url;
   friend bool operator==(const link&, const link&) = default;
 };
+struct custom_emoji {
+  std::string url;
+  friend bool operator==(const custom_emoji&, const custom_emoji&) = default;
+};
 }  // namespace run_style
 using run_style_t = spl::variant<run_style::bold, run_style::italic, run_style::underline, run_style::strike,
-                                 run_style::spoiler, run_style::code, run_style::link>;
+                                 run_style::spoiler, run_style::code, run_style::link, run_style::custom_emoji>;
 // A run of what is sent, by byte offsets in its text, and how it is formatted.
 struct styled_run {
   std::size_t first = 0;
@@ -678,6 +696,9 @@ struct conversation {
   std::uint64_t members_revision = 0;
   // Invited to, not joined: who asked. Joined, or declined, it goes.
   std::optional<invite_info> invite;
+  // Changed whole by the model's edits, as one part: what is in it is not
+  // looked into by its search.
+  using ModelOpaque = void;
 };
 
 // Its newest message, as the chat list shows it and sorts by: the last of
@@ -708,7 +729,7 @@ struct account {
   account_id id;
   connection_t state = connection::offline{};
   std::string display_name;
-  std::map<std::string, conversation> conversations;  // by conversation id
+  skiff::model::Keyed<std::string, conversation> conversations;  // by conversation id
   std::map<std::string, presence> presences;          // by contact
 };
 
@@ -734,9 +755,19 @@ void log(const account_id& who, std::format_string<Args...> what, Args&&... args
 
 // What a picture or a file is fetched for: told by its type, never by a
 // word in a key.
+enum class emote_kind { emoji, sticker };
+struct emote_picture {
+  std::string source;
+  emote_kind kind = emote_kind::emoji;
+  friend bool operator==(const emote_picture&, const emote_picture&) = default;
+};
 namespace media_use {
 struct avatar {  // a chat's avatar or a person's, shown by their id
   std::string of;
+};
+struct emote {  // custom emoji and stickers, isolated from other pictures
+  bool animated = false;
+  emote_kind kind = emote_kind::emoji;
 };
 struct thumbnail {};  // a message's picture, small, as the chat shows it
 struct whole {};      // a message's picture, whole, as the viewer shows it
@@ -754,7 +785,7 @@ struct to_watch {};
 // the clipboard.
 struct to_copy {};
 }  // namespace media_use
-using media_use_t = spl::variant<media_use::avatar, media_use::thumbnail, media_use::whole, media_use::to_open,
+using media_use_t = spl::variant<media_use::avatar, media_use::emote, media_use::thumbnail, media_use::whole, media_use::to_open,
                                  media_use::to_save, media_use::to_play, media_use::to_watch, media_use::to_copy>;
 
 // Where a message goes among those of its chat.

@@ -111,6 +111,13 @@ class loop {
   // a program whose other thread posts work to it.
   void run_forever() {
     auto kept = asio::make_work_guard(io_);
+    // Unwind parked fibers on the thread that ran them, while the network
+    // still owns their accounts and TLS. Leaving them for the loop's
+    // destructor resumed their cleanup later on the window's thread.
+    struct unwind_parked {
+      std::vector<std::unique_ptr<task>>& tasks;
+      ~unwind_parked() { tasks.clear(); }
+    } unwind{tasks_};
     io_.run();
   }
 
@@ -450,6 +457,15 @@ class stream {
 
   // What ended the stream, where the network did.
   std::optional<error_code> failed() const { return failed_; }
+
+  // Cancel a dead connection without waiting for a TLS shutdown reply.
+  // Outstanding reads and writes complete with an error and wake their fibers.
+  void abort() {
+    error_code ignored;
+    failed_ = asio::error::operation_aborted;
+    stream_.next_layer().cancel(ignored);
+    stream_.next_layer().close(ignored);
+  }
 
   void close() {
     error_code ignored;

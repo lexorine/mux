@@ -5,26 +5,14 @@ export module mux.ui:emoji_kept;
 import std;
 import splice;
 import skia;
-import skiff.paint;
 import skiff.scene;
-import skiff.nodes.box;
+import skiff.compose;
 import skiff.nodes.flow;
 import skiff.nodes.image;
-import skiff.nodes.scroll;
 import skiff.nodes.text;
-import skiff.widgets.textbox;
 import mux.core;
-import mux.config;
-import mux.logic.emoji;
 import :base;
-import :icons;
-import :controls;
-import :themes;
 import :avatars;
-import :timeline;
-import :conversations;
-import :forms;
-import :names;
 
 export namespace mux::ui {
 
@@ -36,15 +24,28 @@ struct previewed {
   std::string key;    // a picture's source, or a glyph
   std::string label;  // its :shortcode:, or nothing
   bool picture = false;
+  emote_kind kind = emote_kind::emoji;
   friend bool operator==(const previewed&, const previewed&) = default;
 };
 // The emoji and stickers kept, as the program holds them: handed to the
 // window with its colours (ui_needs), and from it to the panels.
+inline std::optional<emote> copied_emoji_at(std::string_view target) {
+  const auto& copied = skiff::scene::clipboardCandidate();
+  if (!copied) return std::nullopt;
+  const auto found = std::ranges::find_if(copied->atoms, [&](const auto& atom) { return atom.picture && atom.target == target; });
+  if (found == copied->atoms.end()) return std::nullopt;
+  std::string code = found->plain;
+  if (code.starts_with(':') && code.ends_with(':') && code.size() > 2) code = code.substr(1, code.size() - 2);
+  return emote{.shortcode = std::move(code), .url = found->target, .body = found->plain};
+}
 struct emoji_kept {
+  bool custom_emoji = true;
   // The emoji picked lately, newest first, as tdesktop keeps them (at most 42).
   std::vector<std::string> recent_emoji;
+  std::vector<emote> favourite_emoji;
   // The custom emoji and stickers of the chat the panel is opened over.
   std::vector<emote> chat_emotes, chat_stickers;
+  std::optional<account_id> pack_account;
   // The stickers sent lately, newest first, as tdesktop's Recent (at most
   // 20); and the favourites, from a sticker's menu, in any chat.
   std::vector<emote> recent_stickers, favourite_stickers;
@@ -53,6 +54,12 @@ struct emoji_kept {
   // The emoji or sticker the mouse rests on, shown large over its panel.
   std::optional<previewed> previewed_now;
 
+  [[nodiscard]] bool emoji_is_favourite(std::string_view url) const { return std::ranges::contains(favourite_emoji, url, &emote::url); }
+  void flip_emoji_favourite(const emote& one) {
+    if (emoji_is_favourite(one.url)) std::erase_if(favourite_emoji, [&](const emote& each) { return each.url == one.url; });
+    else favourite_emoji.insert(favourite_emoji.begin(), one);
+    emoji_changed = true;
+  }
   void remember_emoji(const std::string& glyph) {
     constexpr std::size_t kKept = 42;
     std::erase(recent_emoji, glyph);
@@ -79,14 +86,6 @@ struct emoji_kept {
     stickers_changed = true;
   }
 };
-
-// The input's popup's pages.
-namespace popup_page {
-struct emoji {};
-struct stickers {};
-struct gifs {};
-}  // namespace popup_page
-using popup_page_t = spl::variant<popup_page::emoji, popup_page::stickers, popup_page::gifs>;
 
 // How long the mouse rests on one before it is shown large.
 inline constexpr double kPreviewAfterMs = 450.0;
@@ -115,39 +114,31 @@ struct dwell {
 };
 // The preview, over a panel: a dark plate, the picture or glyph large, its
 // name under it.
-struct emote_preview : nodes::Stack {
-  static constexpr float kSide = 200.0f;
-  struct parts_t {
-    std::optional<nodes::Image<from_avatars>> picture;
-    nodes::Text glyph;
-    nodes::Text label;
-  } parts;
-  emote_preview(const palette& colours, const previewed& shown)
-      : parts{.glyph = nodes::Text(shown.picture ? std::string() : shown.key, 120.0f, colours.text),
-              .label = nodes::Text(shown.label, 14.0f, colours.text)} {
-    this->setGap(8.0f);
-    fStack.justify = nodes::justify::middle{};
-    fState.apply({.place = scene::anchor::kCentre, .autoSize = scene::axes::kBoth,
-                  .padding = {16.0f, 16.0f, 16.0f, 16.0f}, .cornerRadius = 14.0f,
-                  .background = (colours.sidebar & 0x00FFFFFFu) | (0xF0u << 24)});
-    if (shown.picture) {
-      parts.picture.emplace(from_avatars{shown.key});
-      parts.picture->apply({.width = kSide, .height = kSide, .alignSelf = scene::align::kMiddle});
-    }
-    parts.glyph.setVisible(!shown.picture);
-    parts.glyph.apply({.alignSelf = scene::align::kMiddle});
-    parts.label.setVisible(!shown.label.empty());
-    parts.label.apply({.alignSelf = scene::align::kMiddle});
-  }
-};
+[[nodiscard]] inline auto emote_preview(const palette& colours, const previewed& shown) {
+  namespace c = skiff::compose;
+  std::optional<nodes::Image<from_emotes>> picture;
+  if (shown.picture)
+    picture.emplace(c::styled({.width = 200.0f, .height = 200.0f, .alignSelf = scene::align::kMiddle},
+                               nodes::Image<from_emotes>({shown.key, shown.kind})));
+  return c::column(c::justified(c::vbox(8.0f, {.place = scene::anchor::kCentre,
+      .autoSize = scene::axes::kBoth, .padding = {16.0f, 16.0f, 16.0f, 16.0f},
+      .cornerRadius = 14.0f, .background = (colours.sidebar & 0x00FFFFFFu) | (0xF0u << 24)}),
+      nodes::justify::middle{}),
+    std::move(picture),
+    c::styled({.alignSelf = scene::align::kMiddle}, c::visible(!shown.picture,
+        nodes::Text(shown.picture ? std::string{} : shown.key, 120.0f, colours.text))),
+    c::styled({.alignSelf = scene::align::kMiddle}, c::visible(!shown.label.empty(),
+        nodes::Text(shown.label, 14.0f, colours.text))));
+}
+using emote_preview_t = decltype(emote_preview(std::declval<const palette&>(), std::declval<const previewed&>()));
 // A panel's preview kept to what the cells say: made anew as it changes.
-inline bool follow_preview(std::optional<emote_preview>& shown, std::optional<previewed>& of, const palette& colours, const emoji_kept& kept) {
+inline bool follow_preview(std::optional<emote_preview_t>& shown, std::optional<previewed>& of, const palette& colours, const emoji_kept& kept) {
   if (of == kept.previewed_now)
     return false;
   of = kept.previewed_now;
   shown.reset();
   if (of)
-    shown.emplace(colours, *of);
+    shown.emplace(emote_preview(colours, *of));
   return true;
 }
 

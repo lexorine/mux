@@ -10,7 +10,10 @@ import mux.logic.reading;
 import mux.logic.drafts;
 import mux.logic.links;
 import mux.logic.messages;
+import mux.logic.forwarding;
 import mux.logic.blurhash;
+import mux.logic.markdown;
+import mux.logic.reactions;
 
 #include "gtest/gtest-macros.h"
 
@@ -85,6 +88,13 @@ TEST(Reading, ReadUpToWhatWasSeenOnly) {
   chat.read_up_to = "9";
   chat.detached = true;
   EXPECT_EQ(logic::read_up_to_seen(chat, "4"), std::nullopt);
+}
+
+TEST(Reading, MarkAllReadDoesNotMoveBehindAnOutgoingReceipt) {
+  conversation chat;
+  chat.timeline = {said("1", "incoming"), said("2", "outgoing", true)};
+  chat.read_up_to = "2";
+  EXPECT_EQ(logic::to_mark_read(chat), std::nullopt);
 }
 
 TEST(Reading, TypingSaidAtMostEveryTwentySeconds) {
@@ -173,4 +183,140 @@ TEST(Blurhash, DecodesAndRefusesWhatIsNotOne) {
   EXPECT_FALSE(logic::blurhash_pixels("LEHV6n", 32, 24).has_value());
 }
 
+}  // namespace
+
+TEST(Markdown, PreservedEmojiSourcesReplaceRepeatedLabelsInsideFormattedText) {
+  const std::string image = R"(<img data-mx-emoticon src="mxc://remote/cat" alt=":cat:" height="32">)";
+  const std::vector<mux::logic::html_run> runs{{0, 13, "<strong>", "</strong>"},
+      {2, 7, {}, {}, image}, {8, 13, {}, {}, image}};
+  EXPECT_EQ(mux::logic::markdown_html("a :cat: :cat: z", runs),
+      "<strong>a " + image + " " + image + "</strong> z");
+}
+
+TEST(Reactions, TypedCustomNamesBecomeMediaKeysAndKeepReadableLabels) {
+  const std::vector<mux::emote> emotes{{.shortcode = "neocat", .url = "mxc://room/cat"}};
+  for (const std::string text : {":neocat", ":neocat:"}) {
+    const auto one = mux::logic::reaction_text_of(text, emotes);
+    EXPECT_EQ(one.key, "mxc://room/cat");
+    EXPECT_EQ(one.label, ":neocat:");
+    EXPECT_TRUE(one.custom);
+  }
+  const auto mixed = mux::logic::reaction_text_of("hi :neocat: :neocat:!", emotes);
+  EXPECT_EQ(mixed.key, "hi mxc://room/cat mxc://room/cat !");
+  EXPECT_EQ(mixed.label, "hi :neocat: :neocat:!");
+  const auto unknown = mux::logic::reaction_text_of("hi :unknown: 👍", emotes);
+  EXPECT_EQ(unknown.key, "hi :unknown: 👍");
+  EXPECT_EQ(unknown.label, unknown.key);
+  EXPECT_FALSE(unknown.custom);
+}
+
+TEST(Reactions, CopiedImageOverridesRoomNamesAndWorksWithoutItsPack) {
+  const std::vector<mux::emote> emotes{{.shortcode = "neocat", .url = "mxc://room/different"}};
+  const std::vector<mux::logic::reaction_image> copied{{3, 11, "mxc://remote/original", ":neocat:"}};
+  for (const auto& available : {emotes, std::vector<mux::emote>{}}) {
+    const auto one = mux::logic::reaction_text_of("hi :neocat:!", available, copied);
+    EXPECT_EQ(one.key, "hi mxc://remote/original !");
+    EXPECT_EQ(one.label, "hi :neocat:!");
+    EXPECT_TRUE(one.custom);
+  }
+}
+
+TEST(Forwarding, KeepsQuotedCaptionLinksAndEmojiInsideForward) {
+  const std::string caption = "<blockquote>quoted text</blockquote><p><a href='https://example.org'>link</a>"
+                              "<img data-mx-emoticon src='mxc://server/emoji'></p>";
+  const auto parsed = mux::logic::unwrap_forward(
+      "<P><B>Forwarded from <a class='user' href='https://matrix.to/#/@alice:example.org'>"
+      "<span>Alice &amp; Bob</span></a></B></P>\n<blockquote>" + caption + "</blockquote>");
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_EQ(parsed->origin.from, "@alice:example.org");
+  EXPECT_EQ(parsed->origin.name, "Alice & Bob");
+  EXPECT_EQ(parsed->html, caption);
+}
+
+TEST(Forwarding, PeelsNestedAttributionsWithoutRemovingMessageQuotes) {
+  const std::string caption = "<blockquote>real quote</blockquote><a href='https://example.org'>link</a>";
+  const auto outer = mux::logic::unwrap_forward(
+      "<strong>Forwarded from <a href='https://matrix.to/#/@bob:example.org'>Bob</a></strong><blockquote>"
+      "<b>Forwarded from <a href='https://matrix.to/#/@alice:example.org'>Alice</a></b><blockquote>" + caption +
+      "</blockquote></blockquote>");
+  ASSERT_TRUE(outer.has_value());
+  const auto inner = mux::logic::unwrap_forward(outer->html);
+  ASSERT_TRUE(inner.has_value());
+  EXPECT_EQ(inner->origin.from, "@alice:example.org");
+  EXPECT_EQ(inner->html, caption);
+  EXPECT_FALSE(mux::logic::unwrap_forward(inner->html).has_value());
+}
+
+TEST(Forwarding, PreservesTextOutsideQuoteAndOrdinaryQuotes) {
+  EXPECT_FALSE(mux::logic::unwrap_forward("<blockquote>ordinary quote</blockquote>").has_value());
+  EXPECT_FALSE(mux::logic::unwrap_forward(
+      "<strong>Forwarded from <a href='https://matrix.to/#/@alice:example.org'>Alice</a></strong>"
+      "<blockquote>body</blockquote><p>additional message</p>").has_value());
+}
+
+TEST(Forwarding, KeepsLongCaptionAfterParserCompaction) {
+  const std::string caption = "<blockquote>" + std::string(9000, 'x') + "</blockquote><p>caption</p>";
+  const auto parsed = mux::logic::unwrap_forward(
+      "<strong>Forwarded from <a href='https://matrix.to/#/@alice:example.org'>Alice</a></strong>"
+      "<blockquote>" + caption + "</blockquote>");
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_EQ(parsed->html, caption);
+}
+
+namespace {
+using namespace mux;
+
+TEST(Links, XmppRoomAddressesAndJoinUris) {
+  using mux::proto::xmpp::room_address;
+  EXPECT_EQ(room_address("room@conference.example.org"),
+            std::optional(mux::proto::xmpp::link::room{"room@conference.example.org", std::nullopt}));
+  EXPECT_EQ(room_address("Room@Conference.Example.ORG"),
+            std::optional(mux::proto::xmpp::link::room{"room@conference.example.org", std::nullopt}));
+  EXPECT_EQ(logic::link_of("xmpp:room%40conference.example.org?join"),
+            std::optional<logic::link_t>(mux::proto::xmpp::link::room{"room@conference.example.org", std::nullopt}));
+  EXPECT_FALSE(room_address("room name").has_value());
+  EXPECT_FALSE(room_address("@conference.example.org").has_value());
+  EXPECT_FALSE(room_address("room@").has_value());
+  EXPECT_FALSE(room_address("room@conference.example.org/nick").has_value());
+  EXPECT_FALSE(room_address("xmpp:person@example.org?message").has_value());
+}
+
+TEST(Links, XmppRoomJoinUsesSelectedAccountAndWaitsForItsOwnRoom) {
+  model now;
+  const account_id first{protocol::xmpp{}, "first@example.org"};
+  const account_id second{protocol::xmpp{}, "second@example.org"};
+  const std::string jid = "room@conference.example.org";
+  now.apply(change::connection_changed{first, connection::online{}});
+  now.apply(change::connection_changed{second, connection::online{}});
+  now.apply(change::conversation_updated{.id = {first, jid}, .kind = conversation_kind::group{}});
+  const proto::xmpp::link::room selected{jid, second};
+  EXPECT_EQ(logic::where_to(now, selected, first),
+            logic::link_step_t(logic::link_step::join{second, jid, {}}));
+  EXPECT_FALSE(logic::chat_of(now, selected).has_value());
+  now.apply(change::conversation_updated{.id = {second, jid}, .kind = conversation_kind::group{}});
+  EXPECT_EQ(logic::chat_of(now, selected), std::optional(conversation_id{second, jid}));
+  EXPECT_EQ(logic::where_to(now, selected, first),
+            logic::link_step_t(logic::link_step::open_chat{{second, jid}, std::nullopt}));
+}
+
+}  // namespace
+
+namespace {
+TEST(Links, MatrixPendingRoomJoinKeepsItsSelectedAccount) {
+  using namespace mux;
+  model now;
+  const account_id first{protocol::matrix{}, "@first:example.org"};
+  const account_id second{protocol::matrix{}, "@second:example.org"};
+  now.apply(change::connection_changed{first, connection::online{}});
+  now.apply(change::connection_changed{second, connection::online{}});
+  now.apply(change::conversation_updated{.id = {first, "!room:example.org"},
+      .kind = conversation_kind::group{}, .alias = "#lounge:example.org"});
+  const auto link = logic::on_account(proto::matrix::link::room{"#lounge:example.org", std::nullopt, {}}, second);
+  EXPECT_FALSE(logic::chat_of(now, link).has_value());
+  EXPECT_EQ(logic::where_to(now, link, first),
+            logic::link_step_t(logic::link_step::join{second, "#lounge:example.org", {}}));
+  now.apply(change::conversation_updated{.id = {second, "!room:example.org"},
+      .kind = conversation_kind::group{}, .alias = "#lounge:example.org"});
+  EXPECT_EQ(logic::chat_of(now, link), std::optional(conversation_id{second, "!room:example.org"}));
+}
 }  // namespace

@@ -5,6 +5,7 @@ export module mux.proto.matrix.client:events;
 import std;
 import loom.media;
 import chevron.escape;
+import mux.logic.forwarding;
 import loom.crypto;
 import splice;
 import knot;
@@ -31,6 +32,20 @@ import :account;
 // The members defined here are declared in :account, and exported there.
 namespace mux::proto::matrix::client {
 
+// MSC4027's textual label is event content, not part of the reaction key.
+struct reaction_label {
+  std::optional<std::string> stable, unstable;
+  friend consteval auto json_schema(knot::type<reaction_label>) {
+    return knot::schema<reaction_label>().member<"stable">(knot::key("shortcode"))
+        .member<"unstable">(knot::key("com.beeper.reaction.shortcode"));
+  }
+};
+inline std::optional<std::string> shortcode_of(const knot::raw& content) {
+  const auto read = knot::try_read<reaction_label>(content.text);
+  if (!read) return std::nullopt;
+  return read->stable ? read->stable : read->unstable;
+}
+
 // A picture's or a file's facts, as an attachment keeps them.
 // Of a message's own info or a gallery item's: loom reads both alike.
 inline void carry_info(mux::attachment& carried, const auto& info) {
@@ -42,23 +57,6 @@ inline void carry_info(mux::attachment& carried, const auto& info) {
 }
 
 using member_content = loom::ev::m_room_member_content_t;
-// The links of an attribution, in order: where each goes, and its words.
-inline std::vector<std::pair<std::string, std::string>> links_in(std::string_view html) {
-  std::vector<std::pair<std::string, std::string>> out;
-  constexpr std::string_view open = "<a href=\"";
-  for (std::size_t at = html.find(open); at != std::string_view::npos; at = html.find(open, at)) {
-    const std::size_t from = at + open.size();
-    const std::size_t quote = html.find('"', from);
-    const std::size_t words = quote == std::string_view::npos ? quote : html.find('>', quote);
-    const std::size_t close = words == std::string_view::npos ? words : html.find("</a>", words);
-    if (close == std::string_view::npos)
-      break;
-    out.emplace_back(std::string(html.substr(from, quote - from)), std::string(html.substr(words + 1, close - words - 1)));
-    at = close;
-  }
-  return out;
-}
-
 template <class Sink>
 void account<Sink>::event(const conversation_id& in, const loom::ev::timeline_event& one, placement_t where, bool sealed) {
   // A thread's root: its summary, as the server counts it, where it has one
@@ -96,10 +94,14 @@ void account<Sink>::event(const conversation_id& in, const loom::ev::timeline_ev
         sink_(change::message_edited{in, *relates->event_id,
                                      body_of(content.m_new_content->body.value_or(""), content.m_new_content->format,
                                              content.m_new_content->formatted_body),
-                                     one.sender, !sealed, at});
-      // Nothing shows an edit under its own id: what waits for it there --
-      // a mark made of it before edits were told apart -- let go.
-      sink_(change::event_missing{in, one.event_id, relates->event_id});
+                                     one.sender, !sealed, at, one.event_id});
+      // Keep the edit as an event too. Edit history and nested reactions
+      // target this ID, independently of the original message it replaced.
+      if (content.m_new_content)
+        this->added(message{.in = in, .id = one.event_id, .sender = one.sender, .at = at,
+            .body = body_of(content.m_new_content->body.value_or(""), content.m_new_content->format,
+                            content.m_new_content->formatted_body),
+            .outgoing = one.sender == id_.address}, placement::aside{}, sealed);
       // An edit that mentions the user, by another: the message it edits
       // marked as mentioning them, as tdesktop counts a mention added by an
       // edit -- the @ to go to, and no notification.
@@ -199,40 +201,19 @@ void account<Sink>::event(const conversation_id& in, const loom::ev::timeline_ev
     } else if (content.com_famedly_app_forwarded) {
       made.forwarded = origin(*content.com_famedly_app_forwarded);
     } else if (content.xyz_extera_forward && content.xyz_extera_forward->attribution) {
-      // Who from, as an attribution's links say: the person, then where.
-      const auto from_links = [](const std::string& attribution) -> std::optional<forward_info> {
-        const auto links = links_in(attribution);
-        if (links.empty())
-          return std::nullopt;
-        constexpr std::string_view person = "https://matrix.to/#/";
-        const std::string& to = links.front().first;
-        return forward_info{.from = to.starts_with(person) ? to.substr(person.size()) : to,
-                            .name = links.front().second,
-                            .link = links.size() > 1 ? links[1].first : std::string()};
-      };
-      made.forwarded = from_links(*content.xyz_extera_forward->attribution);
-      // Its attribution in bold, the message quoted under it -- and, forwarded
-      // again, the same inside, as many times over: each taken off, and the
-      // innermost's author said, as Telegram says a forward's first author.
-      // Only the first had Extera's mark; those inside are its text alone.
-      constexpr std::string_view head = "<strong>Forwarded from ", quoted = "</strong><blockquote>", tail = "</blockquote>";
-      for (bool outer = true; made.forwarded && made.body.html && made.body.html->starts_with(head) &&
-                              made.body.html->ends_with(tail);
-           outer = false) {
-        const std::string& html = *made.body.html;
-        const auto inner = html.find(quoted);
-        if (inner == std::string::npos)
-          break;
-        if (!outer)
-          if (auto deeper = from_links(html.substr(std::string_view("<strong>").size(), inner - std::string_view("<strong>").size())))
-            made.forwarded = std::move(deeper);
-        made.body.html = html.substr(inner + quoted.size(), html.size() - inner - quoted.size() - tail.size());
-      }
-      while (made.forwarded && made.body.plain.starts_with("Forwarded from "))
+      made.forwarded = logic::forward_attribution(*content.xyz_extera_forward->attribution);
+    }
+    // A forwarded media caption can contain an older inline attribution even
+    // when the new forward uses MSC2723. Lift it into the bubble's header,
+    // above the attachment, independently of which metadata mark was used.
+    while (made.body.html) {
+      auto unwrapped = logic::unwrap_forward(*made.body.html, made.forwarded.has_value());
+      if (!unwrapped) break;
+      made.forwarded = std::move(unwrapped->origin);
+      made.body.html = std::move(unwrapped->html);
+      if (made.body.plain.starts_with("Forwarded from "))
         if (const auto line = made.body.plain.find('\n'); line != std::string::npos)
-          made.body.plain = made.body.plain.substr(line + 1);
-        else
-          break;
+          made.body.plain.erase(0, line + 1);
     }
     if (made.body.plain.empty() && !made.body.html && !made.attachment && made.album.empty())
       made.body.plain = "Unsupported message (" + (content.msgtype.empty() ? std::string("no msgtype") : content.msgtype) + ")";
@@ -263,7 +244,7 @@ void account<Sink>::event(const conversation_id& in, const loom::ev::timeline_ev
       reactions_[one.event_id] = {*content.m_relates_to->event_id, *content.m_relates_to->key, one.sender};
       const bool live = (!telling_history_ && placed_as_news(where));
       sink_(change::reaction_changed{in, *content.m_relates_to->event_id, *content.m_relates_to->key, one.sender,
-                                     true, one.event_id, at, live});
+                                     true, one.event_id, at, live, shortcode_of(content.rest)});
       // Fetched on its own, as what a reply quotes: a message of its own for
       // the quote, whether reactions are shown as events or not -- "Reacted
       // with" its key -- pointing at what it reacted to.
@@ -514,7 +495,6 @@ void account<Sink>::done(const conversation_id& in, const loom::ev::timeline_eve
           [&](const member_content& content) {
             const std::string target_id = one.state_key.value_or(one.sender);
             const std::string target = content.displayname.value_or(name_in(in.id, target_id));
-            // What it was: the content before, as the server gives it beside.
             // What it was: the content before, as the server gives it beside --
             // read by knot as the event's own type, from the event's type.
             std::optional<member_content> before;
@@ -547,7 +527,9 @@ void account<Sink>::done(const conversation_id& in, const loom::ev::timeline_eve
                                               person(target_id, shown) + chevron::escaped(line));
                                     };
                                     if (old_name && new_name && *old_name != *new_name) {
-                                      named(*old_name, " changed their display name to " + *new_name);
+                                      // Person pills resolve to the current member name. Keep
+                                      // the historical names in the text as well as the link.
+                                      named(target, std::format(" changed their display name from {} to {}", *old_name, *new_name));
                                       return;
                                     }
                                     if (old_name && !new_name) {

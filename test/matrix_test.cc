@@ -6,6 +6,8 @@
 // sent and acknowledged; a later sync; stopped.
 import std;
 import mux.vault;
+import knot;
+import loom.ev;
 import splice;
 import mux.core;
 import mux.net;
@@ -35,7 +37,10 @@ const std::string first_sync = R"({"next_batch":"s1","rooms":{"join":{"!r:x.org"
    "content":{"msgtype":"m.text","body":"* hello there","m.new_content":{"msgtype":"m.text","body":"hello there"},
               "m.relates_to":{"rel_type":"m.replace","event_id":"$m1"}}},
   {"type":"m.reaction","event_id":"$r1","sender":"@a:x.org","origin_server_ts":13,
-   "content":{"m.relates_to":{"rel_type":"m.annotation","event_id":"$m1","key":"👍"}}}]},
+   "content":{"m.relates_to":{"rel_type":"m.annotation","event_id":"$m1","key":"👍"}}},
+  {"type":"m.room.member","state_key":"@renamed:x.org","event_id":"$renamed","sender":"@renamed:x.org","origin_server_ts":14,
+   "content":{"membership":"join","displayname":"New"},
+   "unsigned":{"prev_content":{"membership":"join","displayname":"Old <&>"}}}]},
  "ephemeral":{"events":[{"type":"m.typing","content":{"user_ids":["@b:x.org"]}}]},
  "unread_notifications":{"highlight_count":0,"notification_count":2}}}}})";
 
@@ -83,6 +88,7 @@ struct recorder {
   mux::model model;
   std::vector<mux::connection_t> states;
   bool sent = false;
+  int room_updates = 0, member_updates = 0, typing_updates = 0;
   std::optional<mux::proto::matrix::client::account<sink>> account;
 };
 
@@ -97,6 +103,11 @@ void sink::operator()(mux::change_t one) const {
                              },
                              [](const auto&) {}},
              one);
+  spl::visit(spl::overloaded{
+      [&](const mux::change::conversation_updated&) { ++to->room_updates; },
+      [&](const mux::change::members_changed&) { ++to->member_updates; },
+      [&](const mux::change::typing_changed&) { ++to->typing_updates; },
+      [](const auto&) {}}, one);
   // A message sent once the room is there.
   const bool room_there = spl::visit(spl::overloaded{[](const mux::change::conversation_updated&) { return true; },
                                                      [](const auto&) { return false; }},
@@ -104,6 +115,12 @@ void sink::operator()(mux::change_t one) const {
   if (room_there && !to->sent) {
     to->sent = true;
     to->account->send("!r:x.org", "from mux");
+    to->account->send_in_thread("!r:x.org", "> :neocat:\n\nreply", "$root", "$root", "$quoted",
+        {{2, 10, mux::run_style::custom_emoji{"mxc://original/neocat"}}});
+    to->account->react("!r:x.org", "$m1", "mxc://remote/neocat", true, ":neocat:");
+    to->account->react("!r:x.org", "$m1", "hi mxc://remote/neocat", true, "hi :neocat:");
+    to->account->react("!r:x.org", "$m1", "👍", true);
+    to->account->react("!r:x.org", "$m1", "mxc://remote/long", true, std::string(101, 'a'));
   }
   to->model.apply(one);
 }
@@ -118,7 +135,8 @@ TEST(Matrix, AgainstAHomeserverOverTls) {
 
   std::vector<request> heard;
   recorder seen{.running = &running};
-  int syncs = 0;
+  int syncs = 0, reactions_sent = 0, messages_sent = 0;
+  std::array<int, 3> initial_updates{};
   running.spawn([&] {
     for (;;) {
       auto socket = listening.accept();
@@ -140,11 +158,22 @@ TEST(Matrix, AgainstAHomeserverOverTls) {
                 body = first_sync;
               else {
                 body = R"({"next_batch":"s)" + std::to_string(syncs) + R"("})";
-                if (syncs >= 3)
+                if (syncs == 2) {
+                  initial_updates = {seen.room_updates, seen.member_updates, seen.typing_updates};
+                  body = R"({"next_batch":"s2","rooms":{"join":{"!r:x.org":{
+                    "ephemeral":{"events":[{"type":"m.receipt","content":{
+                      "$m1":{"m.read":{"@b:x.org":{"ts":15}}}}}]}}}}})";
+                }
+                if (syncs >= 3 && reactions_sent == 4 && messages_sent == 2)
                   seen.account->stop();
               }
+            } else if (one->target.find("/send/m.reaction/") != std::string::npos) {
+              ++reactions_sent;
+              body = R"({"event_id":"$reaction)" + std::to_string(reactions_sent) + R"("})";
             } else if (one->target.find("/send/m.room.message/") != std::string::npos) {
-              body = R"({"event_id":"$sent"})";
+              ++messages_sent;
+              body = one->body.find("m.thread") != std::string::npos
+                         ? R"({"event_id":"$threadsent"})" : R"({"event_id":"$sent"})";
             }
             wire->write(answer(body));
             wire->flush();
@@ -163,6 +192,9 @@ TEST(Matrix, AgainstAHomeserverOverTls) {
   seen.account.emplace(running, client_tls, how, sink{&seen});
   seen.account->start();
   running.run();
+  EXPECT_EQ(seen.room_updates, initial_updates[0]);
+  EXPECT_EQ(seen.member_updates, initial_updates[1]);
+  EXPECT_EQ(seen.typing_updates, initial_updates[2]);
   const auto& states = seen.states;
   const auto& model = seen.model;
 
@@ -186,12 +218,43 @@ TEST(Matrix, AgainstAHomeserverOverTls) {
   EXPECT_EQ(room->timeline[1].id, "$m2");
   EXPECT_EQ(room->timeline[1].replies_to, "$m1");
   EXPECT_TRUE(room->timeline[1].outgoing);
+  // Historical names remain literal text even when the person pill resolves
+  // to the current member name; HTML must escape the previous content.
+  const auto renamed = std::ranges::find(room->timeline, "$renamed", &mux::message::id);
+  ASSERT_NE(renamed, room->timeline.end());
+  EXPECT_EQ(renamed->body.plain, "New changed their display name from Old <&> to New");
+  ASSERT_TRUE(renamed->body.html.has_value());
+  EXPECT_NE(renamed->body.html->find(" changed their display name from Old &lt;&amp;&gt; to New"), std::string::npos);
   // Sent from here: known by its event id once the server answered.
   const auto sent_one = std::find_if(room->timeline.begin(), room->timeline.end(),
                                      [](const mux::message& one) { return one.body.plain == "from mux"; });
   ASSERT_NE(sent_one, room->timeline.end());
   EXPECT_EQ(sent_one->id, "$sent");
   EXPECT_EQ(sent_one->delivery, mux::delivery_t{mux::delivery::sent{}});
+
+  // The quoted image source survives sending into a thread.
+  const auto thread_message = std::ranges::find_if(heard, [](const auto& one) {
+    return one.target.find("/send/m.room.message/") != std::string::npos &&
+           one.body.find("m.thread") != std::string::npos;
+  });
+  ASSERT_NE(thread_message, heard.end());
+  EXPECT_NE(thread_message->body.find("mxc://original/neocat"), std::string::npos);
+  EXPECT_NE(thread_message->body.find("data-mx-emoticon"), std::string::npos);
+  EXPECT_NE(thread_message->body.find("$quoted"), std::string::npos);
+  // The wire keeps media identities separate from both MSC4027 label names.
+  const auto reactions = std::ranges::to<std::vector>(std::views::filter(heard, [](const auto& one) {
+    return one.target.find("/send/m.reaction/") != std::string::npos;
+  }));
+  ASSERT_EQ(reactions.size(), 4u);
+  for (const auto& one : reactions) {
+    if (one.body.find("mxc://remote/neocat") != std::string::npos) {
+      EXPECT_NE(one.body.find("\"shortcode\":"), std::string::npos);
+      EXPECT_NE(one.body.find("\"com.beeper.reaction.shortcode\":"), std::string::npos);
+      EXPECT_NE(one.body.find(":neocat:"), std::string::npos);
+    } else {
+      EXPECT_EQ(one.body.find("shortcode"), std::string::npos);
+    }
+  }
 
   // What the client asked: login without a token, sync with one, the
   // message PUT with a transaction id -- one of this run's own, "mux-<when
@@ -332,3 +395,33 @@ TEST(Matrix, MayViewRedacted) {
 }
 
 }  // namespace
+
+TEST(Matrix, PushRulesUpdateAccountAndRoomPreferencesWithoutEchoingPendingEdits) {
+  mux::net::loop running;
+  auto tls = mux::net::client_tls();
+  std::vector<mux::change::notifications_changed> changes;
+  const auto sink = [&](mux::change_t event) {
+    spl::visit(spl::overloaded{[&](const mux::change::notifications_changed& now) { changes.push_back(now); },
+        [](const auto&) {}}, event);
+  };
+  mux::proto::matrix::client::account account(running, tls,
+      mux::proto::matrix::client::settings{.user_id = "@alice:example.org"}, sink);
+  const auto event = knot::try_read<loom::ev::account_data_event>(R"({"type":"m.push_rules","content":{"global":{
+    "override":[{"rule_id":".m.rule.master","default":true,"enabled":false,"actions":[]}],
+    "underride":[{"rule_id":".m.rule.message","default":true,"enabled":false,"actions":["notify"]}],
+    "room":[{"rule_id":"!room:example.org","default":false,"enabled":true,"actions":[]}]}}})");
+  ASSERT_TRUE(event);
+  account.receive_notifications(*event);
+  ASSERT_EQ(changes.size(), 2u);
+  EXPECT_EQ(changes.front().by.address, "@alice:example.org");
+  EXPECT_EQ(changes.front().choices.on, true);
+  EXPECT_EQ(changes.front().choices.mentions, true);
+  EXPECT_EQ(changes.back().room, "!room:example.org");
+  EXPECT_EQ(changes.back().choices.mentions, true);
+  EXPECT_FALSE(changes.back().choices.sound.has_value());
+  account.set_notifications("!room:example.org", {false, false, false}, {false, false, false});
+  changes.clear();
+  account.receive_notifications(*event);
+  ASSERT_EQ(changes.size(), 1u);
+  EXPECT_FALSE(changes.front().room.has_value());
+}
