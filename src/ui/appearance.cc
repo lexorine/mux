@@ -18,6 +18,7 @@ import mux.config;
 import :base;
 import :icons;
 import :controls;
+import :forms;
 import :themes;
 import :accounts;
 import :proxies;
@@ -60,6 +61,166 @@ struct pick {
   Answer operator()(const T& one) const { return skiff::bind::own(skiff::model::setTo(one)); }
 };
 
+// Theme customization is a local draft. Save writes only overrides for the
+// selected base theme; blank fields inherit it and Reset removes its overrides.
+struct theme_colour_draft {
+  std::string background, sidebar, chosen, text, dim, accent, error;
+  std::string selected, selected_text, band, section, tile, sent_time;
+  std::string bubble, out_bubble, chat, chat_top, pattern, on_accent;
+};
+struct theme_colour_field {
+  std::string_view label;
+  decltype(&config::custom_theme::background) saved;
+  decltype(&palette::background) base;
+  decltype(&theme_colour_draft::background) draft;
+};
+inline constexpr std::array<theme_colour_field, 19> theme_colour_fields{{
+  {"Window background", &config::custom_theme::background, &palette::background, &theme_colour_draft::background},
+  {"Sidebar background", &config::custom_theme::sidebar, &palette::sidebar, &theme_colour_draft::sidebar},
+  {"Hover background", &config::custom_theme::chosen, &palette::chosen, &theme_colour_draft::chosen},
+  {"Main text", &config::custom_theme::text, &palette::text, &theme_colour_draft::text},
+  {"Secondary text", &config::custom_theme::dim, &palette::dim, &theme_colour_draft::dim},
+  {"Accent", &config::custom_theme::accent, &palette::accent, &theme_colour_draft::accent},
+  {"Error text", &config::custom_theme::error, &palette::error, &theme_colour_draft::error},
+  {"Selection background", &config::custom_theme::selected, &palette::selected, &theme_colour_draft::selected},
+  {"Selection text", &config::custom_theme::selected_text, &palette::selected_text, &theme_colour_draft::selected_text},
+  {"Borders", &config::custom_theme::band, &palette::band, &theme_colour_draft::band},
+  {"Section background", &config::custom_theme::section, &palette::section, &theme_colour_draft::section},
+  {"Card background", &config::custom_theme::tile, &palette::tile, &theme_colour_draft::tile},
+  {"Sent time text", &config::custom_theme::sent_time, &palette::sent_time, &theme_colour_draft::sent_time},
+  {"Incoming bubble", &config::custom_theme::bubble, &palette::bubble, &theme_colour_draft::bubble},
+  {"Outgoing bubble", &config::custom_theme::out_bubble, &palette::out_bubble, &theme_colour_draft::out_bubble},
+  {"Chat background", &config::custom_theme::chat, &palette::chat, &theme_colour_draft::chat},
+  {"Chat background top", &config::custom_theme::chat_top, &palette::chat_top, &theme_colour_draft::chat_top},
+  {"Wallpaper pattern", &config::custom_theme::pattern, &palette::pattern, &theme_colour_draft::pattern},
+  {"Text on accent", &config::custom_theme::on_accent, &palette::on_accent, &theme_colour_draft::on_accent}
+}};
+[[nodiscard]] inline std::optional<std::uint32_t> theme_colour_of(std::string_view text) {
+  if (text.starts_with('#')) text.remove_prefix(1);
+  if (text.size() != 6 && text.size() != 8) return std::nullopt;
+  std::uint32_t colour = 0;
+  const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), colour, 16);
+  if (error != std::errc{} || end != text.data() + text.size()) return std::nullopt;
+  return text.size() == 6 ? colour | 0xff000000u : colour;
+}
+[[nodiscard]] inline std::string theme_colour_word(std::uint32_t colour) {
+  return (colour >> 24) == 255 ? std::format("#{:06X}", colour & 0xffffffu) : std::format("#{:08X}", colour);
+}
+struct theme_details_draft {
+  config::theme_t theme;
+  bool open = false;
+  theme_colour_draft colours;
+  std::string corner, font, height, error;
+  config::custom_theme saved;
+};
+struct toggle_theme_details {};
+struct save_theme_details {};
+struct reset_theme_details {};
+struct cancel_theme_details {};
+inline void read_theme_measurement(std::string_view text, double least, double most,
+    std::string_view name, std::optional<double>& into, std::string& error) {
+  if (text.empty()) return;
+  double number = 0.0;
+  const auto [end, failed] = std::from_chars(text.data(), text.data() + text.size(), number);
+  if (failed != std::errc{} || end != text.data() + text.size() || !std::isfinite(number) || number < least || number > most) {
+    if (error.empty()) error = std::format("{} must be between {} and {}.", name, least, most);
+  } else into = number;
+}
+struct theme_details_events {
+  auto on(toggle_theme_details, const theme_details_draft& now) const {
+    return skiff::model::over<skiff::model::Field<&theme_details_draft::open>>(skiff::model::setTo(!now.open));
+  }
+  auto on(cancel_theme_details, const theme_details_draft& now) const {
+    auto reset = now;
+    reset.open = false; reset.error.clear();
+    std::ranges::for_each(theme_colour_fields, [&](const auto& field) {
+      const auto saved = now.saved.*field.saved;
+      reset.colours.*field.draft = saved ? theme_colour_word(*saved) : std::string();
+    });
+    reset.corner = now.saved.corner_radius ? std::format("{}", *now.saved.corner_radius) : "";
+    reset.font = now.saved.font_size ? std::format("{}", *now.saved.font_size) : "";
+    reset.height = now.saved.control_height ? std::format("{}", *now.saved.control_height) : "";
+    return skiff::model::over<theme_details_draft>(skiff::model::setTo(std::move(reset)));
+  }
+  auto on(reset_theme_details, const theme_details_draft& now) const {
+    return skiff::model::Up{request::configure_theme{now.theme, std::nullopt}};
+  }
+  auto on(save_theme_details, const theme_details_draft& now) const {
+    config::custom_theme custom;
+    std::string error;
+    std::ranges::for_each(theme_colour_fields, [&](const auto& field) {
+      const auto& value = now.colours.*field.draft;
+      if (value.empty()) return;
+      const auto colour = theme_colour_of(value);
+      if (colour) custom.*field.saved = colour;
+      else if (error.empty()) error = std::string(field.label) + ": use #RRGGBB or #AARRGGBB.";
+    });
+    read_theme_measurement(now.corner, 0.0, 32.0, "Corner radius", custom.corner_radius, error);
+    read_theme_measurement(now.font, 9.0, 24.0, "Control font size", custom.font_size, error);
+    read_theme_measurement(now.height, 24.0, 64.0, "Control height", custom.control_height, error);
+    auto asked = error.empty() ? std::optional(request::configure_theme{now.theme, custom}) : std::nullopt;
+    return std::tuple{skiff::model::over<skiff::model::Field<&theme_details_draft::error>>(skiff::model::setTo(std::move(error))),
+        skiff::model::Up{std::move(asked)}};
+  }
+};
+inline auto theme_details_initial(const config::theme_t& theme,
+    const std::map<std::string, config::custom_theme>& overrides) {
+  theme_details_draft initial{theme};
+  const auto found = overrides.find(std::string(config::word_of(theme)));
+  const config::custom_theme custom = found == overrides.end() ? config::custom_theme{} : found->second;
+  std::ranges::for_each(theme_colour_fields, [&](const auto& field) {
+    const auto own = custom.*field.saved;
+    initial.colours.*field.draft = own ? theme_colour_word(*own) : std::string();
+  });
+  initial.saved = custom;
+  initial.corner = custom.corner_radius ? std::format("{}", *custom.corner_radius) : "";
+  initial.font = custom.font_size ? std::format("{}", *custom.font_size) : "";
+  initial.height = custom.control_height ? std::format("{}", *custom.control_height) : "";
+  return initial;
+}
+template <std::size_t Index> auto theme_colour_row(const palette& colours, const palette& base) {
+  namespace c = skiff::compose;
+  constexpr auto member = theme_colour_fields[Index].draft;
+  const auto inherited = base.*theme_colour_fields[Index].base;
+  auto swatch = c::spec_for<skiff::model::Field<member>>([inherited](const std::string& value) -> scene::Spec {
+    return {.background = value.empty() ? inherited : theme_colour_of(value).value_or(inherited)};
+  }, c::column(c::vbox(0.0f, {.width = 28.0f, .height = 28.0f, .relativeSize = scene::axes::kNone,
+      .alignSelf = scene::align::kMiddle, .cornerRadius = colours.widgets.fCorner,
+      .border = scene::Border{colours.band, 1.0f}})));
+  return c::row(c::hbox(12.0f, {.fillX = true, .autoSize = scene::axes::kY}),
+      std::move(swatch), c::styled({.relativeSize = scene::axes::kNone, .grow = scene::axes::kX},
+          model_field<member>(colours, std::string(theme_colour_fields[Index].label), theme_colour_word(inherited))));
+}
+template <std::size_t... Index> auto theme_colour_rows(const palette& colours, const palette& base, std::index_sequence<Index...>) {
+  // The palette has fixed fields. Bind each directly into the local draft;
+  // Each's list walker resolves collections in the outer model instead.
+  return skiff::compose::column(skiff::compose::vbox(12.0f, {.fillX = true, .autoSize = scene::axes::kY}),
+      theme_colour_row<Index>(colours, base)...);
+}
+inline auto theme_details_view(const palette& colours, const config::theme_t& theme,
+    const std::map<std::string, config::custom_theme>& overrides) {
+  namespace c = skiff::compose; using draft = theme_details_draft;
+  const auto base = palette_of(theme, config::accent::theme_own{}, 100);
+  auto fields = theme_colour_rows(colours, base, std::make_index_sequence<theme_colour_fields.size()>{});
+  return c::local<draft>(theme_details_events{}, c::column(c::vbox(12.0f, {.fillX = true, .autoSize = scene::axes::kY,
+      .padding = {8.0f, 20.0f, 16.0f, 20.0f}}),
+      c::onClick(toggle_theme_details{}, c::styled({.fillX = true, .height = 36.0f}, widgets::Button<>(colours.widgets, "Configure selected theme"))),
+      c::shown_for<skiff::model::Field<&draft::open>>([](bool open) { return open; },
+          c::column(c::vbox(12.0f, {.fillX = true, .autoSize = scene::axes::kY, .padding = {12.0f, 12.0f, 12.0f, 12.0f},
+              .cornerRadius = std::max(10.0f, colours.widgets.fCorner), .background = colours.tile}),
+              wrapped(nodes::Text("Blank fields keep the theme defaults. Colors accept #RRGGBB or #AARRGGBB (alpha first). Save applies this theme's changes; Reset restores its defaults.", 13.0f, colours.dim)),
+              c::text_for<skiff::model::Field<&draft::error>>([](const std::string& error) { return error; }, nodes::Text("", 13.0f, colours.error)),
+              std::move(fields),
+              model_field<&draft::corner>(colours, "Corner radius (0–32)", "Theme default"),
+              model_field<&draft::font>(colours, "Control font size (9–24)", "Theme default"),
+              model_field<&draft::height>(colours, "Control height (24–64)", "Theme default"),
+              c::row(c::hbox(8.0f, {.fillX = true, .autoSize = scene::axes::kY}),
+                  c::onClick(save_theme_details{}, c::styled({.height = 36.0f, .relativeSize = scene::axes::kNone, .grow = scene::axes::kX}, widgets::Button<>(colours.widgets, "Save"))),
+                  c::onClick(reset_theme_details{}, c::styled({.height = 36.0f, .relativeSize = scene::axes::kNone, .grow = scene::axes::kX}, widgets::Button<>(colours.widgets, "Reset theme"))),
+                  c::onClick(cancel_theme_details{}, c::styled({.height = 36.0f, .relativeSize = scene::axes::kNone, .grow = scene::axes::kX}, widgets::Button<>(colours.widgets, "Cancel"))))))),
+      theme_details_initial(theme, overrides));
+}
+
 // The themes' cards, Telegram's, in its order, with its own pictures'
 // colours -- the wallpaper, a bubble received, one sent: bound to the
 // theme the model holds, the one in use ringed.
@@ -73,7 +234,8 @@ inline auto theme_row(const palette& colours) {
       theme_card(colours, config::theme::tinted{}, "Tinted", skia::colorSetARGB(255, 72, 87, 97),
                  skia::colorSetARGB(255, 107, 128, 141), skia::colorSetARGB(255, 92, 167, 212)),
       theme_card(colours, config::theme::night{}, "Night", skia::colorSetARGB(255, 72, 87, 97),
-                 skia::colorSetARGB(255, 107, 128, 141), skia::colorSetARGB(255, 117, 191, 181)));
+                 skia::colorSetARGB(255, 107, 128, 141), skia::colorSetARGB(255, 117, 191, 181)),
+      theme_card(colours, config::theme::graphite{}, "Graphite", 0xff262626u, 0xff333333u, 0xff413c65u));
 }
 // The themes move sideways in narrow pages; each card binds its own edit.
 inline auto theme_field(const palette& colours) {
@@ -112,6 +274,34 @@ inline auto percent_heading(const palette &colours, std::string_view what) {
           {.margin = {10.0f, 0.0f, 4.0f, 20.0f}},
           nodes::Text(std::string(what), 12.0f, colours.dim)));
 }
+// How round avatars are, in steps of 5%, set when let go: each change
+// rebuilds the window. Older files have no such setting: unset is round --
+// shown so by the projection, the slider's choices the setting's own type.
+inline constexpr int kRoundAvatar = 100;
+inline std::vector<std::optional<int>> rounding_steps() {
+  return std::views::iota(0, kRoundAvatar / 5 + 1) |
+         std::views::transform([](int step) { return std::optional<int>(step * 5); }) | std::ranges::to<std::vector>();
+}
+template <auto Member>
+inline auto rounding_setting(const palette& colours, std::string_view what) {
+  using field = skiff::model::Field<Member>;
+  return skiff::compose::column(skiff::compose::vbox(0.0f, {.fillX = true, .autoSize = scene::axes::kY}),
+      skiff::compose::text_for<field>(
+          [what](const std::optional<int>& percent) { return std::format("{}: {}%", what, percent.value_or(kRoundAvatar)); },
+          skiff::compose::styled({.margin = {10.0f, 0.0f, 4.0f, 20.0f}}, nodes::Text(std::string(what), 12.0f, colours.dim))),
+      skiff::compose::projected<field>(
+          [](const std::optional<int>& percent) { return std::optional<int>(percent.value_or(kRoundAvatar)); },
+          skiff::compose::styled({.margin = {10.0f, 28.0f, 10.0f, 28.0f}},
+                                 widgets::ChoiceSliderField<std::optional<int>>(colours.widgets, rounding_steps()))));
+}
+inline auto avatar_rounding_view(const palette& colours) {
+  using looks = config::look_settings;
+  return skiff::compose::column(skiff::compose::vbox(0.0f, {.fillX = true, .autoSize = scene::axes::kY}),
+      spaced_title(colours, "AVATARS"),
+      rounding_setting<&looks::chat_avatar_rounding>(colours, "Chats"),
+      rounding_setting<&looks::person_avatar_rounding>(colours, "People"),
+      spaced_note(colours, "0% is square, 100% is round."));
+}
 // Home without direct messages: only where Home is without what spaces
 // hold, so it reads both, and is flipped only then.
 inline auto home_direct_switch(const palette& colours) {
@@ -138,7 +328,7 @@ inline auto appearance_settings_view(const palette& colours, const config::theme
   return skiff::compose::column(
       skiff::compose::vbox(0.0f, {.fillX = true, .autoSize = scene::axes::kY}),
       spaced_title(colours, "THEME"), std::move(themes),
-      spaced_title(colours, "ACCENT"), accent_view(theme));
+      spaced_title(colours, "ACCENT"), accent_view(theme), avatar_rounding_view(colours));
 }
 inline auto window_settings_view(const palette& colours) {
   using looks = config::look_settings;
@@ -185,23 +375,50 @@ inline auto frame_look_view(const palette& colours, bool see_through) {
                                  "when mux starts again; from then on, "
                                  "changes here apply at once."));
 }
+// Keep the large sections separately owned. Building the whole expression
+// by value also copied its nested controls through several argument packs;
+// Android's UI thread has a much smaller stack than desktop threads.
+template <class Actions>
+struct appearance_page_node : skiff::compose::Stacked {
+  using heading = page_header_t<sends<request::settings_home>, sends<request::close_settings>>;
+  using themes = decltype(appearance_settings_view(std::declval<const palette&>(), config::theme_t{}));
+  using details = decltype(theme_details_view(std::declval<const palette&>(), config::theme_t{}, {}));
+  using fonts = decltype(skiff::compose::scoped<config::look_settings>(skiff::compose::handlers(),
+      style_controls(std::declval<const palette&>(), false)));
+  using spaces = decltype(window_settings_view(std::declval<const palette&>()));
+  using frame = decltype(frame_look_view(std::declval<const palette&>(), false));
+  struct parts_t {
+    heading header;
+    std::unique_ptr<themes> theme;
+    std::unique_ptr<details> custom;
+    std::unique_ptr<fonts> style;
+    std::unique_ptr<look_choices<Actions>> looks;
+    std::unique_ptr<spaces> window;
+    std::unique_ptr<spaces_choices<Actions>> bars;
+    std::unique_ptr<frame> rendering;
+  } parts;
+  appearance_page_node(const ui_needs<Actions>& needs, const config::theme_t& theme)
+      : Stacked(skiff::compose::vbox(0.0f, {.fillX = true, .autoSize = scene::axes::kY})),
+        parts{.header = skiff::compose::styled({.depth = 1.0f, .background = needs.colours->sidebar},
+                  page_header<sends<request::settings_home>, sends<request::close_settings>>(*needs.colours, "Appearance", {}, {}, true, true)),
+            .theme = std::make_unique<themes>(appearance_settings_view(*needs.colours, theme)),
+            .custom = std::make_unique<details>(theme_details_view(*needs.colours, theme, needs.looks->theme_overrides)),
+            .style = std::make_unique<fonts>(skiff::compose::scoped<config::look_settings>(
+                skiff::compose::handlers(), style_controls(*needs.colours, false))),
+            .looks = std::make_unique<look_choices<Actions>>(*needs.colours, *needs.looks, choice_level::everywhere{}),
+            .window = std::make_unique<spaces>(window_settings_view(*needs.colours)),
+            .bars = std::make_unique<spaces_choices<Actions>>(*needs.colours, *needs.shared),
+            .rendering = std::make_unique<frame>(frame_look_view(*needs.colours, needs.looks->window.see_through))} {
+    parts.looks->apply({.margin = {6.0f, 10.0f, 0.0f, 10.0f}});
+    parts.bars->setVisible(needs.looks->window.spaces);
+  }
+};
 template <class Actions>
 auto appearance_page(const ui_needs<Actions>& needs, const config::theme_t& theme, const config::accent_t&) {
-  const auto& colours = *needs.colours;
-  using header = page_header_t<sends<request::settings_home>, sends<request::close_settings>>;
-  return skiff::compose::column(
-      skiff::compose::vbox(0.0f, {.fillX = true, .autoSize = scene::axes::kY}),
-      skiff::compose::styled({.depth = 1.0f, .background = colours.sidebar}, page_header<sends<request::settings_home>, sends<request::close_settings>>(colours, "Appearance", {}, {}, true, true)),
-      skiff::compose::column(
-          skiff::compose::vbox(0.0f, {.fillX = true, .autoSize = scene::axes::kY}),
-          appearance_settings_view(colours, theme),
-          skiff::compose::scoped<config::look_settings>(skiff::compose::handlers(), style_controls(colours, false)),
-          skiff::compose::styled({.margin = {6.0f, 10.0f, 0.0f, 10.0f}}, look_choices<Actions>(colours, *needs.looks, choice_level::everywhere{})),
-          window_settings_view(colours), skiff::compose::visible(needs.looks->window.spaces, spaces_choices<Actions>(colours, *needs.shared)),
-          frame_look_view(colours, needs.looks->window.see_through)));
+  return appearance_page_node<Actions>(needs, theme);
 }
 template <class Actions>
-using appearance_page_t = decltype(appearance_page(std::declval<const ui_needs<Actions>&>(), config::theme_t{}, config::accent_t{}));
+using appearance_page_t = appearance_page_node<Actions>;
 
 // Settings' Rendering page: what draws the window, from the next start.
 // The Rendering page's frames: a toggle bound to each of frame_settings'

@@ -129,7 +129,7 @@ template <class Pick> struct space_icon : skiff::compose::Stacked {
         bar(in), name(shown), key(id), diameter(size), colours_(&colours) {
     spl::visit(spl::overloaded{[&](config::space_item::home) { parts.mark.emplace("\u2302", size * 0.5f, colours.text); },
                                      [&](config::space_item::direct) { parts.mark.emplace("@", size * 0.45f, colours.text, true); },
-                                     [&](const config::space_item::space&) { parts.face.emplace(id, shown, size - 6.0f); }},
+                                     [&](const config::space_item::space&) { parts.face.emplace(avatar_of::chat{}, id, shown, size - 6.0f); }},
                   item);
     if (parts.mark)
       parts.mark->apply({.alignSelf = scene::align::kMiddle});
@@ -393,7 +393,7 @@ struct side_column : skiff::compose::Stacked {
                                         .hoverBackground = colours.chosen})),
           pick{one.index}, parts{.face = skiff::compose::styled(
                                      {.alignSelf = scene::align::kMiddle},
-                                     avatar_mark(one.sender, one.name, 40.0f)),
+                                     avatar_mark(avatar_of::person{}, one.sender, one.name, 40.0f)),
                                  .lines = lines_t(colours, one)} {}
     [[nodiscard]] bool acceptsInput() const { return true; }
     [[nodiscard]] bool hoverChangesAppearance() const { return true; }
@@ -649,6 +649,7 @@ struct side_column : skiff::compose::Stacked {
   };
   struct parts_t {
     head_row head;
+    connection_bar connection;
     body_t body;
     // A right press's menu, over the rest: a space's, or a chat's.
     std::optional<space_menu> menu;
@@ -679,7 +680,7 @@ struct side_column : skiff::compose::Stacked {
       : Stacked(skiff::compose::vbox(
             0.0f, {.fillY = true, .background = colours.sidebar})),
         colours_(&colours),
-        parts{.head = head_row(colours), .body = body_t(colours)} {}
+        parts{.head = head_row(colours), .connection = connection_bar(colours), .body = body_t(colours)} {}
 
   // ---- an item dragged from a bar to the other, or along one ------------
   struct drag_t {

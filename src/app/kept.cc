@@ -88,6 +88,12 @@ struct kept_reactions {
   [[nodiscard]] restyle_wanted on(skiff::model::Changed<skiff::model::Field<&mux::config::look_settings::wallpaper_behind>>, const auto&) const {
     return {};
   }
+  [[nodiscard]] restyle_wanted on(skiff::model::Changed<skiff::model::Field<&mux::config::look_settings::chat_avatar_rounding>>, const auto&) const {
+    return {};
+  }
+  [[nodiscard]] restyle_wanted on(skiff::model::Changed<skiff::model::Field<&mux::config::look_settings::person_avatar_rounding>>, const auto&) const {
+    return {};
+  }
   [[nodiscard]] motion_chosen on(skiff::model::Changed<skiff::model::Field<&mux::config::look_settings::motion>>, const auto&) const { return {}; }
   [[nodiscard]] opacity_chosen on(skiff::model::Changed<skiff::model::Field<&mux::config::look_settings::window_opacity>>, const auto&) const {
     return {};
@@ -299,7 +305,7 @@ struct kept_settings {
   // Whether a chat's link previews come from the sites themselves: its own
   // choice, its space's, its account's, else every account's.
   [[nodiscard]] bool previews_direct(const conversation_id& chat) {
-    return this->reads().previews_direct(chat);
+    return !proto::offers(state_before(chat.account.speaks), proto::feature::server_previews{}) || this->reads().previews_direct(chat);
   }
   // Whether others in a chat are told one is typing: its own choice, its
   // space's, its account's, else every account's.
@@ -391,6 +397,8 @@ struct kept_settings {
                                     .favourite_stickers = emotes_of(saved.favourite_stickers),
                                     .favourite_emoji = emotes_of(saved.favourite_emoji)};
     looks_read.theme = mux::config::theme_of(saved.theme);
+    looks_read.theme_overrides = saved.theme_overrides.value_or(std::map<std::string, mux::config::custom_theme>{});
+    looks_read.developer_tools = saved.developer_tools.value_or(false);
     if (saved.wallpaper)
       looks_read.wallpaper = mux::config::wallpaper_of(std::string_view(*saved.wallpaper));
     if (saved.bubbles)
@@ -494,6 +502,8 @@ struct kept_settings {
     if (!this->proxies().empty())
       out.proxies = this->proxies();
     out.theme = mux::config::said_of<mux::config::theme_said_t>(this->appearance().theme);
+    if (!this->appearance().theme_overrides.empty()) out.theme_overrides = this->appearance().theme_overrides;
+    if (this->appearance().developer_tools) out.developer_tools = true;
     if (this->appearance().wallpaper)
       out.wallpaper = mux::config::word_of(*this->appearance().wallpaper);
     if (this->appearance().bubbles)

@@ -62,6 +62,10 @@ std::string name_of(const mux::conversation_kind_t& kind) {
 
 namespace said {
 using namespace mux;
+std::string of(const change::notifications_changed& one) {
+  return one.by.address + ": notification settings changed" +
+         (one.room ? " in " + *one.room : std::string());
+}
 std::string of(const change::connection_changed& one) {
   return std::format("{} is {}", one.account.address, name_of(one.state));
 }
@@ -117,6 +121,7 @@ std::string of(const change::message_encrypted& one) {
 }
 std::string of(const change::event_missing& one) { return std::format("{} has no {}", one.in.id, one.id); }
 std::string of(const change::profile_found& one) { return std::format("profile of {}", one.user); }
+std::string of(const change::profile_saved& one) { return one.error ? "profile edit refused: " + *one.error : "profile saved"; }
 std::string of(const change::people_found& one) {
   return std::format("{} found for {}", one.people.size(), one.query);
 }

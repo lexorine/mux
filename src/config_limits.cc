@@ -68,9 +68,9 @@ struct sticker_kept {
 // it is, and has only its own protocol's keys.
 // How much is kept, in memory and on disk: what the Storage page sets.
 struct cache_limits {
-  std::int64_t messages_in_memory = 5000;
+  std::int64_t messages_in_memory = 500;
   std::int64_t messages_on_disk_mb = 512;
-  std::int64_t pictures_in_memory_mb = 32;
+  std::int64_t pictures_in_memory_mb = 4;
   std::int64_t pictures_on_disk_mb = 512;
   // Deleted messages kept on disk, apart from the rest: none said is 256.
   std::optional<std::int64_t> deleted_on_disk_mb;
@@ -173,6 +173,8 @@ struct chat_choices {
 struct look_settings {
   style_settings style;
   theme_t theme = theme::tinted{};
+  std::map<std::string, custom_theme> theme_overrides;
+  bool developer_tools = false;
   accent_t accent = accent::theme_own{};
   renderer_t renderer = renderer::opengl{};
   motion_t motion = motion::full{};
@@ -189,6 +191,9 @@ struct look_settings {
   std::optional<wallpaper_t> wallpaper;
   std::optional<bubble_look> bubbles;
   std::optional<bubble_look> panels;
+  // How round avatars are, in percent: chats' and people's apart. Unset is 100.
+  std::optional<int> chat_avatar_rounding;
+  std::optional<int> person_avatar_rounding;
   friend bool operator==(const look_settings&, const look_settings&) = default;
 };
 
@@ -260,6 +265,8 @@ struct file {
   // "software". Nothing said is dark and OpenGL.
   std::optional<style_settings> style;
   std::optional<theme_said_t> theme;
+  std::optional<std::map<std::string, custom_theme>> theme_overrides;
+  std::optional<bool> developer_tools;
   std::optional<accent_said_t> accent;
   // Every chat's background, as word_of(wallpaper_t) says it; none, the theme's.
   std::optional<std::string> wallpaper;

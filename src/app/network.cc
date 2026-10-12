@@ -362,14 +362,14 @@ struct network {
             one.account);
     });
   }
-  // A message forwarded, within the account it is of.
-  void forward(const mux::conversation_id& from, std::string event, const mux::conversation_id& to) {
-    loop.post([this, from, event = std::move(event), to] {
+  // An ordered batch forwarded within its account, as one protocol request.
+  void forward(const mux::conversation_id& from, std::vector<mux::forward_source> events, const mux::conversation_id& to) {
+    loop.post([this, from, events = std::move(events), to] {
       for (auto& one : accounts)
         spl::visit(
             [&](auto& account) {
               if (account->id() == from.account)
-                ask_if_able([&](auto& a) -> decltype(void(a.forward(from.id, event, to.id))) { a.forward(from.id, event, to.id); }, *account);
+                ask_if_able([&](auto& a) -> decltype(void(a.forward(from.id, events, to.id))) { a.forward(from.id, events, to.id); }, *account);
             },
             one.account);
     });
@@ -700,7 +700,7 @@ struct network {
   void verify_cancel(const mux::account_id& by, std::string txn) {
     this->on_account(by, [txn = std::move(txn)](auto& account) -> decltype(void(account.verify_cancel(txn))) { account.verify_cancel(txn); });
   }
-  // A person's profile, asked of the Matrix account named.
+  // A person's profile, asked through the account's protocol implementation.
   void fetch_profile(const mux::account_id& by, std::string user) {
     loop.post([this, by, user = std::move(user)] {
       for (auto& one : accounts)
@@ -711,6 +711,25 @@ struct network {
             },
             one.account);
     });
+  }
+  void fetch_presence(const mux::account_id& by, std::string user) {
+    this->on_account(by, [user = std::move(user)](auto& account)
+        -> decltype(void(account.fetch_presence(user))) { account.fetch_presence(user); });
+  }
+  void set_profile(const mux::account_id& by, user_profile profile) {
+    this->on_account(by, [profile = std::move(profile)](auto& account)
+        -> decltype(void(account.set_profile(profile))) { account.set_profile(profile); });
+  }
+  void upload_profile_banner(const mux::account_id& by, std::string bytes, std::string name, std::string mime) {
+    on_account(by, [bytes = std::move(bytes), name = std::move(name), mime = std::move(mime)](auto& account)
+        -> decltype(void(account.upload_profile_banner(bytes, name, mime))) { account.upload_profile_banner(bytes, name, mime); });
+  }
+  void remove_profile_banner(const mux::account_id& by) {
+    on_account(by, [](auto& account) -> decltype(void(account.remove_profile_banner())) { account.remove_profile_banner(); });
+  }
+  void set_presence(const mux::account_id& by, presence now) {
+    this->on_account(by, [now = std::move(now)](auto& account)
+        -> decltype(void(account.set_presence(now))) { account.set_presence(now); });
   }
   // A room joined by the account named, through the servers named.
   void join(const mux::account_id& by, std::string room, std::vector<std::string> via) {

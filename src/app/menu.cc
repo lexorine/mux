@@ -93,7 +93,7 @@ void part_apply(menu_part& self, const request::message_menu& one) {
     chat = self.s_->model->find(*chosen);
   }
   self.s_->emoji.pack_account = chosen ? std::optional(chosen->account) : std::nullopt;
-  self.s_->emoji.chat_emotes = chat ? chat->emotes : std::vector<emote>{};
+  self.s_->emoji.chat_emotes = chat ? chat->emotes : emote_list{};
   mux::ui::show(*self.s_->showing, std::optional(one));
   // The menu takes the keys, as tdesktop's: the arrows go through it,
   // Enter does what is lit, Esc closes it. Nothing lit until an arrow.
@@ -439,8 +439,12 @@ void part_apply(menu_part& self, const request::forward_to& one) {
   if (!self.forwarding_ || self.s_->demo())
     return;
   const auto [from, events] = *std::exchange(self.forwarding_, std::nullopt);
-  for (const std::string& event : events)
-    self.s_->net->forward(from, event, one.to);
+  const auto* chat = self.s_->model->find(from);
+  auto sources = std::ranges::to<std::vector>(std::views::transform(events, [&](const std::string& id) {
+    const message* kept = chat ? mux::ui::held_message(*chat, id) : nullptr;
+    return kept ? mux::logic::forward_source_of(*kept) : forward_source{.event = id};
+  }));
+  self.s_->net->forward(from, std::move(sources), one.to);
   self.s_->notice("Forward", "Forwarded to " + [&] {
     const conversation* to = self.s_->model->find(one.to);
     return to ? mux::ui::display_name(*to) : one.to.id;
@@ -492,10 +496,7 @@ void part_apply(menu_part& self, const request::react& one) {
   const conversation* chat = self.selected_chat_ ? self.s_->model->find(*self.selected_chat_) : nullptr;
   if (!chat)
     return {};
-  auto all = std::views::transform(self.selected_, [&](const std::string& id) { return mux::ui::held_message(*chat, id); });
-  auto chosen = std::ranges::to<std::vector>(std::views::filter(all, [](const message* one) { return one && !one->redacted; }));
-  std::ranges::sort(chosen, [](const message* a, const message* b) { return std::tie(a->at, a->id) < std::tie(b->at, b->id); });
-  return chosen;
+  return mux::logic::selected_messages(*chat, self.selected_);
 }
 
 void show_selection(menu_part& self) {

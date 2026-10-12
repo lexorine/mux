@@ -21,6 +21,46 @@ message said(std::string id, std::string text, bool outgoing = false) {
                  .outgoing = outgoing};
 }
 
+TEST(Model, TrimmingInactiveHistoryReleasesItsCapacity) {
+  model kept;
+  for (int i = 0; i < 100; ++i) {
+    auto one = said(std::to_string(i), "message");
+    one.at = std::chrono::sys_time<std::chrono::milliseconds>(std::chrono::milliseconds(i));
+    kept.apply(change::message_added{std::move(one)});
+  }
+  kept.trim(1, with_juliet);
+  ASSERT_EQ(kept.find(with_juliet)->timeline.size(), 100u);
+  kept.trim(1, std::nullopt);
+  const auto* chat = kept.find(with_juliet);
+  ASSERT_NE(chat, nullptr);
+  ASSERT_EQ(chat->timeline.size(), 1u);
+  EXPECT_LE(chat->timeline.capacity(), 1u);
+  EXPECT_EQ(chat->timeline.back().id, "99");
+  EXPECT_FALSE(chat->detached);
+  EXPECT_EQ(chat->history_from, "");
+}
+
+TEST(Model, PackMetadataSharesStorageAndRetainsOldRevisions) {
+  model kept;
+  emote_list images{{.shortcode = "party", .url = "mxc://example/party", .body = "Party"}};
+  const conversation_id other{romeo, "other@example.net"};
+  kept.apply(change::conversation_updated{.id = with_juliet, .emotes = images, .stickers = images});
+  kept.apply(change::conversation_updated{.id = other, .emotes = images});
+  ASSERT_NE(kept.find(with_juliet), nullptr);
+  ASSERT_NE(kept.find(other), nullptr);
+  EXPECT_EQ(kept.find(with_juliet)->emotes.data(), images.data());
+  EXPECT_EQ(kept.find(with_juliet)->stickers.data(), images.data());
+  EXPECT_EQ(kept.find(other)->emotes.data(), images.data());
+  emote_list picker = kept.find(with_juliet)->emotes;
+  kept.apply(change::conversation_updated{.id = with_juliet,
+      .emotes = {{.shortcode = "new", .url = "mxc://example/new"}}});
+  images = {};
+  EXPECT_EQ(picker.front().shortcode, "party");
+  EXPECT_EQ(kept.find(other)->emotes.data(), picker.data());
+  EXPECT_EQ(kept.find(with_juliet)->emotes.front().shortcode, "new");
+  EXPECT_NE(kept.find(with_juliet)->emotes.data(), picker.data());
+}
+
 TEST(Model, SavedReadMarkerSurvivesOlderAndUnknownReceipts) {
   model kept;
   kept.apply(change::conversation_updated{.id = with_juliet});
@@ -104,7 +144,7 @@ TEST(Model, ConfirmedEchoMovesBeforePendingMessagesByServerTime) {
   EXPECT_TRUE(std::ranges::is_sorted(kept.find(with_juliet)->timeline, {}, &message::at));
 }
 
-TEST(Model, AcknowledgingAnOlderLocalEchoRestoresChronologicalOrder) {
+TEST(Model, AcknowledgementKeepsLocalPositionUntilServerEcho) {
   model kept;
   auto received = said("recent", "received");
   received.at = std::chrono::sys_time<std::chrono::milliseconds>(std::chrono::minutes(37));
@@ -115,8 +155,49 @@ TEST(Model, AcknowledgingAnOlderLocalEchoRestoresChronologicalOrder) {
   kept.apply(change::message_added{local});
   EXPECT_EQ(kept.find(with_juliet)->timeline.back().id, "txn");
   kept.apply(change::message_acknowledged{with_juliet, "txn", "confirmed"});
-  EXPECT_EQ(kept.find(with_juliet)->timeline.front().id, "confirmed");
+  EXPECT_EQ(kept.find(with_juliet)->timeline.back().id, "confirmed");
+  EXPECT_EQ(kept.find(with_juliet)->timeline.back().at, local.at);
+  kept.apply(change::delivery_changed{with_juliet, "confirmed", delivery::delivered{}});
+  EXPECT_EQ(kept.find(with_juliet)->timeline.back().id, "confirmed");
+  auto history = received;
+  history.id = "history";
+  history.at -= std::chrono::minutes(1);
+  kept.apply(change::message_added{history, placement::at_start{}});
+  EXPECT_EQ(kept.find(with_juliet)->timeline.back().id, "confirmed");
+  local.id = "confirmed";
+  local.delivery = delivery::sent{};
+  local.at = received.at + std::chrono::seconds(1);
+  kept.apply(change::message_added{local});
+  EXPECT_EQ(kept.find(with_juliet)->timeline.back().id, "confirmed");
+  EXPECT_FALSE(kept.find(with_juliet)->timeline.back().local_order);
   EXPECT_TRUE(std::ranges::is_sorted(kept.find(with_juliet)->timeline, {}, &message::at));
+}
+
+TEST(Model, LocalMessagesKeepSendOrderAcrossReversedAcknowledgements) {
+  for (bool threaded : {false, true}) {
+    model kept;
+    auto recent = said("recent", "received");
+    recent.at = std::chrono::sys_time<std::chrono::milliseconds>(std::chrono::minutes(37));
+    if (threaded) recent.thread = "root";
+    kept.apply(change::message_added{recent});
+    auto first = said("first", "first", true);
+    first.at = recent.at - std::chrono::minutes(1);
+    first.delivery = delivery::sending{};
+    first.thread = recent.thread;
+    auto second = first;
+    second.id = "second";
+    second.at -= std::chrono::seconds(1);
+    kept.apply(change::message_added{first});
+    kept.apply(change::message_added{second});
+    kept.apply(change::message_acknowledged{with_juliet, "second", "second-sent"});
+    kept.apply(change::delivery_changed{with_juliet, "first", delivery::failed{}});
+    const auto* chat = kept.find(with_juliet);
+    const auto& rows = threaded ? chat->threads.at("root") : chat->timeline;
+    ASSERT_EQ(rows.size(), 3u);
+    EXPECT_EQ(rows[0].id, "recent");
+    EXPECT_EQ(rows[1].id, "first");
+    EXPECT_EQ(rows[2].id, "second-sent");
+  }
 }
 
 TEST(Model, Conversation) {
@@ -132,6 +213,25 @@ TEST(Model, Conversation) {
   ASSERT_NE(one, nullptr);
   EXPECT_EQ(one->name, "Juliet");
   EXPECT_EQ(one->unread, 2);
+}
+
+TEST(Model, ProfilesKeepDetailsAcrossBasicRefreshesAndReportSaveResults) {
+  model kept;
+  const profile_details details{.banner = "mxc://example/banner",
+      .pronouns = {{"en", "she/her"}}, .biography = {"Biography", "<b>Biography</b>"}};
+  kept.apply(change::profile_found{romeo, with_juliet.id, "Juliet", "mxc://example/avatar", details});
+  kept.apply(change::profile_found{romeo, with_juliet.id, "New name", "mxc://example/avatar"});
+  const auto& profile = kept.accounts().at(romeo).profiles.at(with_juliet.id);
+  EXPECT_EQ(profile.name, "New name");
+  EXPECT_EQ(profile.details, details);
+  kept.apply(change::profile_saved{romeo, "Refused"});
+  EXPECT_EQ(kept.accounts().at(romeo).profile_result, 1u);
+  EXPECT_EQ(kept.accounts().at(romeo).profile_error, "Refused");
+  kept.apply(change::profile_saved{romeo, {}});
+  EXPECT_EQ(kept.accounts().at(romeo).profile_result, 2u);
+  EXPECT_FALSE(kept.accounts().at(romeo).profile_error);
+  kept.apply(change::profile_found{romeo, with_juliet.id, "New name", {}, profile_details{}});
+  EXPECT_FALSE(kept.accounts().at(romeo).profiles.at(with_juliet.id).details.banner);
 }
 
 // A window of history opened away from the newest: what is live comes
@@ -205,6 +305,20 @@ TEST(Model, Messages) {
   ASSERT_EQ(one->members.size(), 2u);
   EXPECT_EQ(one->members[0].role, "owner");
   EXPECT_EQ(one->members[1].name, "Nurse");
+}
+
+// The server's emptied copy of a message held whole, come again -- a page
+// back, the sync at a start: the whole one marked deleted, all it said kept.
+TEST(Model, AnEmptiedCopyMarksTheWholeMessageDeleted) {
+  model kept;
+  kept.show_deleted = true;
+  const conversation_id in{account_id{protocol::xmpp{}, "romeo@example.net"}, "juliet@example.com"};
+  kept.apply(change::message_added{message{.in = in, .id = "1", .body = {"hi", std::nullopt}}});
+  kept.apply(change::message_added{message{.in = in, .id = "1", .redacted = true}});
+  const conversation* one = kept.find(in);
+  ASSERT_EQ(one->timeline.size(), 1u);
+  EXPECT_TRUE(one->timeline[0].redacted);
+  EXPECT_EQ(one->timeline[0].body.plain, "hi");
 }
 
 // Deleted, where deleted messages are not kept: gone from the chat; and a
@@ -350,4 +464,21 @@ TEST(Model, OptimisticEditEchoAssignsItsIdWithoutInventingAnotherVersion) {
   ASSERT_EQ(latest.versions.size(), 2u);
   EXPECT_EQ(latest.versions[1].event, "$edit1");
   EXPECT_EQ(latest.latest_edit_event, "$edit2");
+}
+
+TEST(Model, PresenceRevisionTracksStatusChangesWithoutDuplicateRefreshes) {
+  model kept;
+  const account_id other{protocol::xmpp{}, "other@example.net"};
+  kept.apply(change::presence_changed{other, with_juliet.id, {availability::away{}, "Working"}});
+  kept.apply(change::presence_changed{romeo, with_juliet.id, {availability::online{}, {}}});
+  ASSERT_NE(kept.accounts().find(romeo), nullptr);
+  EXPECT_EQ(kept.accounts().find(romeo)->presence_revision, 1u);
+  kept.apply(change::presence_changed{romeo, with_juliet.id, {availability::online{}, {}}});
+  EXPECT_EQ(kept.accounts().find(romeo)->presence_revision, 1u);
+  kept.apply(change::presence_changed{romeo, with_juliet.id, {availability::online{}, "Available"}});
+  EXPECT_EQ(kept.accounts().find(romeo)->presence_revision, 2u);
+  EXPECT_EQ(kept.accounts().find(other)->presence_revision, 1u);
+  kept.apply(change::presence_changed{romeo, with_juliet.id, {availability::offline{}, {}}});
+  EXPECT_EQ(kept.accounts().find(romeo)->presence_revision, 3u);
+  EXPECT_EQ(kept.accounts().find(romeo)->presences.at(with_juliet.id).state, availability_t{availability::offline{}});
 }

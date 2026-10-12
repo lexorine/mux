@@ -24,6 +24,32 @@ import :names;
 
 export namespace mux::ui {
 
+// Connection status is shared by the list and the chat, for every protocol.
+[[nodiscard]] inline std::string connection_notice(const connection_t& state) {
+  return spl::visit(spl::overloaded{
+      [](connection::offline) { return std::string("Offline"); },
+      [](const connection::connecting& one) {
+        return one.reason ? "Reconnecting: " + *one.reason : std::string("Connecting…");
+      },
+      [](connection::online) { return std::string(); },
+      [](const connection::failed& one) { return "Connection failed: " + one.error; }}, state);
+}
+struct connection_bar : skiff::compose::Stacked {
+  struct parts_t { nodes::Text text; } parts;
+  connection_bar(const palette& colours)
+      : Stacked(skiff::compose::vbox(0.0f, {.fillX = true, .autoSize = scene::axes::kY,
+                                           .padding = {8.0f, 12.0f, 8.0f, 12.0f},
+                                           .background = (colours.error & 0x00FFFFFFu) | (0x22u << 24)})),
+        parts{.text = skiff::compose::styled({.fillX = true}, wrapped(nodes::Text("", 13.0f, colours.text)))} {
+    this->setVisible(false);
+  }
+  void show(const account* one, bool enabled = true) {
+    const auto text = one && enabled ? connection_notice(one->state) : std::string();
+    if (parts.text.text() != text) parts.text.setText(text);
+    if (this->visible() != !text.empty()) this->setVisible(!text.empty());
+  }
+};
+
 // Something not there yet, said in a box over the window.
 // A notice's box: as high as what it says, its heading and text wrapped,
 // and selectable, to be copied.
@@ -69,23 +95,22 @@ struct verification_view {
   using skiff::compose::styled;
   return skiff::compose::column(skiff::compose::vbox(4.0f, {.width = 52.0f, .autoSize = scene::axes::kY}),
                                 styled({.alignSelf = scene::align::kMiddle}, nodes::Text(std::string(picture), 30.0f, colours.text)),
-                                styled({.alignSelf = scene::align::kMiddle}, nodes::Text(std::string(name), 11.0f, colours.dim)));
+                                styled({.fillX = true, .alignSelf = scene::align::kMiddle}, wrapped(nodes::Text(std::string(name), 11.0f, colours.dim))));
 }
 using emoji_cell_t = decltype(emoji_cell(std::declval<const palette&>(), {}, {}));
-// The seven to compare, in a row: none where nothing is compared.
-[[nodiscard]] inline skiff::compose::Many<emoji_cell_t> emoji_row(const palette& colours, const verification_step_t& step) {
-  const std::array<int, 7> none{};
-  const std::array<int, 7>& indices = spl::visit(spl::overloaded{[](const verification_step::compare& shown) -> const std::array<int, 7>& { return shown.emoji; },
-                                                                 [&](const auto&) -> const std::array<int, 7>& { return none; }},
-                                                 step);
-  const bool comparing = &indices != &none;
-  return skiff::compose::visible(
-      comparing, skiff::compose::many(skiff::compose::hbox(4.0f, {.fillX = true, .autoSize = scene::axes::kY}),
-                                      comparing ? indices | std::views::transform([&](int index) {
-                                        const auto& [picture, name] = sas_emoji[static_cast<std::size_t>(index & 63)];
-                                        return emoji_cell(colours, picture, name);
-                                      }) | std::ranges::to<std::vector>()
-                                                : std::vector<emoji_cell_t>{}));
+// The seven to compare wrap in their original order on narrow screens.
+[[nodiscard]] inline nodes::Flow<std::vector<emoji_cell_t>> emoji_row(const palette& colours, const verification_step_t& step) {
+  auto cells = spl::visit(spl::overloaded{
+      [&](const verification_step::compare& shown) {
+        return std::ranges::to<std::vector>(std::views::transform(shown.emoji, [&](int index) {
+          const auto& [picture, name] = sas_emoji[static_cast<std::size_t>(index & 63)];
+          return emoji_cell(colours, picture, name);
+        }));
+      }, [](const auto&) { return std::vector<emoji_cell_t>{}; }}, step);
+  const bool comparing = !cells.empty();
+  return skiff::compose::visible(comparing, skiff::compose::styled(
+      {.fillX = true, .autoSize = scene::axes::kY},
+      nodes::Flow<std::vector<emoji_cell_t>>({.direction = nodes::direction::horizontal{}, .spacingX = 8.0f, .spacingY = 12.0f, .wrap = true}, std::move(cells))));
 }
 
 // Which of a verification's buttons its step shows.
@@ -111,7 +136,7 @@ using emoji_cell_t = decltype(emoji_cell(std::declval<const palette&>(), {}, {})
 // its step says.
 template <class Actions>
 using verification_box_of =
-    skiff::compose::Box<nodes::Text, nodes::Text, skiff::compose::Many<emoji_cell_t>, button_for<sends<request::verify_accept_now>>,
+    skiff::compose::Box<nodes::Text, nodes::Text, nodes::Flow<std::vector<emoji_cell_t>>, button_for<sends<request::verify_accept_now>>,
                         button_for<sends<request::verify_cancel_now>>, button_for<sends<request::verify_match>>,
                         button_for<sends<request::verify_mismatch>>, button_for<sends<request::close_verification>>>;
 template <class Actions>
@@ -245,7 +270,7 @@ template <class Actions> struct chat_header : skiff::compose::Stacked {
                         back_button(colours, icon::back{}, {}))),
                 .face = skiff::compose::visible(
                     shown.key.has_value(),
-                    avatar_mark(shown.key.value_or(""), shown.title, 38.0f)),
+                    avatar_mark(avatar_of::chat{}, shown.key.value_or(""), shown.title, 38.0f)),
                 .texts =
                     two_lines(colours, shown.title, shown.status, 15.0f, 3.0f, two_line_style{.show_second = shown.key.has_value()}),
                 .find = skiff::compose::visible(

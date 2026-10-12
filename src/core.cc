@@ -94,8 +94,8 @@ struct conversation_updated {
   std::int64_t member_count = 0;
   std::optional<std::string> alias;
   std::vector<std::string> pinned;
-  std::vector<emote> emotes;
-  std::vector<emote> stickers;
+  emote_list emotes;
+  emote_list stickers;
   room_part_t theirs;  // its protocol's own part of it
   // Upgraded away: the room it continues in (m.room.tombstone), and what
   // its tombstone said; and the room this one continues, where it does.
@@ -318,7 +318,10 @@ struct profile_found {
   std::string user;
   std::optional<std::string> name;
   std::optional<std::string> avatar;
+  std::optional<profile_details> details;
 };
+// Completion of an explicit profile edit. UI drafts survive a refusal.
+struct profile_saved { account_id by; std::optional<std::string> error; };
 // A server's public directory, searched: what it listed.
 struct directory_listed {
   account_id by;
@@ -413,6 +416,7 @@ struct call_signalled {
 struct call_servers {
   account_id account;
   std::vector<calls::ice_server> servers;
+  std::string party;
 };
 
 }  // namespace change
@@ -420,7 +424,7 @@ struct call_servers {
 // The changes every protocol says, here; and each protocol's own, from its
 // change list -- changes_type(state), found by ADL in its folder (mux.proto.
 // <p>.changes), none where it gives none -- all one variant.
-using core_changes = spl::variant<change::notifications_changed, change::protocol_state_changed, change::trust_changed, change::devices_listed, change::message_encrypted, change::connection_changed, change::refused, change::notice, change::account_removed, change::conversation_updated, change::conversation_removed, change::presence_changed, change::message_added, change::message_edited, change::message_redacted, change::message_unredacted, change::message_acknowledged, change::delivery_changed, change::message_discarded, change::reaction_changed, change::typing_changed, change::history_position, change::event_missing, change::members_changed, change::avatar_loaded, change::receipts_changed, change::window_opened, change::window_extended, change::media_progress, change::room_created, change::preview_loaded, change::room_previewed, change::mentioned, change::marks_shown, change::mark_taken, change::marks_seen, change::reacted_to_mine, change::directory_listed, change::people_found, change::profile_found, change::threads_listed, change::call_signalled, change::call_servers>;
+using core_changes = spl::variant<change::notifications_changed, change::protocol_state_changed, change::trust_changed, change::devices_listed, change::message_encrypted, change::connection_changed, change::refused, change::notice, change::account_removed, change::conversation_updated, change::conversation_removed, change::presence_changed, change::message_added, change::message_edited, change::message_redacted, change::message_unredacted, change::message_acknowledged, change::delivery_changed, change::message_discarded, change::reaction_changed, change::typing_changed, change::history_position, change::event_missing, change::members_changed, change::avatar_loaded, change::receipts_changed, change::window_opened, change::window_extended, change::media_progress, change::room_created, change::preview_loaded, change::room_previewed, change::mentioned, change::marks_shown, change::mark_taken, change::marks_seen, change::reacted_to_mine, change::directory_listed, change::people_found, change::profile_found, change::profile_saved, change::threads_listed, change::call_signalled, change::call_servers>;
 namespace changes_defaults {
 constexpr type_tag<change_list<>> changes_type(const auto&) { return {}; }
 }  // namespace changes_defaults
@@ -608,7 +612,8 @@ class model {
     for (const conversation_id& id : trimmed)
       this->in_chat(id, [](conversation& chat) {
         const message last = newest(chat) ? *newest(chat) : chat.timeline.back();
-        chat.timeline.assign(1, last);
+        // Release the old backing allocation as well as its messages.
+        chat.timeline = std::vector<message>{last};
         chat.detached = false;
         chat.future_from.reset();
         chat.history_from = std::string();  // from the newest
@@ -727,7 +732,13 @@ class model {
       this->in_account(one.id.account, [&](account& kept) { (void)kept.conversations.take(one.id.id); });
   }
   void on(const change::presence_changed& one) {
-    this->in_account(one.account, [&](account& kept) { kept.presences[one.contact] = one.now; });
+    this->in_account(one.account, [&](account& kept) {
+      const auto found = kept.presences.find(one.contact);
+      if (found == kept.presences.end() || found->second != one.now) {
+        kept.presences.insert_or_assign(one.contact, one.now);
+        ++kept.presence_revision;
+      }
+    });
   }
   // Reactions come before the message they are on is here (it is further
   // back, or in a thread not loaded): kept until it comes, then put on it.
@@ -751,8 +762,18 @@ class model {
     // are kept, and something of it is left to show.
     if (one.message.redacted &&
         (!show_deleted || one.message.outgoing ||
-         (one.message.body.plain.empty() && !one.message.body.html && !one.message.attachment)))
+         (one.message.body.plain.empty() && !one.message.body.html && !one.message.attachment))) {
+      // The server's emptied copy of one held whole: that one marked, as a
+      // deletion told live would -- not replaced by what is left of it.
+      if (show_deleted && !one.message.outgoing)
+        this->in_chat(one.message.in, [&](conversation& where) {
+          if (message* kept = message_in(where, one.message.id); kept && !kept->outgoing) {
+            kept->redacted = true;
+            in_latest(where, one.message.id, [](message& latest) { latest.redacted = true; });
+          }
+        });
       return;
+    }
     this->in_chat(one.message.in, [&](conversation& where) {
       auto merged = one;
       if (const auto quoted = where.quoted.find(one.message.id); quoted != where.quoted.end()) {
@@ -761,19 +782,27 @@ class model {
         for (const auto& event : quoted->second.reaction_events)
           if (!std::ranges::contains(merged.message.reaction_events, event)) merged.message.reaction_events.push_back(event);
       }
-      this->add_to(where, merged);
+      this->add_to(where, std::move(merged));
     });
   }
   static bool pending(const message& one) {
     return spl::visit(spl::overloaded{[](const delivery::sending&) { return true; }, [](const auto&) { return false; }},
                       one.delivery);
   }
-  static bool message_before(const message& a, const message& b) {
-    if (pending(a) != pending(b))
-      return !pending(a);
-    return a.at < b.at;
+  static auto ordered_at(const message& one) {
+    return one.local_order.value_or(one.at);
   }
-  void add_to(conversation& where, const change::message_added& one) {
+  static bool message_before(const message& a, const message& b) {
+    return ordered_at(a) < ordered_at(b);
+  }
+  template <std::ranges::bidirectional_range Messages>
+    requires std::ranges::common_range<Messages>
+  static void place_local(message& one, const Messages& messages) {
+    if (pending(one))
+      one.local_order = std::ranges::empty(messages) ? one.at :
+          std::max(one.at, ordered_at(*std::ranges::prev(std::ranges::end(messages))));
+  }
+  void add_to(conversation& where, change::message_added one) {
     if (spl::visit(spl::overloaded{[](placement::at_end) { return true; }, [](const auto&) { return false; }}, one.where)) {
       std::erase(where.typing, one.message.sender);
       if (where.typing.empty())
@@ -782,7 +811,9 @@ class model {
     if (message* kept = one.message.id.empty() ? nullptr : message_in(where, one.message.id)) {
       // Come again -- a page, the disk, a window around it: its reactions
       // kept, which what came may not carry.
-      const bool moved = kept->at != one.message.at || pending(*kept) != pending(one.message);
+      if (pending(one.message))
+        one.message.local_order = kept->local_order.value_or(ordered_at(*kept));
+      const bool moved = ordered_at(*kept) != ordered_at(one.message);
       auto reactions = std::move(kept->reactions);
       auto reaction_events = std::move(kept->reaction_events);
       *kept = one.message;
@@ -797,7 +828,7 @@ class model {
       // reply stood above the answer it replied to.
       if (one.message.thread)
         if (const auto found = where.threads.find(*one.message.thread); found != where.threads.end())
-          std::ranges::stable_sort(found->second, {}, &message::at);
+          std::ranges::stable_sort(found->second, message_before);
       if (!one.message.thread && moved)
         std::ranges::stable_sort(where.timeline, message_before);
       return;
@@ -806,7 +837,8 @@ class model {
     // timeline; its root's summary brought up to date.
     if (one.message.thread) {
       auto& answers = where.threads[*one.message.thread];
-      answers.insert(std::ranges::upper_bound(answers, one.message.at, {}, &message::at), one.message);
+      place_local(one.message, answers);
+      answers.insert(std::ranges::upper_bound(answers, one.message, message_before), one.message);
       const bool live = spl::visit(spl::overloaded{[](placement::at_end) { return true; }, [](const auto&) { return false; }},
                                       one.where);
       note_answer(where, *one.message.thread, one.message, live);
@@ -814,9 +846,13 @@ class model {
     }
     // In the timeline now: what was fetched for a quote is not needed.
     where.quoted.erase(one.message.id);
+    // Keep a local echo after what was visible when it was sent, even if
+    // this machine's clock is behind. Sending completion carries no server
+    // timestamp and must not move it back into history.
+    place_local(one.message, where.timeline);
     // Both history and live events use the same chronological insertion.
     // A linear search also tolerates clock-skewed entries from an older client;
-    // upper_bound requires a sorted range. Unconfirmed local echoes stay last.
+    // upper_bound requires a sorted range.
     const auto in_time = [&] {
       auto& timeline = where.timeline;
       if (timeline.empty() || !message_before(one.message, timeline.back())) {
@@ -829,22 +865,10 @@ class model {
       timeline.insert(at, one.message);
     };
     spl::visit(spl::overloaded{[&](placement::at_end) {
-                            if (!where.latest || one.message.at >= where.latest->at)
+                            if (!where.latest || !message_before(one.message, *where.latest))
                               where.latest = one.message;
                             if (where.detached)
                               return;
-                            // Being sent from here: said now, after all that is
-                            // shown, whatever its time -- this machine's clock,
-                            // which a few seconds behind the server's put a
-                            // reply above the message it answered.
-                            const bool sending = spl::visit(
-                                spl::overloaded{[](const delivery::sending&) { return true; },
-                                                   [](const auto&) { return false; }},
-                                one.message.delivery);
-                            if (sending) {
-                              where.timeline.push_back(one.message);
-                              return;
-                            }
                             in_time();
                           },
                           [&](placement::at_start) { in_time(); },
@@ -1008,22 +1032,13 @@ class model {
     if (message* kept = message_in(where, one.local_id)) {
       kept->id = one.id;
       kept->delivery = delivery::sent{};
-      if (kept->thread) {
-        if (const auto found = where.threads.find(*kept->thread); found != where.threads.end())
-          std::ranges::stable_sort(found->second, {}, &message::at);
-      } else {
-        std::ranges::stable_sort(where.timeline, message_before);
-      }
     }
   });
   }
   void on(const change::delivery_changed& one) {
     this->in_chat(one.in, [&](conversation& where) {
     if (message* kept = message_in(where, one.id)) {
-      const bool was_pending = pending(*kept);
       kept->delivery = one.now;
-      if (!kept->thread && was_pending != pending(*kept))
-        std::ranges::stable_sort(where.timeline, message_before);
     }
     in_latest(where, one.id, [&](message& kept) { kept.delivery = one.now; });
   });
@@ -1114,7 +1129,16 @@ class model {
   }
   void on(const change::directory_listed&) {}  // the window's: the Explore dialog
   void on(const change::people_found&) {}  // the window's: the Start chat dialog
-  void on(const change::profile_found&) {}  // the window's: a pill's picture
+  void on(const change::profile_saved& one) {
+    this->in_account(one.by, [&](account& kept) { ++kept.profile_result; kept.profile_error = one.error; });
+  }
+  void on(const change::profile_found& one) {
+    this->in_account(one.by, [&](account& kept) {
+      auto& profile = kept.profiles[one.user];
+      profile.name = one.name; profile.avatar = one.avatar;
+      if (one.details) profile.details = *one.details;
+    });
+  }
   void on(const change::refused&) {}  // the window's: a notice
   void on(const change::trust_changed& one) {
     trust_.insert_or_assign({one.by, one.user}, one.now);

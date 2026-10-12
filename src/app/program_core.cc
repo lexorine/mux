@@ -41,6 +41,7 @@ void app::woken() {
   // Deletions of what is not held in memory, by chat: looked for on disk on
   // a worker, each chat's file read once for all of its (mark_deleted_on_disk).
   std::map<mux::conversation_id, std::vector<std::string>> deleted_on_disk;
+  bool person_presence_changed = false;
   // One batch of edits for all that came: what binds to the chats told
   // once, after.
   model->chats().beginBatch();
@@ -80,7 +81,6 @@ void app::woken() {
                                [&](const mux::change::profile_found& found) {
                                  pictures.avatar_changed(found.user, found.avatar);
                                  pictures.profile_avatars.insert_or_assign(found.user, found.avatar);
-                                 pictures.ask();
                                },
                                [&](const mux::change::members_changed& changed) {
                                  for (const auto& member : changed.members)
@@ -146,6 +146,13 @@ void app::woken() {
                                  shared.ui.protocol_states.insert_or_assign(now.account, now.now);
                                  this->refresh();
                                },
+                               [&](const mux::change::presence_changed& now) {
+                                 if (!person_open_ || person_open_->first.account != now.account || person_open_->second != now.contact) return;
+                                 const auto* account = model->accounts().find(now.account);
+                                 if (!account) { person_presence_changed = true; return; }
+                                 const auto previous = account->presences.find(now.contact);
+                                 person_presence_changed = person_presence_changed || previous == account->presences.end() || previous->second != now.now;
+                               },
                                // A protocol's own: what the program does with it, as the
                                // protocol says (mux.app.proto); nothing by default.
                                [&](const auto& theirs) {
@@ -155,15 +162,25 @@ void app::woken() {
                one);
     // A message deleted: marked where it is kept, and kept whole apart --
     // as it was, before the model takes it out of view.
+    // One that comes again already deleted -- a page back, a window, the
+    // sync kept at every start -- is the server's copy, emptied: the same,
+    // for what is kept of it, unless it is marked so already.
+    const auto deleted = [&](const mux::conversation_id& in, const std::string& id, bool again) {
+      const mux::conversation* chat = model->find(in);
+      const auto found = chat ? std::ranges::find(chat->timeline, id, &mux::message::id)
+                              : std::vector<mux::message>::const_iterator{};
+      if (chat && found != chat->timeline.end()) {
+        if (!(again && found->redacted))
+          store.mark_deleted(in, id, *found);
+      } else {
+        deleted_on_disk[in].push_back(id);
+      }
+    };
     if (!ask.demo)
-      spl::visit(spl::overloaded{[&](const mux::change::message_redacted& c) {
-                                   const mux::conversation* chat = model->find(c.in);
-                                   const auto found = chat ? std::ranges::find(chat->timeline, c.id, &mux::message::id)
-                                                           : std::vector<mux::message>::const_iterator{};
-                                   if (chat && found != chat->timeline.end())
-                                     store.mark_deleted(c.in, c.id, *found);
-                                   else
-                                     deleted_on_disk[c.in].push_back(c.id);
+      spl::visit(spl::overloaded{[&](const mux::change::message_redacted& c) { deleted(c.in, c.id, false); },
+                                 [&](const mux::change::message_added& c) {
+                                   if (c.message.redacted && !c.message.id.empty())
+                                     deleted(c.message.in, c.message.id, true);
                                  },
                                  [](const auto&) {}},
                  one);
@@ -172,6 +189,28 @@ void app::woken() {
     paging.keep(one);
   }
   model->chats().endBatch();
+  // Refresh profile cards after their facts have reached the model.
+  const auto refresh_person = [&](const account_id& by, const std::string& user) {
+    if (person_open_ && person_open_->first.account == by && person_open_->second == user) {
+      const auto [chat, who] = *person_open_;
+      mux::ui::show(showing, std::optional(mux::ui::person_shown{chat.account, who,
+          mux::ui::person_of(shared.ui, model->find(chat), *model, chat.account, who)}));
+    }
+  };
+  std::ranges::for_each(changes, [&](const auto& changed) {
+    spl::visit(spl::overloaded{
+        [&](const mux::change::profile_found& profile) {
+          // Fetch only after the model contains the new banner URL.
+          shared.ui.pictures_due = true;
+          refresh_person(profile.by, profile.user);
+        },
+        [&](const mux::change::presence_changed& presence) {
+          // An unchanged presence snapshot must not reset the card's scroll.
+          if (person_presence_changed) refresh_person(presence.account, presence.contact);
+        },
+        [](const auto&) {}}, changed);
+  });
+
   for (auto& [in, ids] : deleted_on_disk)
     work.run([this, in, ids = std::move(ids)]() -> workers::done_t {
       store.mark_deleted_on_disk(in, ids);
@@ -300,7 +339,7 @@ void app::take_page_input() {
   if (auto* up = root().settings_up())
     now[0] = spl::visit([](auto& page) { return bound_part_of(page); }, up->page());
   if (auto* managing = root().manage_up())
-    now[1] = spl::visit([](auto& page) { return bound_part_of(page); }, managing->holder().parts.page);
+    now[1] = spl::visit([](auto& page) { return bound_part_of(page); }, managing->page());
   if (auto* panel = root().open_panel())
     now[2] = spl::visit([](auto& accounts) { return spl::visit([](auto& page) { return bound_part_of(page); }, accounts.detail); },
                         *panel);
@@ -319,6 +358,7 @@ void app::take_page_input() {
 // parts read it.
 void app::show_looks() {
   const auto& now = this->appearance();
+  shared.looks.developer_tools = now.developer_tools;
   auto& window = shared.looks.window;
   window.home_hides = now.home_hides_spaced;
   window.home_direct = now.home_hides_direct;
