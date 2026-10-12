@@ -14,6 +14,8 @@ import splice;
 import tern;
 import mux.core;
 import mux.net;
+import mux.http;
+import mux.proto.xmpp;
 import mux.logic.text;
 import mux.proto.xmpp.changes;
 
@@ -42,6 +44,59 @@ using muc_rank_t = spl::variant<muc_rank::owner_or_admin, muc_rank::moderator, m
     return muc_rank::other{};
   const auto found = known.find(*name);
   return found == known.end() ? muc_rank_t{muc_rank::other{}} : found->second;
+}
+
+struct ranked_pronouns { std::optional<std::string> language; std::string summary; int preference = 100; };
+inline std::optional<ranked_pronouns> pronouns_of(const auto& property) {
+  return spl::visit(spl::overloaded{
+      [](const tern::vcard4::pronouns& p) -> std::optional<ranked_pronouns> {
+        return ranked_pronouns{p.params && p.params->language ? std::optional(p.params->language->tag) : std::nullopt, p.text,
+            p.params && p.params->preference ? p.params->preference->value : 100};
+      },
+      [](const tern::vcard4::name&) -> std::optional<ranked_pronouns> { return {}; },
+      [](const tern::vcard4::nickname&) -> std::optional<ranked_pronouns> { return {}; },
+      [](const tern::vcard4::note&) -> std::optional<ranked_pronouns> { return {}; },
+      [](const tern::vcard4::language&) -> std::optional<ranked_pronouns> { return {}; },
+      [](const tern::vcard4::photo&) -> std::optional<ranked_pronouns> { return {}; },
+      [](const auto&) -> std::optional<ranked_pronouns> { return {}; }}, property.data());
+}
+inline user_profile profile_of(const tern::vcard4::card& card) {
+  user_profile out;
+  std::optional<std::string> nickname, language;
+  std::ranges::for_each(card.properties, [&](const auto& property) {
+    spl::visit(spl::overloaded{
+        [&](const tern::vcard4::name& p) { if (!out.name) out.name = p.text; },
+        [&](const tern::vcard4::nickname& p) { if (!nickname && !p.text.empty()) nickname = p.text.front(); },
+        [&](const tern::vcard4::note& p) { if (out.details.biography.plain.empty()) out.details.biography.plain = p.text; },
+        [&](const tern::vcard4::language& p) { if (!language) language = p.tag; },
+        [&](const tern::vcard4::photo& p) { if (!out.avatar) out.avatar = p.uri; },
+        [](const tern::vcard4::pronouns&) {}, [](const auto&) {}}, property.data());
+  });
+  if (!out.name) out.name = std::move(nickname);
+  auto ranked = std::ranges::to<std::vector<ranked_pronouns>>(std::views::transform(
+      std::views::filter(std::views::transform(card.properties, [](const auto& p) { return pronouns_of(p); }),
+          [](const auto& p) { return p.has_value(); }), [](const auto& p) { return *p; }));
+  std::ranges::stable_sort(ranked, {}, &ranked_pronouns::preference);
+  out.details.pronouns = std::ranges::to<std::vector<mux::pronouns>>(std::views::transform(ranked, [&](auto p) {
+    return mux::pronouns{p.language.value_or(language.value_or("und")), std::move(p.summary)};
+  }));
+  return out;
+}
+struct wire_presence { bool available = true; std::optional<std::string> show; };
+inline wire_presence wire_presence_of(const availability_t& state) {
+  return spl::visit(spl::overloaded{
+      [](availability::offline) { return wire_presence{false, {}}; },
+      [](availability::online) { return wire_presence{}; },
+      [](availability::away) { return wire_presence{true, "away"}; },
+      [](availability::extended_away) { return wire_presence{true, "xa"}; },
+      [](availability::do_not_disturb) { return wire_presence{true, "dnd"}; },
+      [](availability::chat) { return wire_presence{true, "chat"}; }}, state);
+}
+inline int presence_rank(const availability_t& state) {
+  return spl::visit(spl::overloaded{
+      [](availability::offline) { return 0; }, [](availability::extended_away) { return 1; },
+      [](availability::away) { return 2; }, [](availability::do_not_disturb) { return 3; },
+      [](availability::online) { return 4; }, [](availability::chat) { return 5; }}, state);
 }
 
 struct settings {
@@ -132,6 +187,17 @@ using proto = tern::client;
 
 // A JID's bare part: what a conversation is kept under.
 inline std::string bare(std::string_view jid) { return std::string(jid.substr(0, jid.find('/'))); }
+// A presence can carry affiliation and role in separate MUC items. They
+// describe one occupant, with the real account reduced to its bare JID.
+inline muc_person muc_person_of(std::string nick, const auto& items) {
+  muc_person person{.nick = std::move(nick), .affiliation = "none", .role = "none"};
+  std::ranges::for_each(items, [&](const auto& item) {
+    if (item.jid) person.jid = bare(*item.jid);
+    if (item.affiliation) person.affiliation = *item.affiliation;
+    if (item.role) person.role = *item.role;
+  });
+  return person;
+}
 // A JID's resource: in a room, the occupant's nick.
 inline std::string resource_of(std::string_view jid) {
   const auto slash = jid.find('/');
@@ -269,11 +335,120 @@ class account {
   }
 
   // What an account of another protocol does and this does not -- avatars
-  // (XEP-0084), reactions (XEP-0444), chat states (XEP-0085), files (HTTP
-  // upload, XEP-0363), stickers, threads, pins, link previews,
+  // (XEP-0084), reactions (XEP-0444), stickers, threads, pins, server link previews,
   // forwarding, push -- is not here at all: what is asked of an
   // account is done where its type has it (mux.app.network's ask_if_able),
   // and nothing is written for what it has not.
+
+  void fetch_profile(std::string user) {
+    this->spawn_guarded([this, user = std::move(user)] {
+      if (!session_) return;
+      std::string address = user;
+      if (const auto room = rooms_.find(bare(user)); room != rooms_.end()) {
+        const auto& people = room->second.settings.people;
+        const auto person = std::ranges::find(people, resource_of(user), &muc_person::nick);
+        if (person != people.end() && !person->jid.empty()) address = person->jid;
+      }
+      auto card = session_->template try_request<tern::query::profile_items>({.to = address});
+      if (card && card->items) {
+        const auto found = std::ranges::find_if(card->items->items, [](const auto& item) { return item.profile.has_value(); });
+        if (found != card->items->items.end()) {
+          const auto profile = profile_of(*found->profile);
+          sink_(change::profile_found{id_, user, profile.name, profile.avatar, profile.details});
+          return;
+        }
+      }
+      if (!session_) return;
+      if (auto legacy = session_->template try_request<tern::query::legacy_profile_get>({.to = address}))
+        sink_(change::profile_found{id_, user, legacy->name ? legacy->name : legacy->nickname, {},
+            profile_details{.biography = {legacy->description.value_or(""), {}}}});
+      else if (user == id_.address)
+        sink_(change::profile_found{id_, user, id_.address, {}, profile_details{}});
+    });
+  }
+  void set_profile(user_profile profile) {
+    this->spawn_guarded([this, profile = std::move(profile)] {
+      const auto refused = [&](std::string why) { sink_(change::profile_saved{id_, std::move(why)}); };
+      if (!session_) { refused("The account is offline."); return; }
+      auto fetched = session_->template try_request<tern::query::profile_items>();
+      if (!session_) { refused("Disconnected before the profile could be saved."); return; }
+      const bool new_card = !fetched && fetched.error().reply && fetched.error().reply->what &&
+          spl::visit(spl::overloaded{[](const tern::conditions::item_not_found&) { return true; },
+              [](const auto&) { return false; }}, fetched.error().reply->what->data());
+      const bool legacy_only = !fetched && fetched.error().reply && fetched.error().reply->what &&
+          spl::visit(spl::overloaded{
+              [](const tern::conditions::feature_not_implemented&) { return true; },
+              [](const tern::conditions::service_unavailable&) { return true; },
+              [](const auto&) { return false; }}, fetched.error().reply->what->data());
+      if (!fetched && !new_card && !legacy_only) { refused("The server could not retrieve your existing profile."); return; }
+      if (legacy_only) {
+        // Legacy cards have no standard pronouns property. Preserve the
+        // existing card and report that limitation instead of inventing one.
+        if (!profile.details.pronouns.empty()) { refused("Your server needs vCard4 support to publish pronouns."); return; }
+        auto old = session_->template try_request<tern::query::legacy_profile_get>();
+        if (!old || !session_) { refused("The server could not retrieve your existing profile."); return; }
+        if (!session_->template try_request<tern::query::legacy_profile_save>({.query = {
+              profile.name, old->nickname, profile.details.biography.plain, std::move(old->other)}})) {
+          refused("The server refused the profile."); return;
+        }
+      } else {
+        tern::vcard4::card card;
+        if (fetched && fetched->items) {
+          const auto existing = std::ranges::find_if(fetched->items->items, [](const auto& item) { return item.profile.has_value(); });
+          if (existing != fetched->items->items.end()) card = std::move(*existing->profile);
+        }
+        const auto previous = profile_of(card);
+        const bool name_changed = previous.name != profile.name;
+        const bool biography_changed = previous.details.biography.plain != profile.details.biography.plain;
+        const bool pronouns_changed = previous.details.pronouns != profile.details.pronouns;
+        std::erase_if(card.properties, [&](const auto& property) {
+          return spl::visit(spl::overloaded{
+              [&](const tern::vcard4::name&) { return name_changed; }, [&](const tern::vcard4::note&) { return biography_changed; },
+              [&](const tern::vcard4::pronouns&) { return pronouns_changed; }, [](const tern::vcard4::nickname&) { return false; },
+              [](const tern::vcard4::language&) { return false; }, [](const tern::vcard4::photo&) { return false; },
+              [](const auto&) { return false; }}, property.data());
+        });
+        if (name_changed) card.properties.emplace_back(tern::vcard4::name{profile.name.value_or(id_.address), {}});
+        if (biography_changed && !profile.details.biography.plain.empty()) card.properties.emplace_back(tern::vcard4::note{profile.details.biography.plain, {}});
+        auto pronouns = std::views::transform(std::views::enumerate(profile.details.pronouns), [](const auto& entry) {
+          const auto& [index, p] = entry;
+          return tern::vcard4::pronouns{p.summary, tern::vcard4::parameters{
+              .language = tern::vcard4::language_parameter{p.language},
+              .preference = tern::vcard4::preference_parameter{static_cast<int>(std::min<std::size_t>(index + 1, 100))}}};
+        });
+        if (pronouns_changed) card.properties.append_range(pronouns);
+        if (!session_->template try_request<tern::query::profile_save>({.query = {.publish = {.item = {std::move(card)}}}})) {
+          refused("The server refused the vCard4 profile."); return;
+        }
+      }
+      sink_(change::profile_found{id_, id_.address, profile.name, profile.avatar, profile.details});
+      sink_(change::profile_saved{id_, {}});
+    });
+  }
+  void fetch_presence(std::string user) { publish_contact_presence(bare(user)); }
+  void set_presence(presence now) {
+    this->spawn_guarded([this, now = std::move(now)] {
+      own_presence_ = now;
+      if (!session_) return;
+      publish_presence();
+      const auto wire = wire_presence_of(now.state);
+      std::ranges::for_each(rooms_, [&](auto& entry) {
+        auto& [address, room] = entry;
+        if (!wire.available) {
+          if (room.settings.joined) session_->send(proto::presence::unavailable{.to = address + "/" + room.nick, .status = now.status});
+        } else if (room.settings.joined)
+          session_->send(proto::presence::available{.to = address + "/" + room.nick, .show = wire.show, .status = now.status});
+        else if (!room.nick.empty()) this->join(address, room.nick);
+      });
+    });
+  }
+  void publish_presence() {
+    if (!session_) return;
+    const auto wire = wire_presence_of(own_presence_.state);
+    if (wire.available) session_->available({.show = wire.show, .status = own_presence_.status});
+    else session_->send(proto::presence::unavailable{.status = own_presence_.status});
+    sink_(change::presence_changed{id_, id_.address, own_presence_});
+  }
 
   // Starting a direct chat needs no Matrix-style create-room request:
   // messages are addressed to the contact's prepared bare JID.
@@ -284,7 +459,7 @@ class account {
         sink_(change::refused{id_, "Enter a contact's JID, such as user@example.com."});
         return;
       }
-      const conversation_id chat{id_, jid->bare().str()};
+      const conversation_id chat{id_, !jid->resource().empty() && rooms_.contains(jid->bare().str()) ? jid->str() : jid->bare().str()};
       sink_(change::conversation_updated{.id = chat, .kind = conversation_kind::direct{}, .name = chat.id});
       sink_(change::history_position{chat, std::string()});
       sink_(change::room_created{chat});
@@ -295,8 +470,325 @@ class account {
   void manage(std::string room, const room_action_t& action) {
     spl::visit(spl::overloaded{
         [&](const room_action::invite& invite) { this->invite_to(room, invite.user); },
-        [&](const auto&) { sink_(change::refused{id_, "This XMPP room action is not implemented."}); }}, action);
+        [&](const room_action::retopic& one) {
+          this->spawn_guarded([this, room, topic = one.topic] {
+            if (session_ && rooms_.contains(room)) session_->send(proto::message::groupchat{.to = room, .subject = topic});
+          });
+        },
+        [&](const room_action::rename& one) {
+          if (!rooms_.contains(room)) return;
+          auto fields = rooms_.at(room).settings.fields;
+          const auto field = std::ranges::find(fields, "muc#roomconfig_roomname", &muc_field::var);
+          if (field == fields.end()) { sink_(change::refused{id_, "Refresh the owner's room configuration before renaming."}); return; }
+          field->values = {one.name}; change_muc(room, request::configure_muc{std::move(fields)});
+        },
+        [&](const room_action::kick& one) { change_muc(room, request::muc_privilege{one.user, {}, "none"}); },
+        [&](const room_action::ban& one) { change_muc(room, request::muc_privilege{one.user, "outcast", {}}); },
+        [&](const room_action::unban& one) { change_muc(room, request::muc_privilege{one.user, "none", {}}); }}, action);
   }
+  void discover_upload() {
+    upload_service_.reset(); upload_limit_.reset();
+    if (!session_) return;
+    auto candidates = std::vector<std::string>{domain_};
+    if (auto services = session_->template try_request<tern::query::disco_items>({.to = domain_}))
+      for (const auto& item : services->list) candidates.push_back(item.jid);
+    for (const auto& candidate : candidates) {
+      auto info = session_->template try_request<tern::query::disco_info>({.to = candidate});
+      if (!info || !std::ranges::contains(info->features, tern::upload::ns, &tern::disco::feature::var)) continue;
+      upload_service_ = candidate;
+      for (const auto& form : info->forms) {
+        const auto type = std::ranges::find_if(form.fields, [](const auto& f) { return f.var == "FORM_TYPE" && std::ranges::contains(f.value, std::string(tern::upload::ns)); });
+        if (type == form.fields.end()) continue;
+        for (const auto& field : form.fields) if (field.var == "max-file-size" && !field.value.empty()) {
+          std::uint64_t bytes = 0;
+          const auto& value = field.value.front();
+          const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), bytes);
+          if (error == std::errc{} && end == value.data() + value.size()) upload_limit_ = bytes;
+        }
+      }
+      break;
+    }
+  }
+  void send_file(std::string to, std::string local, std::string bytes, std::string name, std::string mimetype,
+      bool image, int width, int height, std::string caption, std::optional<std::string> reply_to,
+      std::optional<thread_place>, std::optional<video_look>) {
+    this->spawn_guarded([this, to = std::move(to), local = std::move(local), bytes = std::move(bytes),
+        name = std::move(name), mimetype = std::move(mimetype), image, width, height, caption = std::move(caption), reply_to] {
+      message out{.in = {id_, to}, .id = local, .sender = id_.address,
+          .at = std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now()),
+          .body = {caption, {}}, .outgoing = true, .delivery = delivery::sending{}};
+      out.replies_to = reply_to;
+      attachment file{.source = "local:" + local, .name = name, .mimetype = mimetype,
+          .size = static_cast<std::int64_t>(bytes.size()), .width = width, .height = height};
+      if (image) file.kind = attachment_kind::image{.moves = moving_type(mimetype)};
+      out.attachment = file;
+      sink_(change::message_added{out});
+      const auto failed = [&](std::string why) {
+        sink_(change::delivery_changed{out.in, out.id, delivery::failed{}});
+        sink_(change::refused{id_, std::move(why)});
+      };
+      if (!session_ || !upload_service_) { failed("The XMPP server has no HTTP upload service."); return; }
+      if (upload_limit_ && bytes.size() > *upload_limit_) { failed("The file exceeds the upload service's size limit."); return; }
+      auto slot = session_->template try_request<tern::query::upload_slot>({.to = *upload_service_,
+          .query = {.filename = name, .size = std::to_string(bytes.size()), .content_type = mimetype}});
+      if (!slot) { failed("The upload service refused the file."); return; }
+      const auto put = https_url(slot->put.url), get = https_url(slot->get.url);
+      if (!put || !get) { failed("The upload service returned an invalid HTTPS URL."); return; }
+      try {
+        http::connection upload(*loop_, *tls_, http::url{.host = put->host, .port = put->port}, how_.proxy);
+        const auto headers = tern::upload::headers_of(*slot);
+        const auto response = upload.request("PUT", put->path.empty() ? "/" : put->path, bytes, std::nullopt,
+            std::chrono::seconds(120), mimetype, static_cast<const http::no_progress*>(nullptr), "*/*", headers);
+        if (response.status < 200 || response.status >= 300) { failed("The HTTP upload failed."); return; }
+        if (!session_) { failed("Disconnected before the file could be sent."); return; }
+        file.source = slot->get.url;
+        out.attachment = file; out.delivery = delivery::sent{};
+        this->send_to(to, local, caption.empty() ? file.source : caption, [&](auto& stanza) {
+          stanza.payload.emplace_back(tern::files::sharing{
+              .file = {.media_type = mimetype, .name = name, .size = std::to_string(bytes.size()),
+                  .width = width > 0 ? std::optional(std::to_string(width)) : std::nullopt,
+                  .height = height > 0 ? std::optional(std::to_string(height)) : std::nullopt},
+              .sources = {{tern::files::url_data{file.source}}}, .disposition = image ? "inline" : "attachment"});
+          stanza.payload.emplace_back(tern::files::oob{.url = file.source});
+          if (caption.empty()) stanza.payload.emplace_back(tern::files::fallback{.for_ = "urn:xmpp:sfs:0"});
+          if (reply_to) stanza.payload.emplace_back(tern::replies::reply{.id = *reply_to});
+        });
+        sink_(change::message_added{out});
+        sink_(change::delivery_changed{out.in, out.id, wire_ && !wire_->failed() ? delivery_t{delivery::sent{}} : delivery_t{delivery::failed{}}});
+      } catch (const net::failure&) { failed("Could not upload the file."); }
+    });
+  }
+  static std::optional<http::url> https_url(std::string_view source) {
+    if (!source.starts_with("https://") || source.find_first_of("\r\n\t ") != source.npos || source.find('#') != source.npos) return {};
+    auto url = http::url::parse(source);
+    if (!url || url->host.find_first_of("@?#") != std::string::npos) return {};
+    const auto path = source.find('/', 8);
+    url->path = path == source.npos ? std::string() : std::string(source.substr(path));
+    return url;
+  }
+  template <class Message> void read_file(const Message& got, message& in) {
+    for (const auto& carried : got.payload) {
+      if (const auto* shared = carried.template get_if<tern::files::sharing>()) {
+        for (const auto& url : shared->sources.urls) if (https_url(url.target)) {
+          attachment file{.source = url.target, .name = shared->file.name.value_or("File"),
+              .mimetype = shared->file.media_type.value_or("application/octet-stream")};
+          const auto number = [](const std::optional<std::string>& value) -> std::int64_t {
+            if (!value) return 0;
+            std::int64_t n = 0; const auto [end, error] = std::from_chars(value->data(), value->data() + value->size(), n);
+            return error == std::errc{} && end == value->data() + value->size() && n >= 0 ? n : 0;
+          };
+          file.size = number(shared->file.size);
+          file.width = static_cast<int>(std::min<std::int64_t>(number(shared->file.width), std::numeric_limits<int>::max()));
+          file.height = static_cast<int>(std::min<std::int64_t>(number(shared->file.height), std::numeric_limits<int>::max()));
+          if (file.mimetype.starts_with("image/")) file.kind = attachment_kind::image{.moves = moving_type(file.mimetype)};
+          in.attachment = std::move(file); break;
+        }
+      }
+    }
+    if (!in.attachment) for (const auto& carried : got.payload)
+      if (const auto* oob = carried.template get_if<tern::files::oob>(); oob && https_url(oob->url)) {
+        attachment file{.source = oob->url, .name = "File"};
+        const auto path = oob->url.substr(0, oob->url.find('?'));
+        const auto slash = path.rfind('/'); if (slash != std::string::npos) file.name = path.substr(slash + 1);
+        if (path.ends_with(".gif")) file.mimetype = "image/gif";
+        else if (path.ends_with(".png")) file.mimetype = "image/png";
+        else if (path.ends_with(".jpg") || path.ends_with(".jpeg")) file.mimetype = "image/jpeg";
+        else if (path.ends_with(".webp")) file.mimetype = "image/webp";
+        if (file.mimetype.starts_with("image/")) file.kind = attachment_kind::image{.moves = moving_type(file.mimetype)};
+        in.attachment = std::move(file); break;
+      }
+    if (in.attachment) {
+      if (in.body.plain == in.attachment->source) in.body.plain.clear();
+    }
+  }
+  void fetch_media(std::string source, media_use_t use, int, bool = false) {
+    this->spawn_guarded([this, source = std::move(source), use = std::move(use)] {
+      const auto url = https_url(source);
+      if (!url || use.template get_if<media_use::avatar>() || use.template get_if<media_use::emote>()) return;
+      try {
+        http::connection download(*loop_, *tls_, http::url{.host = url->host, .port = url->port}, how_.proxy);
+        const auto got = download.request("GET", url->path.empty() ? "/" : url->path, {}, std::nullopt,
+            std::chrono::seconds(60), {}, static_cast<const http::no_progress*>(nullptr), "*/*");
+        if (got.status == 200) sink_(change::avatar_loaded{use, source, got.body});
+      } catch (const net::failure&) {}
+    });
+  }
+
+  void fetch_room_settings(std::string address) {
+    this->spawn_guarded([this, address = std::move(address)] {
+      auto found = rooms_.find(address);
+      if (!session_ || found == rooms_.end()) return;
+      auto info = session_->template try_request<tern::query::disco_info>({.to = address});
+      found = rooms_.find(address);
+      if (!session_ || found == rooms_.end()) return;
+      if (info) for (const auto& identity : info->identities)
+          if (identity.name && !identity.name->empty()) found->second.name = *identity.name;
+      if (found->second.settings.affiliation == "owner") {
+        auto answer = session_->template try_request<tern::query::muc_configuration>({.to = address});
+        found = rooms_.find(address);
+        if (!session_ || found == rooms_.end()) return;
+        if (found->second.settings.affiliation == "owner" && answer && answer->form) {
+          found->second.form = std::move(*answer->form);
+          auto& settings = found->second.settings;
+          settings.configuring = true;
+          settings.title = found->second.form->title.value_or("");
+          settings.instructions = found->second.form->instructions;
+          settings.fields = std::ranges::to<std::vector<muc_field>>(std::views::transform(found->second.form->fields, [](const auto& field) {
+            return muc_field{.var = field.var.value_or(""), .label = field.label.value_or(field.var.value_or("")),
+                .description = field.desc.value_or(""), .kind = muc_kind_of(field.type.value_or("text-single")),
+                .values = field.value,
+                .options = std::ranges::to<std::vector<std::pair<std::string, std::string>>>(std::views::transform(field.options,
+                    [](const auto& option) { return std::pair{option.label.value_or(option.value), option.value}; })),
+                .required = field.required.has_value(), .use = muc_field_use_of(field.var.value_or(""))};
+          }));
+        } else {
+          found->second.settings.configuring = false;
+          found->second.settings.fields.clear();
+          found->second.form.reset();
+        }
+      } else {
+        found->second.settings.configuring = false;
+        found->second.settings.fields.clear();
+        found->second.form.reset();
+      }
+      const auto rank = found->second.settings.affiliation;
+      found->second.settings.affiliations.clear();
+      if (rank == "owner" || rank == "admin") for (const auto affiliation : tern::muc::affiliation_lists) {
+        if (!session_) return;
+        auto list = session_->template try_request<tern::query::muc_affiliations>(
+            {.to = address, .query = {.item = {.affiliation = std::string(affiliation)}}});
+        found = rooms_.find(address);
+        if (!session_ || found == rooms_.end()) return;
+        if (found->second.settings.affiliation != rank) break;
+        if (list) for (const auto& item : list->items) if (item.jid)
+          found->second.settings.affiliations.push_back({bare(*item.jid), item.affiliation.value_or(std::string(affiliation))});
+      }
+      publish_room(address);
+      sink_(muc_settings_loaded{id_, address, found->second.settings});
+    });
+  }
+  void change_muc(std::string address, const request::refresh_muc&) { fetch_room_settings(std::move(address)); }
+  void change_muc(std::string address, const request::configure_muc& asked) {
+    this->spawn_guarded([this, address = std::move(address), fields = asked.fields] {
+      const auto refuse = [&](std::string message) {
+        sink_(muc_configuration_failed{id_, address, message});
+        sink_(change::refused{id_, std::move(message)});
+      };
+      const auto found = rooms_.find(address);
+      if (!session_ || found == rooms_.end() || found->second.settings.affiliation != "owner" || !found->second.form) {
+        refuse("Only the room owner can configure this room."); return;
+      }
+      auto form = *found->second.form;
+      // Use the parsed server fields for validation, never the UI's copy of
+      // their type or choices. Unrecognised fields remain opaque and unchanged.
+      const bool protected_room = muc_password_protected(found->second.settings.fields, fields);
+      for (auto& field : form.fields) {
+        if (!field.var) continue;
+        const auto original = std::ranges::find(found->second.settings.fields, *field.var, &muc_field::var);
+        if (original == found->second.settings.fields.end()) continue;
+        if (!muc_field_applicable(original->use, protected_room)) continue;
+        const auto rules = rules_of(original->kind);
+        if (!rules.editable) continue;
+        const auto answer = std::ranges::find(fields, *field.var, &muc_field::var);
+        if (answer == fields.end()) continue;
+        if (auto error = validate_muc_value(*original, answer->values)) {
+          refuse(original->label + ": " + *error); return;
+        }
+        if (rules.jid && !std::ranges::all_of(answer->values, [](const auto& jid) {
+              return jid.empty() || tern::jid::parse(jid).has_value();
+            })) {
+          refuse(original->label + ": enter valid JIDs."); return;
+        }
+        field.value = answer->values;
+      }
+      form.type = "submit";
+      std::erase_if(form.fields, [&](const auto& field) {
+        if (!field.var) return true;
+        const auto original = std::ranges::find(found->second.settings.fields, *field.var, &muc_field::var);
+        return original != found->second.settings.fields.end() && spl::visit(spl::overloaded{
+            [](muc_kind::fixed) { return true; },
+            [](muc_kind::text_single) { return false; }, [](muc_kind::text_private) { return false; },
+            [](muc_kind::text_multi) { return false; }, [](muc_kind::jid_single) { return false; },
+            [](muc_kind::jid_multi) { return false; }, [](muc_kind::boolean) { return false; },
+            [](muc_kind::list_single) { return false; }, [](muc_kind::list_multi) { return false; },
+            [](muc_kind::hidden) { return false; }, [](muc_kind::unsupported) { return false; }}, original->kind);
+      });
+      if (!session_->template try_request<tern::query::muc_configure>({.to = address, .query = {std::move(form)}})) {
+        refuse("The server refused the room configuration."); return;
+      }
+      fetch_room_settings(address);
+    });
+  }
+  void change_muc(std::string address, const request::rejoin_muc& asked) {
+    this->spawn_guarded([this, address = std::move(address), asked] {
+      if (!session_ || asked.nick.empty() || !tern::jid::parse(address + "/" + asked.nick) || (rooms_.contains(address) && rooms_.at(address).settings.joined)) {
+        sink_(change::refused{id_, "Enter a valid room nickname."}); return;
+      }
+      rooms_[address].password = asked.password.empty() ? std::nullopt : std::optional(asked.password);
+      joining_.insert(address);
+      this->join(address, asked.nick);
+      if (rooms_.contains(address)) publish_room(address);
+    });
+  }
+  void change_muc(std::string address, const request::muc_identity& asked) {
+    this->spawn_guarded([this, address = std::move(address), nick = asked.nick] {
+      if (!session_ || !rooms_.contains(address) || nick.empty() || !tern::jid::parse(address + "/" + nick)) {
+        sink_(change::refused{id_, "Enter a valid nickname in a joined room."}); return;
+      }
+      // Do not change the local nick until the server confirms it with self presence.
+      session_->send(proto::presence::available{.to = address + "/" + nick});
+    });
+  }
+  void change_muc(std::string address, const request::muc_privilege& asked) {
+    this->spawn_guarded([this, address = std::move(address), asked] {
+      const auto found = rooms_.find(address);
+      if (!session_ || found == rooms_.end()) return;
+      const auto& mine = found->second.settings;
+      tern::muc::affiliation_item item;
+      if (!asked.affiliation.empty()) {
+        if (mine.affiliation != "owner" && mine.affiliation != "admin") {
+          sink_(change::refused{id_, "Only room administrators can change affiliations."}); return;
+        }
+        if (asked.affiliation != "none" && asked.affiliation != "member" && asked.affiliation != "admin" && asked.affiliation != "owner" && asked.affiliation != "outcast") {
+          sink_(change::refused{id_, "Unknown room affiliation."}); return;
+        }
+        const auto person = std::ranges::find_if(mine.people, [&](const muc_person& p) { return address + "/" + p.nick == asked.user; });
+        const auto jid = tern::jid::parse(person != mine.people.end() ? person->jid : asked.user);
+        if (!jid || !jid->resource().empty() || jid->local().empty()) {
+          sink_(change::refused{id_, "Affiliations require the user's real bare JID; this room may hide it."}); return;
+        }
+        item.jid = jid->bare().str(); item.affiliation = asked.affiliation;
+      } else {
+        if (mine.role != "moderator") { sink_(change::refused{id_, "Only moderators can change occupant roles."}); return; }
+        if (asked.role != "none" && asked.role != "visitor" && asked.role != "participant" && asked.role != "moderator") {
+          sink_(change::refused{id_, "Unknown occupant role."}); return;
+        }
+        const std::string nick = asked.user.starts_with(address + "/") ? resource_of(asked.user) : asked.user;
+        if (!found->second.occupants.contains(nick)) { sink_(change::refused{id_, "That occupant has left the room."}); return; }
+        item.nick = nick; item.role = asked.role;
+      }
+      if (!session_->template try_request<tern::query::muc_affiliate>({.to = address, .query = {std::move(item)}}))
+        sink_(change::refused{id_, "The server refused the privilege change."});
+      else fetch_room_settings(address);
+    });
+  }
+  void change_muc(std::string address, const request::destroy_muc& asked) {
+    this->spawn_guarded([this, address = std::move(address), reason = asked.reason] {
+      if (!session_ || !rooms_.contains(address) || rooms_.at(address).settings.affiliation != "owner") {
+        sink_(change::refused{id_, "Only the room owner can destroy the room."}); return;
+      }
+      if (!session_->template try_request<tern::query::muc_destroy>({.to = address, .query = {{reason}}})) {
+        sink_(change::refused{id_, "The server refused to destroy the room."}); return;
+      }
+      leave(address);
+    });
+  }
+  void publish_room(const std::string& address) {
+    const auto& room = rooms_.at(address);
+    sink_(change::conversation_updated{.id = {id_, address}, .kind = conversation_kind::group{},
+        .name = room.name.empty() ? address : room.name, .topic = room.topic, .theirs = room.settings});
+  }
+
   void invite_to(std::string room, std::string user) {
     this->spawn_guarded([this, room = std::move(room), user = std::move(user)] {
       const auto jid = tern::jid::parse(user);
@@ -369,6 +861,7 @@ class account {
       }
       creating_.emplace(room, room_creation{std::move(name), std::move(topic), open});
       this->join(room, user_);
+      if (rooms_.contains(room)) publish_room(room);
     });
   }
 
@@ -445,6 +938,7 @@ class account {
       }
       joining_.insert(room);
       this->join(room, user_);
+      if (rooms_.contains(room)) publish_room(room);
     });
   }
 
@@ -506,20 +1000,22 @@ class account {
     if (!one.forwarded.message)
       return;
     const auto take = [&](const auto* got) {
-      if (!got || !got->body || !got->from)
+      if (!got || !got->from || (!got->body && !std::ranges::any_of(got->payload, [](const auto& p) { return p.template is<tern::files::sharing>() || p.template is<tern::files::oob>(); })))
         return;
       const std::string nick = resource_of(*got->from);
+      if (room && nick.empty()) return;
       const auto found = rooms_.find(in.id);
       message made{.in = in,
                    .id = got->id.value_or(one.id),
                    .sender = room ? *got->from : bare(*got->from),
                    .at = std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now()),
-                   .body = {*got->body, std::nullopt},
+                   .body = {got->body.value_or(""), std::nullopt},
                    .outgoing = room ? (found != rooms_.end() && nick == found->second.nick)
                                     : bare(*got->from) == id_.address};
       if (one.forwarded.delay)
         if (const auto at = stamp_of(one.forwarded.delay->stamp))
           made.at = *at;
+      read_file(*got, made);
       sink_(change::message_added{std::move(made), placement::at_start{}});
     };
     const auto& got = *one.forwarded.message;
@@ -603,7 +1099,7 @@ class account {
   void send(std::string to, std::string text, std::optional<std::string> reply_to = std::nullopt,
             std::vector<mux::mention> = {}, std::vector<mux::styled_run> styles = {}) {
     text = styled_body(std::move(text), styles);
-    this->spawn_guarded([this, to = bare(to), text = std::move(text), reply_to = std::move(reply_to)] {
+    this->spawn_guarded([this, to = std::move(to), text = std::move(text), reply_to = std::move(reply_to)] {
       message out{.in = {id_, to},
                   .id = "mux-" + std::to_string(++sent_),
                   .sender = id_.address,
@@ -623,6 +1119,43 @@ class account {
       });
       sink_(change::delivery_changed{out.in, out.id, wire_ && !wire_->failed() ? delivery_t{delivery::sent{}} : delivery_t{delivery::failed{}}});
     });
+  }
+
+  void typing(std::string to, bool on) {
+    this->spawn_guarded([this, to = std::move(to), on] {
+      if (!session_) return;
+      if (!rooms_.contains(to) && !typing_supported_.contains(to)) {
+        const auto info = session_->template try_request<tern::query::disco_info>({.to = to});
+        typing_supported_[to] = info && std::ranges::contains(info->features, tern::chat_states::ns, &tern::disco::feature::var);
+      }
+      if (!session_ || (!rooms_.contains(to) && !typing_supported_[to])) return;
+      const auto previous = typing_sent_.find(to);
+      if (previous != typing_sent_.end() && previous->second == on) return;
+      typing_sent_[to] = on;
+      const auto extra = [&](auto& message) {
+        if (on) message.payload.emplace_back(tern::chat_states::composing{});
+        else message.payload.emplace_back(tern::chat_states::paused{});
+      };
+      if (rooms_.contains(to)) { proto::message::groupchat message{.to = to}; extra(message); session_->send(message); }
+      else { proto::message::chat message{.to = to}; extra(message); session_->send(message); }
+    });
+  }
+  template <class Message> void read_typing(const Message& got, bool group) {
+    if (!got.from) return;
+    const auto room = bare(*got.from);
+    if (group && (!rooms_.contains(room) || resource_of(*got.from) == rooms_.at(room).nick)) return;
+    const auto sender = group ? *got.from : room;
+    if (group && resource_of(*got.from).empty()) return;
+    bool said = false, composing = false;
+    for (const auto& p : got.payload) {
+      composing = composing || p.template is<tern::chat_states::composing>();
+      said = said || p.template is<tern::chat_states::active>() || p.template is<tern::chat_states::composing>() || p.template is<tern::chat_states::paused>() || p.template is<tern::chat_states::inactive>() || (!group && p.template is<tern::chat_states::gone>());
+    }
+    if (!group && said) typing_supported_[room] = true;
+    if (!said && !got.body) return;
+    auto& who = typing_received_[room];
+    if (composing) who.insert(sender); else who.erase(sender);
+    sink_(change::typing_changed{{id_, room}, std::vector<std::string>(who.begin(), who.end())});
   }
 
   // A message of one's own corrected (XEP-0308): the new text in its place.
@@ -762,7 +1295,8 @@ class account {
     options.resource = how_.resource;
     options.plain_without_tls = how_.plain_without_tls;
     options.create = how_.create;
-    options.self = {.identities = {{.category = "client", .type = "pc", .name = "mux"}}};
+    options.self = {.identities = {{.category = "client", .type = "pc", .name = "mux"}},
+        .features = {{std::string(tern::vcard4::node) + "+notify"}}};
     options.caps_node = "https://github.com/j4niwzis/mux";
     auto made = tern::try_connect<proto>(wire, options, tern::answering<>{}, net::scheduler{loop_});
     if (!made) {
@@ -815,6 +1349,7 @@ class account {
     }
     session_type& session = *made;
     session_ = &session;
+    typing_supported_.clear(); typing_sent_.clear(); typing_received_.clear();
     connected_ = true;
     log(id_, "logged in, as {}", how_.resource.empty() ? std::string("a resource the server chose") : how_.resource);
     say(connection::online{});
@@ -829,6 +1364,8 @@ class account {
       mux::proto::xmpp::state now{.online = true};
       if (auto info = session.template try_request<tern::query::disco_info>({.to = own.substr(own.find('@') + 1)}))
         now.archive = std::ranges::contains(info->features, std::string_view("urn:xmpp:mam:2"), &tern::disco::feature::var);
+      discover_upload();
+      now.upload = upload_service_.has_value();
       sink_(change::protocol_state_changed{id_, protocol_state_t{now}});
     }
     if (session.try_sync(roster_)) {
@@ -838,7 +1375,8 @@ class account {
     } else {
       log(id_, "the roster could not be fetched");
     }
-    session.available();
+    resources_.clear();
+    publish_presence();
     // The rooms kept as bookmarks, and those to join joined.
     if (auto marks = session.template try_request<tern::query::bookmarks>(); marks && marks->items) {
       log(id_, "bookmarks: {} room{}", marks->items->items.size(), marks->items->items.size() == 1 ? "" : "s");
@@ -851,14 +1389,14 @@ class account {
     flush_notifications();
     // Restore every room joined here, including rooms whose bookmark could
     // not be saved. Drop occupants from the previous connection.
-    std::ranges::for_each(rooms_, [](auto& entry) { entry.second.occupants.clear(); });
+    std::ranges::for_each(rooms_, [](auto& entry) { entry.second.occupants.clear(); entry.second.settings.people.clear(); entry.second.settings.joined = false; });
     // Sending may yield to a leave request: do not retain map iterators or
     // references across it, or join a room removed while another was sent.
     const auto rejoining = std::ranges::to<std::vector>(std::views::transform(rooms_, [](const auto& entry) {
       return std::pair{entry.first, entry.second.nick};
     }));
     for (const auto& [jid, nick] : rejoining)
-      if (rooms_.contains(jid)) this->join(jid, nick);
+      if (rooms_.contains(jid) && wire_presence_of(own_presence_.state).available) this->join(jid, nick);
 
     for (;;) {
       auto one = inbox.try_next();
@@ -873,6 +1411,9 @@ class account {
         break;
       on(**one);
     }
+    std::ranges::for_each(resources_, [&](const auto& entry) { sink_(change::presence_changed{id_, entry.first, {}}); });
+    resources_.clear();
+    sink_(change::presence_changed{id_, id_.address, {}});
     session_ = nullptr;
     // Tern woke requests waiting on this session when its reader ended.
     // Keep the session and transport alive until those fibers have returned.
@@ -906,15 +1447,18 @@ class account {
                                        .kind = conversation_kind::group{},
                                        .name = mark.name.value_or(jid)});
     sink_(change::history_position{{id_, jid}, std::string()});
-    if (tern::bookmarks::autojoins(mark))
+    if (tern::bookmarks::autojoins(mark) && wire_presence_of(own_presence_.state).available) {
       rooms_[jid].nick = mark.nick.value_or(user_);
+      rooms_[jid].name = mark.name.value_or(jid);
+    }
   }
   void join(const std::string& jid, const std::string& nick) {
     rooms_[jid].nick = nick;
-    proto::presence::available joining{.to = jid + "/" + nick};
+    proto::presence::available joining{.to = jid + "/" + nick,
+        .show = wire_presence_of(own_presence_.state).show, .status = own_presence_.status};
     const auto invite = invitations_.find(jid);
     joining.payload.emplace_back(tern::muc::join{.history = tern::muc::history{.maxstanzas = "50"},
-        .password = invite == invitations_.end() ? std::nullopt : invite->second.password});
+        .password = invite == invitations_.end() ? rooms_[jid].password : invite->second.password});
     session_->send(joining);
   }
 
@@ -955,20 +1499,42 @@ class account {
   }
   void on_message(const proto::message::headline& got) { bookmark_event(got); }
   template <class Message> void bookmark_event(const Message& got) {
-    if (!got.from || bare(*got.from) != id_.address) return;
+    if (!got.from) return;
     for (const auto& child : got.payload)
       spl::visit(spl::overloaded{[&](const tern::bookmarks::event& event) {
-        if (!event.items || event.items->node != tern::bookmarks::bookmarks_namespace) return;
-        for (const auto& item : event.items->items)
-          spl::visit(spl::overloaded{[&](const tern::bookmarks::published& item) {
-            if (item.conference) bookmarked(item.id, *item.conference);
-          }, [&](const tern::bookmarks::retracted& item) {
-            bookmarks_.erase(item.id);
-            sink_(change::notifications_changed{id_, item.id, {}, false});
-          }}, item.data());
+        if (!event.items) return;
+        spl::visit(spl::overloaded{
+            [&](tern::pep_node::bookmarks) {
+              if (bare(*got.from) != id_.address) return;
+              std::ranges::for_each(event.items->items, [&](const auto& item) {
+                spl::visit(spl::overloaded{
+                    [&](const tern::bookmarks::published& p) { if (p.conference) bookmarked(p.id, *p.conference); },
+                    [&](const tern::bookmarks::retracted& p) {
+                      bookmarks_.erase(p.id); sink_(change::notifications_changed{id_, p.id, {}, false});
+                    }}, item.data());
+              });
+            },
+            [&](tern::pep_node::profile) {
+              std::ranges::for_each(event.items->items, [&](const auto& item) {
+                spl::visit(spl::overloaded{
+                    [&](const tern::bookmarks::published& p) {
+                      if (!p.profile) return;
+                      const auto profile = profile_of(*p.profile);
+                      sink_(change::profile_found{id_, bare(*got.from), profile.name, profile.avatar, profile.details});
+                    },
+                    [&](const tern::bookmarks::retracted&) { sink_(change::profile_found{id_, bare(*got.from), {}, {}, profile_details{}}); }}, item.data());
+              });
+            }, [](tern::pep_node::other) {}}, tern::pep_node_of(event.items->node));
       }, [](const auto&) {}}, child.data());
   }
   void on_message(const proto::message::error& got) {
+    if (got.id && got.from) {
+      const auto room = bare(*got.from);
+      const auto chat = rooms_.contains(room) && !resource_of(*got.from).empty() ? *got.from : room;
+      sink_(change::delivery_changed{{id_, chat}, *got.id, delivery::failed{}});
+    }
+    if (got.from && rooms_.contains(bare(*got.from)))
+      sink_(change::refused{id_, "The room refused the message or subject change."});
     for (const auto& carried : got.payload)
       if (const auto* user = carried.template get_if<tern::muc::user>(); user && !user->invitations.empty()) {
         sink_(change::refused{id_, "The XMPP room refused the invitation."});
@@ -999,18 +1565,25 @@ class account {
   // A room's message: the room is the conversation, the occupant the sender,
   // and one's own nick says it was sent from here -- the room's echo of it.
   void on_message(const proto::message::groupchat& got) {
-    if (!got.body || !got.from)
+    read_typing(got, true);
+    if (!got.from)
       return;
     const std::string room = bare(*got.from);
     const auto found = rooms_.find(room);
     if (found == rooms_.end())
       return;
+    if (got.subject) {
+      found->second.topic = *got.subject;
+      publish_room(room);
+    }
+    if (!got.body && !std::ranges::any_of(got.payload, [](const auto& p) { return p.template is<tern::files::sharing>() || p.template is<tern::files::oob>(); })) return;
     const std::string nick = resource_of(*got.from);
+    if (nick.empty()) return; // service messages from the room are not members' messages
     message in{.in = {id_, room},
                .id = got.id.value_or(""),
                .sender = *got.from,
                .at = std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now()),
-               .body = {*got.body, std::nullopt},
+               .body = {got.body.value_or(""), std::nullopt},
                .outgoing = nick == found->second.nick};
     this->arrived(got, std::move(in));
   }
@@ -1019,14 +1592,17 @@ class account {
 
   template <class Message>
   void text_message(const Message& got) {
-    if (!got.body || !got.from)
+    read_typing(got, false);
+    if (!got.from || (!got.body && !std::ranges::any_of(got.payload, [](const auto& p) { return p.template is<tern::files::sharing>() || p.template is<tern::files::oob>(); })))
       return;
-    const std::string from = bare(*got.from);
+    const std::string room = bare(*got.from);
+    const std::string from = rooms_.contains(room) && !resource_of(*got.from).empty() ? *got.from : room;
+    if (from != room) sink_(change::conversation_updated{.id = {id_, from}, .kind = conversation_kind::direct{}, .name = resource_of(from)});
     message in{.in = {id_, from},
                .id = got.id.value_or(""),
                .sender = from,
                .at = std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now()),
-               .body = {*got.body, std::nullopt}};
+               .body = {got.body.value_or(""), std::nullopt}};
     this->arrived(got, std::move(in));
   }
 
@@ -1050,6 +1626,7 @@ class account {
       if (const auto* reply = carried.template get_if<tern::replies::reply>())
         in.replies_to = reply->id;
     }
+    read_file(got, in);
     sink_(change::message_added{std::move(in)});
   }
 
@@ -1144,19 +1721,25 @@ class account {
       if (!session_) { failed("Disconnected before the room could be opened."); return; }
       if (!wanted.topic.empty()) session_->send(proto::message::groupchat{.to = room, .subject = wanted.topic});
       const conversation_id chat{id_, room};
-      sink_(change::conversation_updated{.id = chat, .kind = conversation_kind::group{}, .name = wanted.name, .topic = wanted.topic});
+      if (!rooms_.contains(room)) return;
+      rooms_.at(room).name = wanted.name; rooms_.at(room).topic = wanted.topic;
+      publish_room(room);
       sink_(change::history_position{chat, std::string()});
       sink_(change::room_created{chat});
       this->save_room(room, wanted.name);
+      fetch_room_settings(room);
     });
   }
   void on_presence(const proto::presence::error& got) {
     if (!got.from) return;
     const auto room = bare(*got.from);
-    if (joining_.erase(room)) {
-      rooms_.erase(room);
+    const bool pending_join = joining_.erase(room) != 0;
+    if (pending_join) {
+      if (rooms_.contains(room)) { rooms_.at(room).settings.joined = false; publish_room(room); }
       sink_(change::refused{id_, "The service refused to join " + room + "."});
     }
+    if (!pending_join && !creating_.contains(room))
+      sink_(change::refused{id_, "The room refused a presence change (nickname, password, or access)."});
     if (creating_.erase(room)) {
       rooms_.erase(room);
       sink_(change::refused{id_, "The service refused to create " + room + "."});
@@ -1168,14 +1751,33 @@ class account {
       return;
     if (this->occupant(got, true, availability_of(got.show)))
       return;
-    sink_(change::presence_changed{id_, bare(*got.from), {availability_of(got.show), got.status}});
+    const auto contact = bare(*got.from);
+    resources_[contact].insert_or_assign(resource_of(*got.from), resource_presence{
+        {availability_of(got.show), got.status}, std::clamp(got.priority.value_or(0), -128, 127), ++presence_order_});
+    publish_contact_presence(contact);
   }
   void on_presence(const proto::presence::unavailable& got) {
     if (!got.from)
       return;
     if (this->occupant(got, false, availability::offline{}))
       return;
-    sink_(change::presence_changed{id_, bare(*got.from), {availability::offline{}, got.status}});
+    const auto contact = bare(*got.from);
+    if (const auto found = resources_.find(contact); found != resources_.end()) {
+      if (resource_of(*got.from).empty()) found->second.clear();
+      else found->second.erase(resource_of(*got.from));
+      if (found->second.empty()) resources_.erase(found);
+    }
+    publish_contact_presence(contact);
+  }
+
+  void publish_contact_presence(const std::string& contact) {
+    const auto found = resources_.find(contact);
+    if (found == resources_.end()) { sink_(change::presence_changed{id_, contact, {}}); return; }
+    const auto best = std::ranges::max_element(found->second, {}, [](const auto& entry) {
+      const auto& p = entry.second;
+      return std::tuple{p.priority, presence_rank(p.value.state), p.order};
+    });
+    sink_(change::presence_changed{id_, contact, best->second.value});
   }
 
   // A room's occupant come or gone: its members, and how the occupant is,
@@ -1187,25 +1789,48 @@ class account {
     if (found == rooms_.end())
       return false;
     const std::string nick = resource_of(*got.from);
+    // The bare room is not an occupant. Consume its presence without inventing a member.
+    if (nick.empty()) return true;
+    const tern::muc::user* muc = nullptr;
+    for (const auto& carried : got.payload)
+      if (const auto* user = carried.template get_if<tern::muc::user>()) muc = user;
+    if (!muc) return true;
+    auto& settings = found->second.settings;
+    const bool self = tern::muc::flags_of(*muc).self;
+    const bool renamed = std::ranges::any_of(muc->statuses, [](const auto& s) { return s.code == "303"; });
     auto& occupants = found->second.occupants;
     if (here) {
+      auto person = muc_person_of(nick, muc->items);
       member one{.id = *got.from, .name = nick};
-      for (const auto& carried : got.payload)
-        if (const auto* user = carried.template get_if<tern::muc::user>())
-          for (const auto& item : user->items) {
-            if (spl::visit([](auto rank) { return rank.shown_as_affiliation; }, muc_rank_of(item.affiliation)))
-              one.role = item.affiliation;
-            else if (spl::visit([](auto rank) { return rank.shown_as_role; }, muc_rank_of(item.role)))
-              one.role = item.role;
-          }
+      if (spl::visit([](auto rank) { return rank.shown_as_affiliation; }, muc_rank_of(person.affiliation)))
+        one.role = person.affiliation;
+      else if (spl::visit([](auto rank) { return rank.shown_as_role; }, muc_rank_of(person.role)))
+        one.role = person.role;
       occupants[nick] = std::move(one);
+      std::erase_if(settings.people, [&](const muc_person& p) { return p.nick == nick; });
+      if (self) { settings.affiliation = person.affiliation; settings.role = person.role; }
+      settings.people.push_back(std::move(person));
+      if (self) { found->second.nick = nick; settings.nick = nick; settings.joined = true; }
+
     } else {
       occupants.erase(nick);
+      std::erase_if(settings.people, [&](const muc_person& p) { return p.nick == nick; });
+      if (renamed) for (const auto& item : muc->items) if (item.nick) {
+        if (self) { found->second.nick = *item.nick; settings.nick = *item.nick; }
+      }
+      if (self && !renamed) {
+        settings.joined = false; settings.role = "none"; settings.configuring = false;
+        settings.fields.clear(); found->second.form.reset();
+        occupants.clear(); settings.people.clear();
+        sink_(change::notice{id_, "Room disconnected", "You have left or been removed from " + room + "."});
+      }
     }
     std::vector<member> who;
     for (const auto& [name, one] : occupants)
       who.push_back(one);
     sink_(change::members_changed{{id_, room}, std::move(who)});
+    publish_room(room);
+    if (self && here) fetch_room_settings(room);
     sink_(change::presence_changed{id_, *got.from, {std::move(state), got.status}});
     if (here && joining_.contains(room))
       for (const auto& carried : got.payload)
@@ -1213,7 +1838,7 @@ class account {
           joining_.erase(room);
           invitations_.erase(room);
           const conversation_id chat{id_, room};
-          sink_(change::conversation_updated{.id = chat, .kind = conversation_kind::group{}, .name = room});
+          publish_room(room);
           sink_(change::history_position{chat, std::string()});
           sink_(change::room_created{chat});
           break;
@@ -1249,6 +1874,11 @@ class account {
   struct room {
     std::string nick;
     std::map<std::string, member> occupants;
+    std::string name;
+    std::optional<std::string> topic;
+    muc_room settings;
+    std::optional<tern::data_form::form> form;
+    std::optional<std::string> password;
   };
   std::map<std::string, room> rooms_;
   std::map<std::string, tern::bookmarks::conference> bookmarks_;
@@ -1258,8 +1888,16 @@ class account {
   std::set<std::string> joining_;
   struct pending_invitation { std::string inviter; std::optional<std::string> password; };
   std::map<std::string, pending_invitation> invitations_;
+  struct resource_presence { mux::presence value; int priority = 0; std::uint64_t order = 0; };
+  std::map<std::string, std::map<std::string, resource_presence>> resources_;
+  std::uint64_t presence_order_ = 0;
+  mux::presence own_presence_{availability::online{}, {}};
   session_type* session_ = nullptr;
   net::stream* wire_ = nullptr;
+  std::map<std::string, bool> typing_supported_, typing_sent_;
+  std::map<std::string, std::set<std::string>> typing_received_;
+  std::optional<std::string> upload_service_;
+  std::optional<std::uint64_t> upload_limit_;
   std::uint64_t sent_ = 0;
   bool stopping_ = false;
   bool started_ = false, retry_ = true, connected_ = false;

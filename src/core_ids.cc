@@ -118,6 +118,31 @@ struct body {
   friend bool operator==(const body&, const body&) = default;
 };
 
+// A forward keeps the original event's attribution and media. An edited
+// message supplies the latest body shown by the client, not an old version.
+struct forward_source {
+  std::string event;
+  std::optional<mux::body> replacement;
+  friend bool operator==(const forward_source&, const forward_source&) = default;
+};
+
+// Global profile data, independent of its protocol's wire representation.
+struct pronouns {
+  std::string language, summary;
+  friend bool operator==(const pronouns&, const pronouns&) = default;
+};
+struct profile_details {
+  std::optional<std::string> banner;
+  std::vector<mux::pronouns> pronouns;
+  mux::body biography;
+  friend bool operator==(const profile_details&, const profile_details&) = default;
+};
+struct user_profile {
+  std::optional<std::string> name, avatar;
+  profile_details details;
+  friend bool operator==(const user_profile&, const user_profile&) = default;
+};
+
 namespace delivery {
 struct sending {
   friend bool operator==(const sending&, const sending&) = default;
@@ -383,6 +408,9 @@ struct message {
   std::string reaction_key;
   // What its protocol has of it beyond this (message_parts), or none.
   message_part theirs;
+  // A local echo's position while its server timestamp is unknown. Delivery
+  // acknowledgements keep it; a received copy replaces it with server time.
+  std::optional<std::chrono::sys_time<std::chrono::milliseconds>> local_order;
   friend bool operator==(const message&, const message&) = default;
 };
 
@@ -448,6 +476,40 @@ struct emote {
   std::optional<std::string> pack_room;
   std::string pack_key;
   friend bool operator==(const emote&, const emote&) = default;
+};
+
+// Pack metadata is immutable: conversations, queued changes and the picker
+// share a list instead of copying every image and its strings per room.
+class emote_list {
+ public:
+  using value_type = emote;
+  using const_iterator = std::vector<emote>::const_iterator;
+
+  emote_list() = default;
+  emote_list(std::vector<emote> images) {
+    if (!images.empty())
+      images_ = std::make_shared<const std::vector<emote>>(std::move(images));
+  }
+  emote_list(std::initializer_list<emote> images) : emote_list(std::vector<emote>(images)) {}
+
+  [[nodiscard]] const std::vector<emote>& get() const {
+    static const std::vector<emote> empty;
+    return images_ ? *images_ : empty;
+  }
+  operator const std::vector<emote>&() const { return get(); }
+  [[nodiscard]] const_iterator begin() const { return get().begin(); }
+  [[nodiscard]] const_iterator end() const { return get().end(); }
+  [[nodiscard]] const emote* data() const { return get().data(); }
+  [[nodiscard]] std::size_t size() const { return get().size(); }
+  [[nodiscard]] bool empty() const { return get().empty(); }
+  [[nodiscard]] const emote& front() const { return get().front(); }
+  [[nodiscard]] const emote& operator[](std::size_t index) const { return get()[index]; }
+  friend bool operator==(const emote_list& a, const emote_list& b) {
+    return a.images_ == b.images_ || a.get() == b.get();
+  }
+
+ private:
+  std::shared_ptr<const std::vector<emote>> images_;
 };
 
 // Something for the user in a chat, not yet seen, as Telegram's @ and heart
@@ -621,9 +683,9 @@ struct conversation {
   // m.room.pinned_events.
   std::vector<std::string> pinned;
   // The custom emoji that can be used in it: its packs' and the user's own.
-  std::vector<emote> emotes;
+  emote_list emotes;
   // And the stickers, of the same packs.
-  std::vector<emote> stickers;
+  emote_list stickers;
   // What its protocol keeps of it beyond this (Matrix: its rules and power
   // levels), or none.
   room_part_t theirs;
@@ -730,7 +792,11 @@ struct account {
   connection_t state = connection::offline{};
   std::string display_name;
   skiff::model::Keyed<std::string, conversation> conversations;  // by conversation id
+  std::map<std::string, user_profile> profiles;
+  std::uint64_t profile_result = 0;
+  std::optional<std::string> profile_error;
   std::map<std::string, presence> presences;          // by contact
+  std::uint64_t presence_revision = 0;
 };
 
 // ---------------------------------------------------------------------------

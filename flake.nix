@@ -13,13 +13,13 @@
 
     # The dependency family, at the commits mux's own CMakeLists.txt pins.
     chevron = { url = "github:j4niwzis/chevron/8f40c545f0120747b3bf2ad6a61b420505e1249b"; flake = false; };
-    knot = { url = "github:j4niwzis/knot/6389154f394c740520b61b7981fd631c6845dab2"; flake = false; };
-    loom = { url = "github:j4niwzis/loom/cf76d9f2c7179b411944f6e24df05f4335da8d7a"; flake = false; };
+    knot = { url = "github:j4niwzis/knot/960ff133aad8ba48590f8e6227bd0cf4f853cdc7"; flake = false; };
+    loom = { url = "github:j4niwzis/loom/b0a4a3ad6ccfc58844d18ec940536c9face451a6"; flake = false; };
     splice = { url = "github:j4niwzis/splice/db4be11c76c36ac32377cc5e918009b8898223c2"; flake = false; };
-    tern = { url = "github:j4niwzis/tern/9814dbc29f56f43ce0fd60a4a55c5a69ae42aa42"; flake = false; };
+    tern = { url = "github:j4niwzis/tern/6214f166d9a4f06b2d4ee7281b2f4e0d28681bbd"; flake = false; };
     boost-pfr = { url = "github:boostorg/pfr/401385c240027423acbb1eb6dea2abe0043db5aa"; flake = false; };
-    skiff = { url = "github:j4niwzis/skiff/05afd04da8a1f38fe21197c4828e5dd194f3c116"; flake = false; };
-    skiff-widgets = { url = "github:j4niwzis/skiff-widgets/9755318db703772ec8e736934659912b9e09491d"; flake = false; };
+    skiff = { url = "github:j4niwzis/skiff/d52c6b4b72c2cb7891f06c4c2cd7a461f46673ee"; flake = false; };
+    skiff-widgets = { url = "github:j4niwzis/skiff-widgets/72fb4606357b9ed9b9fa751daadaa01883a22863"; flake = false; };
     # alef: the pin mux's CMakeLists.txt carries.
     alef = { url = "github:j4niwzis/alef/ca0dacaab3c6dd5a9dfb3fc4c2322b756f36f744"; flake = false; };
 

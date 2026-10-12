@@ -33,6 +33,9 @@ void app::rebuild_in_theme() {
   const auto theme = style.theme.value_or(this->appearance().theme);
   mux::ui::use_scroll_bars(theme);
   colours = mux::ui::palette_of(theme, this->appearance().accent, shared.looks.window.opacity);
+  shared.looks.theme_overrides = this->appearance().theme_overrides;
+  const auto customized = this->appearance().theme_overrides.find(std::string(mux::config::word_of(theme)));
+  if (customized != this->appearance().theme_overrides.end()) mux::ui::apply_theme(colours, customized->second);
   if (!style.theme_file.empty()) {
     const auto text = spl::bytes::file_text(style.theme_file);
     if (text) {
@@ -40,6 +43,8 @@ void app::rebuild_in_theme() {
       else shared.notice("Theme", "The custom theme could not be read. Use a JSON palette file.");
     } else shared.notice("Theme", "The custom theme file could not be opened.");
   }
+  mux::ui::use_avatar_rounding(static_cast<float>(this->appearance().chat_avatar_rounding.value_or(100)),
+                               static_cast<float>(this->appearance().person_avatar_rounding.value_or(100)));
   if (!mux::platform::fonts::select_fonts(style.font, style.monospace))
     shared.notice("Fonts", "The selected font could not be loaded. Enter an installed family or a font file path.");
   accounts_screen.forget_login();

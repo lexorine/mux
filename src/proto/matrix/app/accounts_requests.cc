@@ -26,6 +26,7 @@ template void account<mux::app::post_change>::mark_read(std::string room, std::s
 template void account<mux::app::post_change>::load_older(std::string room, std::string from);
 template void account<mux::app::post_change>::manage(std::string room, room_action_t action);
 template void account<mux::app::post_change>::change_room(std::string room, mux::proto::matrix::room_change_t change);
+template void account<mux::app::post_change>::fetch_room_settings(std::string room);
 template void account<mux::app::post_change>::create_direct(std::string user);
 template void account<mux::app::post_change>::send_sticker(std::string room, mux::emote sticker, std::optional<std::string> reply_to);
 template void account<mux::app::post_change>::view_source(std::string room, std::string event);
@@ -50,6 +51,11 @@ template void account<mux::app::post_change>::delete_pack(emote_pack pack);
 template void account<mux::app::post_change>::catch_up(std::string room, std::string from, std::string until);
 template void account<mux::app::post_change>::preview_room(std::string room, std::vector<std::string> via);
 template void account<mux::app::post_change>::fetch_profile(std::string user);
+template void account<mux::app::post_change>::set_profile(user_profile profile);
+template void account<mux::app::post_change>::upload_profile_banner(std::string bytes, std::string name, std::string mime);
+template void account<mux::app::post_change>::remove_profile_banner();
+template void account<mux::app::post_change>::fetch_presence(std::string user);
+template void account<mux::app::post_change>::set_presence(presence now);
 template void account<mux::app::post_change>::list_sessions();
 template void account<mux::app::post_change>::rename_session(std::string device, std::string name);
 template void account<mux::app::post_change>::sign_out_sessions(std::vector<std::string> devices, std::string password);
@@ -59,7 +65,7 @@ template account<mux::app::post_change>::uia_way_t account<mux::app::post_change
 template void account<mux::app::post_change>::finish_cross_signing(const crypto::cross_signing_secrets& secrets, const std::string& master_pub, const std::string& self_pub);
 template std::string account<mux::app::post_change>::server_of(const std::string& room) const;
 template void account<mux::app::post_change>::create_group(std::string name);
-template void account<mux::app::post_change>::forward(std::string from, std::string event, std::string to);
+template void account<mux::app::post_change>::forward(std::string from, std::vector<forward_source> events, std::string to);
 template void account<mux::app::post_change>::fetch_quoted(std::string room, std::string target);
 template void account<mux::app::post_change>::fetch_unredacted(std::string room, std::string event);
 template void account<mux::app::post_change>::load_context(std::string room, std::string target);

@@ -63,9 +63,11 @@ struct radio_mark : nodes::Icon {
 // A round avatar of a size, in a row.
 struct avatar_mark : widgets::Avatar<from_avatars> {
   std::string key;
-  avatar_mark(std::string id, std::string shown, float size)
+  // Kind is avatar_of::chat or avatar_of::person: which rounding it takes.
+  avatar_mark(auto kind, std::string id, std::string shown, float size)
       : widgets::Avatar<from_avatars>(initials_of(shown), size, picture_of(id), gradient_of(id)), key(std::move(id)) {
     fState.apply({.alignSelf = scene::align::kMiddle});
+    round_avatar(*this, size, kind);
   }
   // Another's: a chat's or a person's, by their id and name.
   void show(std::string id, std::string_view shown) {
@@ -79,8 +81,8 @@ struct avatar_mark : widgets::Avatar<from_avatars> {
 template <class Actions>
 struct avatar_button : avatar_mark {
   using Answer = std::variant<::skiff::scene::Taken, ::mux::ui::request::open_avatar>;
-  avatar_button(std::string id, std::string shown, float size)
-      : avatar_mark(std::move(id), shown, size) {
+  avatar_button(auto kind, std::string id, std::string shown, float size)
+      : avatar_mark(kind, std::move(id), shown, size) {
     fState.setCursor(scene::cursor::hand{});
   }
   [[nodiscard]] bool acceptsInput() const { return true; }
@@ -377,7 +379,9 @@ using choice_menu_head_t = decltype(choice_menu_head(std::declval<const palette&
 using choice_menu_option_t = decltype(choice_menu_option(std::declval<const palette&>(), std::string()));
 struct show_choice_menu {
   skia::SkColor text, accent;
-  void operator()(choice_menu_head_t& head, std::vector<choice_menu_option_t>& rows,
+  // Both the labelled head and a compact head keep their value second.
+  template <class Head>
+  void operator()(Head& head, std::vector<choice_menu_option_t>& rows,
                   const std::vector<std::string>& names, std::size_t current, bool) const {
     std::get<1>(head.fParts).setText(current < names.size() ? names[current] : std::string());
     for (std::size_t i = 0; i < rows.size(); ++i) {
@@ -632,8 +636,8 @@ inline auto event_kinds_field(const palette& colours, choice_level_t level,
 struct pick_style_theme {
   using Answer = skiff::bind::Own<skiff::model::SetTo<std::optional<config::theme_t>>>;
   Answer operator()(std::size_t index) const {
-    const std::array<std::optional<config::theme_t>, 5> values{std::nullopt, config::theme::classic{},
-        config::theme::day{}, config::theme::tinted{}, config::theme::night{}};
+    const std::array<std::optional<config::theme_t>, 6> values{std::nullopt, config::theme::classic{},
+        config::theme::day{}, config::theme::tinted{}, config::theme::night{}, config::theme::graphite{}};
     return skiff::bind::own(skiff::model::setTo(values.at(index)));
   }
 };
@@ -680,7 +684,7 @@ inline auto style_controls(const palette& colours, bool choose_base = true) {
   using style = config::style_settings;
   auto theme = c::projected<skiff::model::Field<&style::theme>>([](const std::optional<config::theme_t>& now) {
     return now ? now->index() + 1 : 0;
-  }, make_choice_menu(colours, "Theme", {"As above", "Classic", "Day", "Tinted", "Night"}, 0, pick_style_theme{}));
+  }, make_choice_menu(colours, "Theme", {"As above", "Classic", "Day", "Tinted", "Night", "Graphite"}, 0, pick_style_theme{}));
   return c::scoped<style>(c::handlers(), c::column(
       c::vbox(8.0f, {.fillX = true, .autoSize = scene::axes::kY, .padding = {8.0f, 20.0f, 8.0f, 20.0f}}),
       nodes::Text("FONTS AND THEME", 13.0f, colours.dim, true), c::visible(choose_base, std::move(theme)),
@@ -829,7 +833,7 @@ inline auto toast_card(const palette& colours, std::string key, std::string titl
   return skiff::compose::row(
       skiff::compose::hbox(12.0f, {.fill = true, .padding = {12.0f, 14.0f, 12.0f, 14.0f}, .background = colours.sidebar,
           .border = scene::Border{colours.band, 1.0f}}),
-      avatar_mark(key, title, 44.0f), two_lines(colours, title, std::move(text), 14.0f, 4.0f));
+      avatar_mark(avatar_of::chat{}, key, title, 44.0f), two_lines(colours, title, std::move(text), 14.0f, 4.0f));
 }
 using toast_card_t = decltype(toast_card(std::declval<const palette&>(), "", "", ""));
 

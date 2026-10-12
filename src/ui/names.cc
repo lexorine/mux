@@ -23,7 +23,7 @@ export namespace mux::ui {
 // What a presence says, in a word or two.
 [[nodiscard]] inline std::string presence_text(const availability_t& state) {
   return spl::visit(spl::overloaded{[](const availability::online&) { return std::string("online"); },
-                               [](const availability::chat&) { return std::string("online"); },
+                               [](const availability::chat&) { return std::string("free to chat"); },
                                [](const availability::away&) { return std::string("away"); },
                                [](const availability::extended_away&) { return std::string("away for a while"); },
                                [](const availability::do_not_disturb&) { return std::string("busy"); },
@@ -38,7 +38,10 @@ export namespace mux::ui {
   if (found == nullptr)
     return unknown();
   const auto kept = found->presences.find(contact);
-  return kept == found->presences.end() ? unknown() : presence_text(kept->second.state);
+  if (kept == found->presences.end()) return unknown();
+  auto text = presence_text(kept->second.state);
+  if (kept->second.status && !kept->second.status->empty()) text += " · " + *kept->second.status;
+  return text;
 }
 // Whom a direct chat is with, as its protocol says (proto::direct_contact).
 [[nodiscard]] inline std::string contact_of(const ui_shared& shared, const conversation& one) {

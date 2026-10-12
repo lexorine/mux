@@ -14,6 +14,37 @@ import :icons;
 
 export namespace mux::ui {
 
+// What an avatar shows. Chats and people are rounded apart, each by its own
+// Appearance slider.
+namespace avatar_of {
+struct chat {};
+struct person {};
+}  // namespace avatar_of
+
+// How round avatars are, in percent of a circle: 0 is square, 100 is round.
+struct avatar_roundness {
+  float chats = 100.0f;
+  float people = 100.0f;
+};
+inline avatar_roundness& avatar_rounding() {
+  static avatar_roundness now;
+  return now;
+}
+[[nodiscard]] inline float rounding_of(avatar_of::chat) { return avatar_rounding().chats; }
+[[nodiscard]] inline float rounding_of(avatar_of::person) { return avatar_rounding().people; }
+inline void use_avatar_rounding(float chats, float people) {
+  avatar_rounding() = {.chats = std::clamp(chats, 0.0f, 100.0f), .people = std::clamp(people, 0.0f, 100.0f)};
+}
+// The radius is proportional, so small member pictures and large room pictures match.
+[[nodiscard]] constexpr float avatar_radius(float size, float percent) {
+  return size * 0.5f * std::clamp(percent, 0.0f, 100.0f) / 100.0f;
+}
+inline void round_avatar(auto& avatar, float size, auto kind) {
+  const auto radius = avatar_radius(size, rounding_of(kind));
+  avatar.apply({.cornerRadius = radius});
+  avatar.parts.picture.apply({.cornerRadius = radius});
+}
+
 // An avatar's colour, the same every time for the same id.
 [[nodiscard]] inline skia::SkColor avatar_colour(std::string_view id) {
   static constexpr std::array<skia::SkColor, 7> palette{
@@ -215,6 +246,9 @@ inline image_cache& whole_pictures() {
 // drawn out first; none drawn lately.
 class animation_cache {
  public:
+  animation_cache() = default;
+  explicit animation_cache(skiff::scene::Waiters& first, skiff::scene::Waiters* second = nullptr)
+      : waiting_{&first, second} {}
   std::size_t budget = 128u << 20;
   void put(std::string key, std::vector<skia::Frame> frames) {
     if (frames.size() < 2)
@@ -241,6 +275,7 @@ class animation_cache {
       bytes_ -= oldest->second.bytes;
       all_.erase(oldest);
     }
+    this->wake_waiters();
   }
   [[nodiscard]] bool has(std::string_view key) const { return all_.contains(key); }
   // The frame of `key`'s animation to show at `ms` of a steady clock.
@@ -276,9 +311,16 @@ class animation_cache {
   void clear() {
     all_.clear();
     bytes_ = 0;
+    this->wake_waiters();
   }
 
  private:
+  // A still image can already have settled when its animation arrives.
+  // Wake its subscribers so they register the moving source's deadlines.
+  void wake_waiters() {
+    std::ranges::for_each(waiting_, [](auto* waiting) { if (waiting) waiting->wake(); });
+  }
+  std::array<skiff::scene::Waiters*, 2> waiting_{};
   struct animation {
     std::vector<skia::Frame> frames;
     int total_ms = 0;
@@ -289,15 +331,15 @@ class animation_cache {
   std::size_t bytes_ = 0;
 };
 inline animation_cache& animations() {
-  static animation_cache all;
+  static animation_cache all{thumbnails().waiting, &whole_pictures().waiting};
   return all;
 }
 inline animation_cache& emoji_animations() {
-  static animation_cache all;
+  static animation_cache all{emoji_images().waiting};
   return all;
 }
 inline animation_cache& sticker_animations() {
-  static animation_cache all;
+  static animation_cache all{sticker_images().waiting};
   return all;
 }
 inline animation_cache& emote_animations(emote_kind kind = emote_kind::emoji) {
@@ -343,6 +385,7 @@ struct from_thumbnails {
 struct from_moving_thumbnail {
   std::string key;
   bool emote = false;
+  skiff::scene::Waiters& waiters() const { return (emote ? sticker_images() : thumbnails()).waiting; }
   [[nodiscard]] bool animated() const { return (emote ? sticker_animations() : animations()).has(key); }
   [[nodiscard]] double wakeAt() const {
     return (emote ? sticker_animations() : animations()).next_frame_at(key, animation_clock());
@@ -365,6 +408,7 @@ struct from_moving_thumbnail {
 // Where it moves, the frame for now; else it whole.
 struct from_moving_whole {
   std::string key;
+  skiff::scene::Waiters& waiters() const { return whole_pictures().waiting; }
   [[nodiscard]] bool animated() const { return animations().has(key); }
   [[nodiscard]] double wakeAt() const { return animations().next_frame_at(key, animation_clock()); }
   picture_ptr operator()() const {

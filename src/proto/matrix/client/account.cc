@@ -127,6 +127,9 @@ class account {
  public:
   account(net::loop& loop, net::tls& tls, settings how, Sink sink)
       : loop_(&loop), tls_(&tls), how_(std::move(how)), sink_(std::move(sink)) {
+    // Displayed history lives in the message store. The protocol only needs
+    // a short suffix for gap detection and reaction sender lookup.
+    state_.timeline_limit = 20;
     id_ = account_id{protocol::matrix{}, how_.user_id};
     const auto colon = how_.user_id.find(':');
     localpart_ = how_.user_id.substr(how_.user_id.starts_with('@') ? 1 : 0,
@@ -185,10 +188,12 @@ class account {
   void manage(std::string room, room_action_t action);
   // What Matrix changes of a room beyond that: rules, levels, encryption, version.
   void change_room(std::string room, proto::matrix::room_change_t change);
-  // A message sent on to another room: its content as it is -- a picture's
+  void fetch_room_settings(std::string room);
+  void upload_room_avatar(std::string room, std::string bytes, std::string name, std::string mime);
+  // Messages sent on to another room in order: their content as it is -- a picture's
   // or a file's URL with it, so nothing is uploaded again -- less what tied
   // it to its own room (the reply it was).
-  void forward(std::string from, std::string event, std::string to);
+  void forward(std::string from, std::vector<forward_source> events, std::string to);
   // A room made: a direct chat with someone -- written into m.direct, as
   // other clients know it is one -- or a group, private, with a name.
   void create_direct(std::string user);
@@ -288,6 +293,12 @@ class account {
   // A person's profile -- their name and picture -- from their server:
   // profile_found, for one met outside the rooms, a forward's sender.
   void fetch_profile(std::string user);
+  void set_profile(user_profile profile);
+  void upload_profile_banner(std::string bytes, std::string name, std::string mime);
+  void remove_profile_banner();
+  std::expected<std::string, failure> upload_content(const std::string& bytes, std::string_view name, std::string_view mime);
+  void fetch_presence(std::string user);
+  void set_presence(presence now);
   // Its sessions (devices), as Element's Sessions: listed; one renamed;
   // some signed out -- the server asking for the password, it is given
   // (the one typed, else the one logged in with).
@@ -717,6 +728,7 @@ class account {
   // What the rooms a sync named look like now, and what their timelines
   // brought.
   void tell(const loom::cs::sync::response& got);
+  void tell_presence(const loom::cs::sync::response& got);
 
   // A room's picture: its own, or, for a chat with one other person, theirs.
   std::optional<std::string> avatar_of(const std::string& room, const loom::client::joined_room& kept) const;
@@ -729,8 +741,8 @@ class account {
   // A state event's content, as a tree; null where the room has none.
   // The custom emoji usable in a room: the user's own (im.ponies.user_emotes)
   // and the room's packs (im.ponies.room_emotes), a shortcode once.
-  [[nodiscard]] std::vector<mux::emote> emotes_of(const loom::client::joined_room& kept, bool stickers = false) const;
-  [[nodiscard]] std::vector<mux::emote> emotes_in(const std::string& room) const;
+  [[nodiscard]] mux::emote_list emotes_of(const loom::client::joined_room& kept, bool stickers = false) const;
+  [[nodiscard]] mux::emote_list emotes_in(const std::string& room) const;
 
   // Who is in a room, as its state says: those joined, by their names there.
   // Who is in a room: all of it, where it was asked for (/joined_members),
@@ -759,7 +771,20 @@ class account {
   // sync of a login, and the sync kept on disk told again at a start. Its
   // events are shown, but mark no mention or reaction as unseen and ring
   // no call -- a login showed every old mention as new.
+  std::map<std::string, bool> legacy_calls_;
+  std::optional<loom::cs::sync::set_presence_t> chosen_presence_;
   bool telling_history_ = false;
+  // Events told now are news to a call, though they go into the window:
+  // a live sync's gap caught up (the sliding sync brings only a room's
+  // newest event, and Element sends an invite and its candidates, an answer
+  // and its candidates, back to back), or news decrypted once its key came.
+  bool calls_live_ = false;
+  struct calls_live_while {
+    bool& live;
+    bool was;
+    explicit calls_live_while(bool& flag, bool now) : live(flag), was(flag) { live = was || now; }
+    ~calls_live_while() { live = was; }
+  };
   // Whether an event placed so is news: come at the end, not from history.
   // (Whether an event so placed is news is placed_as_news(), a plain
   // function, with telling_history_: an inline member of this template
@@ -823,6 +848,10 @@ class account {
   std::set<std::string> announced_;
   http::pool* api_ = nullptr;
   loom::client::state state_;
+  // A source includes its event type: two formats may use the same state key.
+  using pack_source = std::tuple<std::optional<std::string>, std::string, std::string>;
+  using pack_sources = std::vector<pack_source>;
+  mutable std::map<std::pair<bool, pack_sources>, mux::emote_list> emote_lists_;
   bool snapshot_dirty_ = false;
   // Simplified sliding sync (MSC4186), where the server has it: whether it
   // is used, where its last answer left off, and how many rooms its list

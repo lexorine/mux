@@ -120,6 +120,8 @@ using account_page_t = typename variant_of_types<typename joined<
     typename protocol_account_pages<protocols>::type>::type>::type;
 namespace request {
 struct apply_style {};
+struct configure_theme { config::theme_t theme; std::optional<config::custom_theme> custom; };
+struct set_developer_tools { bool enabled; };
 // One of the chosen account's pages asked for.
 struct account_page {
   account_page_t page = ::mux::ui::account_page::connection{};
@@ -153,6 +155,11 @@ struct add_account_of {  // a protocol's form, to add an account of it
 struct select_account {
   std::string address;
 };
+struct refresh_profile { account_id by; };
+struct save_profile { account_id by; user_profile profile; };
+struct save_presence { account_id by; mux::presence now; };
+struct pick_profile_banner { account_id by; };
+struct remove_profile_banner { account_id by; };
 struct toggle_advanced {};
 struct toggle_plain {};
 struct submit_login {};
@@ -448,7 +455,7 @@ struct send_in_thread {
 };
 struct menu_thread {};
 struct open_packs {};
-struct open_room_packs {};
+struct open_room_packs { std::optional<std::string> key{}; };
 struct close_packs {};
 struct save_pack {
   mux::emote_pack pack;
@@ -613,6 +620,7 @@ struct forward_to {
   mux::conversation_id to;
 };
 struct open_manage {};
+struct pick_room_avatar { conversation_id room; };
 struct close_manage {};
 struct room_act {
   mux::room_action_t action;
@@ -696,6 +704,9 @@ struct settings_animations {};
 // A chat's banner's button pressed: what it asks is its protocol's, asked
 // again where the program knows which protocol it is.
 struct banner_pressed {
+  conversation_id in;
+};
+struct dismiss_banner {
   conversation_id in;
 };
 // One of a person's card's buttons of its protocol's own: by where it is

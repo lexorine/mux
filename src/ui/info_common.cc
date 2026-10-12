@@ -57,7 +57,7 @@ inline auto member_row(const palette& colours, const member& one, std::string ho
   return skiff::compose::recorded(skiff::compose::onClick(request::open_member_info{one.id}, skiff::compose::row(
       skiff::compose::hbox(12.0f, {.fillX = true, .height = 54.0f, .padding = {0.0f, 16.0f, 0.0f, 16.0f},
           .hoverBackground = colours.chosen}),
-      avatar_mark(one.id, name, 40.0f), two_lines(colours, name, std::move(how), 14.0f, 4.0f),
+      avatar_mark(avatar_of::person{}, one.id, name, 40.0f), two_lines(colours, name, std::move(how), 14.0f, 4.0f),
       skiff::compose::visible(one.role.has_value(), skiff::compose::styled(
           {.alignSelf = scene::align::kStart, .margin = {10.0f, 0.0f, 0.0f, 0.0f}},
           widgets::Pill(one.role.value_or(""), {.plate = skia::colorSetARGB(255, 62, 52, 96),
@@ -67,7 +67,7 @@ using member_row_t = decltype(member_row(std::declval<const palette&>(), std::de
 
 // A round avatar on its own: the chat's, big, over its name.
 struct big_avatar : avatar_mark {
-  big_avatar() : avatar_mark(std::string(), std::string(), 96.0f) {}
+  big_avatar() : avatar_mark(avatar_of::chat{}, std::string(), std::string(), 96.0f) {}
 };
 // An icon on its own, not to be pressed.
 inline auto icon_view(const palette& colours, icon_t mark) {
@@ -85,29 +85,48 @@ inline auto section_band(const palette& colours) {
 // Declared: a column of these, nothing placed by hand.
 // An ID, whole -- wrapped, never cut -- and copied when pressed: a chat's
 // or a person's.
-struct id_feedback { bool copied = false; };
-struct copy_id_line {};
-struct id_copy_events {
-  std::string copied;
-  auto on(copy_id_line, const id_feedback&) const {
-    return std::tuple{skiff::model::over<id_feedback>(skiff::model::setTo(id_feedback{true})),
-                      skiff::model::Up{request::copy_text{copied}}};
+struct id_line_t : skiff::compose::Stacked {
+  using Answer = request::copy_text;
+  std::string copied_, confirmation_, label_;
+  struct parts_t {
+    nodes::Text value;
+    nodes::Text feedback;
+  } parts;
+  id_line_t(const palette& colours, std::string text, std::string link, std::string label = "ID")
+      : Stacked(skiff::compose::vbox(2.0f, {.fillX = true, .autoSize = scene::axes::kY,
+              .padding = {8.0f, 20.0f, 8.0f, 20.0f}, .hoverBackground = colours.chosen,
+              .focusBackground = colours.chosen})),
+        copied_(link.empty() ? text : link), confirmation_(link.empty() ? label + " · copied" : label + " · link copied, with its servers"),
+        label_("Copy " + label),
+        parts{.value = wrapped(skiff::compose::styled({.fillX = true}, nodes::Text(std::move(text), 14.0f, colours.accent, false, true))),
+              .feedback = wrapped(skiff::compose::styled({.fillX = true}, nodes::Text(std::move(label), 13.0f, colours.accent)))} {
+    fState.setCursor(scene::cursor::hand{});
+  }
+  [[nodiscard]] bool acceptsInput() const { return true; }
+  [[nodiscard]] bool hoverChangesAppearance() const { return true; }
+  [[nodiscard]] bool focusChangesAppearance() const { return true; }
+  [[nodiscard]] bool onClick(float, float) {
+    scene::pressLater(fState);
+    return true;
+  }
+  request::copy_text onPress() {
+    // The confirmation can wrap to more lines. Invalidate the whole row
+    // so a cached info panel lays it out and repaints at the next frame.
+    parts.feedback.setText(confirmation_);
+    this->invalidateLayout();
+    return {copied_};
+  }
+  [[nodiscard]] scene::Semantics semantics() const {
+    scene::Semantics out;
+    out.fRole = scene::semantic_role::button{};
+    out.fLabel = label_;
+    out.fActions = {scene::semantic_action::focus{}, scene::semantic_action::activate{}};
+    return out;
   }
 };
 inline auto id_line(const palette& colours, std::string text, std::string link, std::string label = "ID") {
-  const bool a_link = !link.empty();
-  const std::string copied = a_link ? link : text;
-  return skiff::compose::local<id_feedback>(id_copy_events{copied},
-      skiff::compose::onClick(copy_id_line{}, skiff::compose::column(
-          skiff::compose::vbox(2.0f, {.fillX = true, .autoSize = scene::axes::kY,
-              .padding = {8.0f, 20.0f, 8.0f, 20.0f}, .hoverBackground = colours.chosen,
-              .focusBackground = colours.chosen}),
-          wrapped(skiff::compose::styled({.fillX = true}, nodes::Text(text, 14.0f, colours.accent, false, true))),
-          skiff::compose::text_for<id_feedback>([label, a_link](const id_feedback& now) {
-              return !now.copied ? label : a_link ? label + " · link copied, with its servers" : label + " · copied";
-            }, nodes::Text(label, 12.0f, colours.dim))), "Copy " + label));
+  return id_line_t(colours, std::move(text), std::move(link), std::move(label));
 }
-using id_line_t = decltype(id_line(std::declval<const palette&>(), "", ""));
 
 // A person's name and how they are, as a chat knows them: a member's, with
 // their role; the other side of a direct chat; anyone else by their address.
@@ -122,10 +141,16 @@ struct person_facts {
   std::optional<trust_t> trust;
   // Their sessions, each verified or not, where their keys were listed.
   std::vector<change::device_view> devices;
+  profile_details profile;
 };
 [[nodiscard]] inline person_facts person_of(const ui_shared& shared, const conversation* in, const model& now, const account_id& account,
                                             const std::string& id) {
   person_facts out{id, presence_of(shared, now, account, id)};
+  if (const auto* kept = now.accounts().find(account))
+    if (const auto found = kept->profiles.find(id); found != kept->profiles.end()) {
+      if (found->second.name && !found->second.name->empty()) out.name = *found->second.name;
+      out.profile = found->second.details;
+    }
   out.trust = now.trust_of(account, id);
   if (const auto* listed = now.devices_of(account, id))
     out.devices = *listed;

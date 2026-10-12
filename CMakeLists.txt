@@ -97,13 +97,13 @@ cme_declare_port(NAME chevron PROVIDES chevron
 cme_options(chevron "CHEVRON_TESTS OFF")
 cme_declare_port(NAME tern PROVIDES tern
   GITHUB_REPOSITORY j4niwzis/tern
-  GIT_TAG 9814dbc29f56f43ce0fd60a4a55c5a69ae42aa42
+  GIT_TAG 6214f166d9a4f06b2d4ee7281b2f4e0d28681bbd
   LICENSE AGPL-3.0-only
   TARGETS tern)
 cme_options(tern "TERN_TESTS OFF" "TERN_EXAMPLES OFF")
 cme_declare_port(NAME loom PROVIDES loom
   GITHUB_REPOSITORY j4niwzis/loom
-  GIT_TAG cf76d9f2c7179b411944f6e24df05f4335da8d7a
+  GIT_TAG b0a4a3ad6ccfc58844d18ec940536c9face451a6
   VERSION 0.1.1
   LICENSE AGPL-3.0-only
   TARGETS loom)
@@ -156,7 +156,7 @@ mux_find_package(alef 0.1.1 COMPONENTS precis idna grapheme line bidi emoji REQU
 # loom.
 cme_declare_port(NAME knot PROVIDES knot
   GITHUB_REPOSITORY j4niwzis/knot
-  GIT_TAG 6389154f394c740520b61b7981fd631c6845dab2
+  GIT_TAG 960ff133aad8ba48590f8e6227bd0cf4f853cdc7
   LICENSE AGPL-3.0-only)
 
 # Found by itself, and linked by itself: mux imports it (a message's HTML),
@@ -168,7 +168,7 @@ mux_find_package(chevron 0.2 REQUIRED)
 mux_find_package(tern REQUIRED)
 # Of loom, what mux uses: the state a sync leaves, and the parts of the API it
 # calls -- logging in, sending, syncing, finding the homeserver.
-mux_find_package(loom 0.1.1 COMPONENTS state crypto cs-joining cs-leaving cs-login cs-registration cs-oauth_server_metadata cs-message_pagination cs-event_context cs-receipts cs-redaction cs-room_send cs-rooms cs-sync cs-typing cs-wellknown cs-room_state cs-kicking cs-banning cs-inviting cs-create_room cs-account_data cs-content_repo cs-authed_content_repo cs-room_summary cs-list_public_rooms cs-space_hierarchy cs-sliding_sync cs-versions cs-users cs-relations cs-threads_list cs-profile cs-device_management cs-room_upgrades cs-knocking cs-keys cs-to_device cs-cross_signing cs-key_backup cs-pusher cs-pushrules cs-voip REQUIRED)
+mux_find_package(loom 0.1.1 COMPONENTS state crypto cs-joining cs-leaving cs-login cs-registration cs-oauth_server_metadata cs-message_pagination cs-event_context cs-receipts cs-redaction cs-room_send cs-rooms cs-sync cs-filter cs-typing cs-wellknown cs-room_state cs-kicking cs-banning cs-inviting cs-create_room cs-account_data cs-content_repo cs-authed_content_repo cs-room_summary cs-list_public_rooms cs-space_hierarchy cs-sliding_sync cs-versions cs-users cs-relations cs-threads_list cs-profile cs-presence cs-device_management cs-room_upgrades cs-directory cs-capabilities cs-knocking cs-keys cs-to_device cs-cross_signing cs-key_backup cs-pusher cs-pushrules cs-voip REQUIRED)
 # End-to-end encryption: Olm and Megolm, by vodozemac -- the kazv project's
 # C++ bindings, a Rust library built by cargo through cmake-everywhere.
 mux_find_package(vodozemac REQUIRED)
@@ -239,14 +239,14 @@ target_link_libraries(mux_vault PUBLIC knot splice OpenSSL::Crypto)
 # skiff and skiff-widgets say the rest of what they are in their own trees.
 # Debug-only sharing remains guarded in skiff. Both configurations need the
 # editor menu facts, elapsed-time animation, and held-page binding fixes.
-set(mux_skiff_pin 05afd04da8a1f38fe21197c4828e5dd194f3c116)
+set(mux_skiff_pin d52c6b4b72c2cb7891f06c4c2cd7a461f46673ee)
 cme_declare_port(NAME skiff PROVIDES skiff
   GITHUB_REPOSITORY j4niwzis/skiff
   GIT_TAG ${mux_skiff_pin}
   VERSION 0.1.0)
 cme_declare_port(NAME skiff-widgets PROVIDES skiff-widgets skiff_widgets
   GITHUB_REPOSITORY j4niwzis/skiff-widgets
-  GIT_TAG 9755318db703772ec8e736934659912b9e09491d
+  GIT_TAG 72fb4606357b9ed9b9fa751daadaa01883a22863
   VERSION 0.1.0)
 if(MUX_UI)
   # Skia's features, each an option asking for its component: GL to draw on

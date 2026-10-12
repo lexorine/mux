@@ -124,8 +124,10 @@ struct app : kept_settings {
   void files_given(std::vector<std::string> paths, bool dropped) {
     if (took_files(packs, paths, dropped))
       return;
+    if (manage.took_files(paths, dropped)) return;
     if (looks.took_files(paths, dropped))
       return;
+    if (profile_files_given(paths, dropped)) return;
     outbox.files_given(std::move(paths), dropped);
   }
   // Where Save As… was asked to put what it saves: to the pictures part.
@@ -348,6 +350,7 @@ struct app : kept_settings {
   void apply(const request::open_drawer&);
   void apply(const request::close_drawer&);
   void apply(const request::banner_pressed&);
+  void apply(const request::dismiss_banner&);
   void apply(const request::card_action&);
   void apply(const request::quit&);
   void apply(const request::toggle_info&);
@@ -386,6 +389,13 @@ struct app : kept_settings {
   void apply(const request::jump_to_message& one);
 
   // A sender pressed in the messages: their page, in the chat's info.
+  void apply(const request::refresh_profile& one);
+  void apply(const request::save_profile& one);
+  void apply(const request::save_presence& one);
+  void apply(const request::pick_profile_banner& one);
+  void apply(const request::remove_profile_banner& one);
+  bool profile_files_given(const std::vector<std::string>& paths, bool dropped);
+  std::optional<account_id> picking_profile_banner_;
   void apply(const request::open_member_info& one);
   void apply(const request::not_implemented& one);
   void apply(const request::close_notice&);

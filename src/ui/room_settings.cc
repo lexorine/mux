@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// mux.ui:room_settings -- A room's settings, as Element's Room Settings
-// dialog: its tabs down the left -- General, Security & Privacy, Roles &
-// Permissions, Notifications, Advanced -- and the chosen one beside them,
-// in Element's words. What the user's power level does not allow is not
-// offered: shown as it is, not to be changed.
+// mux.ui:room_settings -- Room settings with protocol-owned pages and
+// the client's preferences. Each protocol chooses its initial page and
+// page names; permission checks also guard the requests behind controls.
 export module mux.ui:room_settings;
 
 import std;
@@ -14,6 +12,7 @@ import skiff.scene;
 import skiff.nodes.box;
 import skiff.nodes.flow;
 import skiff.nodes.icon;
+import skiff.nodes.image;
 import skiff.nodes.scroll;
 import skiff.nodes.text;
 import skiff.widgets.button;
@@ -26,6 +25,7 @@ import mux.core;
 import mux.config;
 import mux.protocols;
 import :base;
+import :avatars;
 import :icons;
 import :controls;
 import :themes;
@@ -40,9 +40,12 @@ struct room_settings_facts {
   std::string id;  // the room's ID
   std::string name;
   std::string topic;
+  std::optional<std::string> avatar;
   std::optional<std::string> alias;
   std::vector<std::string> other_aliases;
   bool encrypted = false;
+  bool group = true;
+  bool leavable = true;
   // Its protocol's part (Matrix: its rules and levels), for its pages.
   room_part_t theirs;
   // Its notifications, as chosen for it (muted: off).
@@ -73,6 +76,7 @@ struct room_settings_facts {
   // those that may be added to it.
   std::vector<named_room> children;
   std::vector<named_room> addable;
+  std::vector<member> members;
   // A space: whether it holds spaces, and whether it is shown as a forum.
   bool space = false;
   bool holds_spaces = false;
@@ -113,6 +117,7 @@ template <class... Tabs>
 struct manage_tab_list {};
 namespace manage_defaults {
 constexpr manage_tab_list<> manage_tabs(const auto&) { return {}; }
+constexpr bool tab_visible(const auto&, const room_settings_facts&) { return true; }
 // And what a protocol keeps while its pages are made again: none by default.
 struct no_part {};
 constexpr type_tag<no_part> manage_part_type(const auto&) { return {}; }
@@ -140,6 +145,12 @@ namespace settings_tab {
 struct general {};        // the room's events, receipts, previews, typing, Home, leaving
 struct notifications {};
 struct looks {};
+constexpr std::string_view tab_title(general) { return "General"; }
+constexpr std::string_view tab_title(notifications) { return "Notifications"; }
+constexpr std::string_view tab_title(looks) { return "Appearance"; }
+inline icon_t tab_icon(general) { return icon::gear{}; }
+inline icon_t tab_icon(notifications) { return icon::bell{}; }
+inline icon_t tab_icon(looks) { return icon::eye{}; }
 }  // namespace settings_tab
 
 template <class Tabs>
@@ -151,6 +162,19 @@ struct tab_types<manage_tab_list<Tabs...>> {
 template <class Rule, class Variant>
 [[nodiscard]] bool is_rule(const Variant& now) {
   return spl::visit(spl::overloaded{[](const Rule&) { return true; }, [](const auto&) { return false; }}, now);
+}
+
+namespace manage_defaults {
+constexpr settings_tab::general manage_initial_tab(const auto&) { return {}; }
+constexpr std::string_view manage_preferences_title(const auto&) { return "General"; }
+}
+template <class State> constexpr auto initial_manage_tab(const State& state) {
+  using manage_defaults::manage_initial_tab;
+  return manage_initial_tab(state);
+}
+template <class State> constexpr auto preferences_title(const State& state) {
+  using manage_defaults::manage_preferences_title;
+  return manage_preferences_title(state);
 }
 
 // A heading over a tab, and over a part of one, as Element's.
@@ -335,8 +359,9 @@ inline auto chat_settings_view(const palette& colours, const conversation_id& ch
           skiff::compose::bound<skiff::model::Field<&choices::receipts>>(show_hide_field<receipts_setting, std::optional<bool>, skiff::model::Field<&choices::receipts>>(colours, level)),
           skiff::compose::bound<skiff::model::Field<&choices::previews>>(
               show_hide_field<link_previews_setting, std::optional<bool>, skiff::model::Field<&choices::previews>>(colours, level)),
-          skiff::compose::bound<skiff::model::Field<&choices::previews_direct>>(
-              show_hide_field<previews_direct_setting, std::optional<bool>, skiff::model::Field<&choices::previews_direct>>(colours, level)),
+          skiff::compose::visible(proto::offers(state_before(chat.account.speaks), proto::feature::server_previews{}),
+              skiff::compose::bound<skiff::model::Field<&choices::previews_direct>>(
+                  show_hide_field<previews_direct_setting, std::optional<bool>, skiff::model::Field<&choices::previews_direct>>(colours, level))),
           skiff::compose::bound<skiff::model::Field<&choices::typing>>(show_hide_field<typing_setting, std::optional<bool>, skiff::model::Field<&choices::typing>>(colours, level)),
           skiff::compose::bound<skiff::model::Field<&choices::jump_search>>(jump_search_field<std::optional<std::int64_t>, skiff::model::Field<&choices::jump_search>>(colours, level))),
       chat);
@@ -398,16 +423,15 @@ inline auto space_choice_row(const palette& colours, std::string label, bool all
       c::bound<skiff::model::Field<Member>>(c::styled({.alignSelf = scene::align::kMiddle},
                                                     widgets::ToggleField<bool>(colours.widgets))));
 }
-inline auto room_general_page(const palette& colours, const room_settings_facts& facts) {
+inline auto room_general_page(const palette& colours, const room_settings_facts& facts, bool has_page_header = false) {
   namespace c = skiff::compose;
   using choices = config::chat_choices;
   return c::column(c::vbox(6.0f, {.fillX = true, .autoSize = scene::axes::kY,
                                 .padding = {0.0f, 28.0f, 24.0f, 12.0f}}),
-      tab_heading(colours, "General"),
+      c::visible(!has_page_header, tab_heading(colours, spl::visit([](auto tag) { return std::string(preferences_title(state_of<decltype(tag)>{})); }, facts.speaks))),
       c::visible(!proto::room_event_kinds_of(state_before(facts.speaks)).empty(),
           explained(colours, "Room events shown in this room, for you: As above follows the inherited settings.")),
       chat_settings_view(colours, facts.chat),
-      c::scoped<choices>(c::handlers(), style_controls(colours), facts.chat),
       c::visible(facts.space, c::scoped<choices>(c::handlers(),
           c::column(c::vbox(6.0f, {.fillX = true, .autoSize = scene::axes::kY}),
               part_heading(colours, "Shown as"),
@@ -416,11 +440,72 @@ inline auto room_general_page(const palette& colours, const room_settings_facts&
                   : "On: in the chat list as one chat; its rooms open inside it, as Telegram's topics."),
               c::shown_for<skiff::model::Field<&choices::forum>>([](bool forum) { return !forum; },
                   space_choice_row<&choices::hidden_from_home>(colours, "Its rooms not in Home"))), facts.chat)),
-      part_heading(colours, "Leave room"),
+      c::visible(facts.leavable, part_heading(colours, "Leave room")),
       c::styled({.width = 130.0f, .height = 32.0f},
-          button_for<sends<::mux::ui::request::leave_chat>>(colours.widgets, "Leave room", {})));
+          c::visible(facts.leavable, button_for<sends<::mux::ui::request::leave_chat>>(colours.widgets, "Leave room", {}))));
 }
 using room_general_page_t = decltype(room_general_page(std::declval<const palette&>(), std::declval<const room_settings_facts&>()));
+
+inline void preserve_manage_input(auto&) {}
+template <class Page> requires requires(Page& page) { preserve_manage_page(page); }
+void preserve_manage_input(Page& page) { preserve_manage_page(page); }
+
+struct room_manage_style {
+  palette colours;
+  bool page_header = false;
+  float navigation_width = 220.0f;
+};
+namespace manage_defaults {
+inline room_manage_style manage_style(const auto&, const palette& colours) { return {colours}; }
+inline bool manage_close_editor(const auto&, auto&) { return false; }
+inline bool manage_editor_header(const auto&, const auto&) { return false; }
+inline icon_t manage_avatar_icon(const auto&, const room_settings_facts&) { return icon::none{}; }
+}
+template <class State> auto manage_style_of(const State& state, const palette& colours) {
+  using manage_defaults::manage_style;
+  return manage_style(state, colours);
+}
+
+template <class State> auto manage_avatar_icon_of(const State& state, const room_settings_facts& facts) {
+  using manage_defaults::manage_avatar_icon;
+  return manage_avatar_icon(state, facts);
+}
+template <class Actions> struct room_settings;
+
+// Page factories need a complete type while the dialog's child types are
+// deduced. Keep their data and refresh entry point outside the dialog.
+template <class Actions> struct room_settings_context {
+  using actions_type = Actions;
+  room_settings<Actions>* owner;
+  room_manage_style presentation;
+  const palette* colours_;
+  const looks_shown* looks_;
+  room_settings_facts facts;
+  template <class Tag>
+  using tabs_of_t = decltype(manage_tabs_of(state_of<Tag>{}));
+  template <class>
+  struct protocol_lists;
+  template <class... Tags>
+  struct protocol_lists<protocol_list<Tags...>> {
+    using tabs = typename joined<type_list<>, typename tab_types<tabs_of_t<Tags>>::type...>::type;
+    using parts = std::tuple<typename decltype(manage_part_of(state_of<Tags>{}))::type...>;
+  };
+  using protocol_tabs = typename protocol_lists<protocols>::tabs;
+  typename protocol_lists<protocols>::parts protocol_parts;
+  template <class Tag, class... Tags>
+  static constexpr std::size_t index_in(protocol_list<Tags...>) {
+    constexpr std::array<bool, sizeof...(Tags)> is{std::derived_from<Tag, Tags>...};
+    return static_cast<std::size_t>(std::ranges::find(is, true) - is.begin());
+  }
+  template <class State> [[nodiscard]] auto& part() {
+    return std::get<index_in<proto::id<State>>(protocols{})>(protocol_parts);
+  }
+  void show_again();
+  room_settings_context(room_settings<Actions>* owner, const palette* colours, const looks_shown* looks,
+                        const room_settings_facts& shown)
+      : owner(owner), presentation(spl::visit([&](auto tag) { return manage_style_of(state_of<decltype(tag)>{}, *colours); }, shown.speaks)),
+        colours_(&presentation.colours), looks_(looks), facts(shown) {}
+};
 
 template <class Actions> struct room_settings : skiff::compose::Stacked {
   // Child references and handlers require a fixed address.
@@ -430,112 +515,83 @@ template <class Actions> struct room_settings : skiff::compose::Stacked {
   room_settings& operator=(room_settings&&) = delete;
 
   // The dialog it is shown in.
-  [[nodiscard]] static dialog_look look_of_dialog() { return {.size = dialog_size::fixed{860.0f, 620.0f}}; }
+  [[nodiscard]] static dialog_look look_of_dialog() { return {.size = dialog_size::fixed{802.0f, 684.0f}}; }
   using actions_type = Actions;
+  using context_type = room_settings_context<Actions>;
+  context_type context;
   // The colours it and its pages are made in: what it was handed.
-  const palette* colours_ = nullptr;
+  const palette*& colours_;
   // The looks shown: the program's.
-  const looks_shown* looks_ = nullptr;
-  room_settings_facts facts;
+  const looks_shown*& looks_;
+  room_settings_facts& facts;
 
   // ---- the tabs and pages: the client's, then each protocol's -----------------
-  template <class Tag>
-  using tabs_of_t = decltype(manage_tabs_of(state_of<Tag>{}));
+  template <class Tag> using tabs_of_t = typename context_type::template tabs_of_t<Tag>;
+  using protocol_tabs = typename context_type::protocol_tabs;
+  template <class State> [[nodiscard]] auto& part() { return context.template part<State>(); }
   template <class Tab>
-  using page_of_t = typename decltype(page_type(Tab{}, type_tag<room_settings>{}))::type;
+  using page_of_t = typename decltype(page_type(Tab{}, type_tag<context_type>{}))::type;
   template <class List>
   struct pages_of;
   template <class... Tabs>
   struct pages_of<type_list<Tabs...>> {
     using type = type_list<page_of_t<Tabs>...>;
   };
-  template <class>
-  struct protocol_lists;
-  template <class... Tags>
-  struct protocol_lists<protocol_list<Tags...>> {
-    using tabs = typename joined<type_list<>, typename tab_types<tabs_of_t<Tags>>::type...>::type;
-    using parts = std::tuple<typename decltype(manage_part_of(state_of<Tags>{}))::type...>;
-  };
-  using protocol_tabs = typename protocol_lists<protocols>::tabs;
   using protocol_pages = typename pages_of<protocol_tabs>::type;
   using settings_tab_t = typename variant_of_types<typename joined<
       type_list<settings_tab::general, settings_tab::notifications, settings_tab::looks>, protocol_tabs>::type>::type;
 
   // ---- what is asked ---------------------------------------------------------
   struct pick_tab {
+    using Answer = skiff::model::Nothing;
     room_settings* box;
     settings_tab_t tab;
-    void operator()() const {
+    skiff::model::Nothing operator()() const {
       box->to_top = true;
+      box->navigation = false; box->picked = true;
       box->show_tab(tab);
+      return {};
     }
   };
 
   // ---- the tabs down the left ------------------------------------------------
-  struct tab_row : pressable<skiff::compose::Stacked> {
-    pick_tab act;
-    struct parts_t {
-      icon_mark_t mark;
-      nodes::Text label;
-    } parts;
-    tab_row(const palette &colours, std::string text, icon_t icon,
-            pick_tab what)
-        : pressable<skiff::compose::Stacked>(skiff::compose::hbox(
-              10.0f, {.fillX = true,
-                      .height = 36.0f,
-                      .padding = {0.0f, 12.0f, 0.0f, 12.0f},
-                      .cornerRadius = 8.0f,
-                      .hoverBackground = colours.chosen,
-                      .selectedBackground = colours.chosen})),
-          act(std::move(what)),
-          parts{
-              .mark =
-                  skiff::compose::styled({.alignSelf = scene::align::kMiddle},
-                                         icon_mark(colours, icon)),
-              .label = skiff::compose::styled(
-                  {.shrink = scene::axes::kX,
-                   .alignSelf = scene::align::kMiddle},
-                  elided(nodes::Text(std::move(text), 14.0f, colours.text)))} {}
-    void set_chosen(bool on) { fState.apply({.selected = on}); }
-  };
-  struct tab_list : skiff::compose::Stacked {
-    struct parts_t {
-      tab_row general;
-      std::vector<tab_row> protocol;  // the room's protocol's tabs, as it lists them
-      tab_row notifications, looks;
-    } parts;
-    template <class... Tabs>
-    void add(room_settings* box, manage_tab_list<Tabs...>) {
-      (parts.protocol.emplace_back(*box->colours_, std::string(tab_title(Tabs{})), tab_icon(Tabs{}), pick_tab{box, settings_tab_t{Tabs{}}}), ...);
-    }
-    explicit tab_list(room_settings *box)
-        : Stacked(skiff::compose::vbox(
-              2.0f, {.fillY = true,
-                     .width = 220.0f,
-                     .padding = {4.0f, 12.0f, 12.0f, 12.0f}})),
-          parts{.general = tab_row(*box->colours_, "General", icon::gear{},
-                                   {box, settings_tab::general{}}),
-                .notifications =
-                    tab_row(*box->colours_, "Notifications", icon::bell{},
-                            {box, settings_tab::notifications{}}),
-                .looks = tab_row(*box->colours_, "Appearance", icon::eye{},
-                                 {box, settings_tab::looks{}})} {
-      spl::visit([&](auto of) { this->add(box, tabs_of_t<decltype(of)>{}); }, box->facts.speaks);
-    }
-    [[nodiscard]] std::vector<tab_row*> rows() {
-      std::vector<tab_row*> out{&parts.general};
-      for (tab_row& one : parts.protocol)
-        out.push_back(&one);
-      out.push_back(&parts.notifications);
-      out.push_back(&parts.looks);
-      return out;
-    }
-    void show(const settings_tab_t& tab) {
-      for (tab_row* one : this->rows())
-        one->set_chosen(one->act.tab.index() == tab.index());
-    }
-  };
-
+  static auto tab_row(const palette& colours, std::string text, icon_t icon, pick_tab what) {
+    namespace c = skiff::compose;
+    return c::onPress(std::move(what), c::row(c::hbox(8.0f, {.fillX = true, .height = 40.0f,
+        .padding = {0.0f, 12.0f, 0.0f, 12.0f}, .cornerRadius = colours.widgets.fCorner,
+        .hoverBackground = colours.background, .selectedBackground = colours.tile}),
+        c::styled({.width = 16.0f, .height = 16.0f, .alignSelf = scene::align::kMiddle}, icon_mark(colours, icon)),
+        c::styled({.shrink = scene::axes::kX, .alignSelf = scene::align::kMiddle}, elided(nodes::Text(std::move(text), 14.0f, colours.text)))));
+  }
+  using tab_row_t = decltype(tab_row(std::declval<const palette&>(), "", icon_t{}, pick_tab{}));
+  template <class... Tabs> static auto protocol_rows(context_type* box, manage_tab_list<Tabs...>) {
+    using manage_defaults::tab_visible;
+    const auto listed = std::array<settings_tab_t, sizeof...(Tabs)>{settings_tab_t{Tabs{}}...};
+    return std::ranges::to<std::vector<tab_row_t>>(std::views::transform(std::views::filter(listed, [&](const auto& tab) {
+      return spl::visit([&](auto one) { return tab_visible(one, box->facts); }, tab);
+    }), [&](const auto& tab) {
+      return spl::visit([&](auto one) { return tab_row(*box->colours_, std::string(tab_title(one)), tab_icon(one), pick_tab{box->owner, tab}); }, tab);
+    }));
+  }
+  static auto tab_list(context_type* box) {
+    namespace c = skiff::compose;
+    auto protocol = spl::visit([&](auto tag) { return protocol_rows(box, tabs_of_t<decltype(tag)>{}); }, box->facts.speaks);
+    return c::column(c::vbox(0.0f, {.fillY = true, .width = box->presentation.navigation_width, .padding = {0.0f, 8.0f, 32.0f, 8.0f}, .background = box->colours_->sidebar}),
+        c::row(c::hbox(8.0f, {.fillX = true, .height = 54.0f}), avatar_mark(avatar_of::chat{}, box->facts.id, box->facts.name, 24.0f),
+            c::styled({.relativeSize = scene::axes::kNone, .grow = scene::axes::kX, .shrink = scene::axes::kX, .alignSelf = scene::align::kMiddle}, elided(nodes::Text(box->facts.name, 18.0f, box->colours_->text, true))),
+            c::visible(false, icon_button<sends<::mux::ui::request::close_manage>>(*box->colours_, icon::close{}, {}))),
+        c::many(c::vbox(2.0f, {.fillX = true, .autoSize = scene::axes::kY}), std::move(protocol)),
+        c::visible(true, tab_row(*box->colours_, spl::visit([](auto tag) { return std::string(preferences_title(state_of<decltype(tag)>{})); }, box->facts.speaks), icon::gear{}, {box->owner, settings_tab::general{}})),
+        c::visible(true, tab_row(*box->colours_, "Notifications", icon::bell{}, {box->owner, settings_tab::notifications{}})),
+        c::visible(true, tab_row(*box->colours_, "Appearance", icon::eye{}, {box->owner, settings_tab::looks{}})));
+  }
+  using tab_list_t = decltype(tab_list(std::declval<context_type*>()));
+  static auto tab_rows(tab_list_t& list) {
+    auto& [heading, protocol, general, notifications, looks] = list.fParts;
+    auto rows = std::ranges::to<std::vector<tab_row_t*>>(std::views::transform(protocol.fParts, [](auto& row) { return &row; }));
+    rows.insert(rows.end(), {&general, &notifications, &looks});
+    return rows;
+  }
   // ---- Notifications ----------------------------------------------------------------
   struct notifications_page : skiff::compose::Stacked {
     struct parts_t {
@@ -566,81 +622,77 @@ template <class Actions> struct room_settings : skiff::compose::Stacked {
   struct looks_page : skiff::compose::Stacked {
     struct parts_t {
       nodes::Text heading;
+      decltype(skiff::compose::scoped<config::chat_choices>(skiff::compose::handlers(), style_controls(std::declval<const palette&>()), std::declval<conversation_id>())) fonts;
       look_choices<Actions> choices;
     } parts;
-    looks_page(room_settings *box, const room_settings_facts &)
+    looks_page(room_settings *box, const room_settings_facts &facts)
         : Stacked(skiff::compose::vbox(
               6.0f, {.fillX = true,
                      .autoSize = scene::axes::kY,
                      .padding = {0.0f, 28.0f, 24.0f, 12.0f}})),
           parts{.heading = tab_heading(*box->colours_, "Appearance"),
+                .fonts = skiff::compose::scoped<config::chat_choices>(skiff::compose::handlers(), style_controls(*box->colours_), facts.chat),
                 .choices = look_choices<Actions>(*box->colours_, *box->looks_,
                                                  choice_level::chat{})} {}
   };
 
   using page_t = typename variant_of_types<
       typename joined<type_list<room_general_page_t, notifications_page, looks_page>, protocol_pages>::type>::type;
-  struct page_holder : skiff::compose::Stacked {
-    struct parts_t {
-      page_t page;
-    } parts;
-    explicit page_holder(page_t first)
-        : Stacked(skiff::compose::vbox(
-              0.0f, {.fillX = true, .autoSize = scene::axes::kY})),
-          parts{.page = std::move(first)} {}
-  };
+  static auto page_holder(page_t first) {
+    return skiff::compose::column(skiff::compose::vbox(0.0f, {.fillX = true, .autoSize = scene::axes::kY}), std::move(first));
+  }
+  using page_holder_t = decltype(page_holder(std::declval<page_t>()));
 
   // ---- the dialog ---------------------------------------------------------------------
-  struct close_it {
-    using Answer = ::mux::ui::request::close_manage;
-    ::mux::ui::request::close_manage operator()() { return ::mux::ui::request::close_manage{}; }
-  };
-  using header_t = page_header_t<no_back, close_it>;
-  struct body_row : skiff::compose::Stacked {
-    struct parts_t {
-      tab_list tabs;
-      nodes::ScrollContainer<page_holder> content;
-    } parts;
-    body_row(room_settings *box, page_t first)
-        : Stacked(skiff::compose::hbox(
-              0.0f, {.fillX = true, .grow = scene::axes::kY})),
-          parts{.tabs = tab_list(box),
-                .content = skiff::compose::styled(
-                    {.fillY = true, .grow = scene::axes::kX},
-                    nodes::ScrollContainer<page_holder>(
-                        page_holder(std::move(first))))} {}
-    // Narrow -- a phone's -- the tabs a thin column of their icons beside the
-    // page, the page the rest of the width: beside a column of 220 it had a
-    // hundred. Their sizing as it is, only narrower -- flipped from a column
-    // to a row and back, the sizes clashed and the page was left empty.
-    bool narrow = false;
-    void layoutChildren() {
-      if (const bool now = fState.contentBox().width() < 560.0f; now != narrow) {
-        narrow = now;
-        auto& [tabs, content] = parts;
-        tabs.apply({.width = narrow ? 60.0f : 220.0f,
-                    .padding = narrow ? scene::Margin{4.0f, 6.0f, 12.0f, 6.0f} : scene::Margin{4.0f, 12.0f, 12.0f, 12.0f}});
-        // Narrow, the rows' sides 4, not 12: their icon (28) had 24 of 48.
-        for (tab_row* one : tabs.rows()) {
-          one->parts.label.setVisible(!narrow);
-          one->apply({.padding = narrow ? scene::Margin{0.0f, 4.0f, 0.0f, 4.0f} : scene::Margin{0.0f, 12.0f, 0.0f, 12.0f}});
-        }
-        tabs.invalidateLayout();
-        content.invalidateLayout();
-        this->invalidateLayout();
-      }
-      this->nodes::Stack::layoutChildren();
+  struct back_it {
+    room_settings* box;
+    using Answer = skiff::model::Nothing;
+    Answer operator()() const {
+      using manage_defaults::manage_close_editor;
+      const bool editor = spl::visit([&](auto tab) {
+        return std::apply([&](auto&... part) { return (manage_close_editor(tab, part) || ...); }, box->context.protocol_parts);
+      }, box->tab);
+      if (editor) box->show_again(); else box->show_navigation();
+      return {};
     }
   };
-  struct parts_t {
-    header_t header;
-    body_row body;
-  } parts;
+  struct close_it {
+    room_settings* box;
+    using Answer = std::optional<::mux::ui::request::close_manage>;
+    Answer operator()() const {
+      using manage_defaults::manage_close_editor;
+      const bool editor = spl::visit([&](auto tab) {
+        return std::apply([&](auto&... part) { return (manage_close_editor(tab, part) || ...); }, box->context.protocol_parts);
+      }, box->tab);
+      if (editor) { box->show_again(); return std::nullopt; }
+      if (box->narrow && !box->navigation) { box->show_navigation(); return std::nullopt; }
+      return ::mux::ui::request::close_manage{};
+    }
+  };
+  static auto room_header(const palette& colours, std::string name, back_it back, close_it close, bool has_back) {
+    namespace c = skiff::compose;
+    auto header = page_header<back_it, close_it>(colours, std::move(name), back, close, has_back, true);
+    return c::row(c::hbox(12.0f, {.fillX = true, .height = kPageHeaderHeight, .padding = {0.0f, 10.0f, 0.0f, 10.0f}}),
+        std::move(std::get<0>(header.fParts)), c::onPress(back, std::move(std::get<1>(header.fParts))), std::move(std::get<2>(header.fParts)));
+  }
+  using header_t = decltype(room_header(std::declval<const palette&>(), "", back_it{}, close_it{}, false));
+  static auto body_row(context_type* box, page_t first) {
+    namespace c = skiff::compose;
+    return c::row(c::hbox(0.0f, {.fillX = true, .grow = scene::axes::kY}), tab_list(box),
+        c::column(c::vbox(0.0f, {.fillY = true, .relativeSize = scene::axes::kY, .grow = scene::axes::kX,
+                                 .background = box->colours_->background}),
+            c::visible(box->presentation.page_header, room_header(*box->colours_, "General", {box->owner}, {box->owner}, false)),
+            c::styled({.fillX = true, .relativeSize = scene::axes::kX, .grow = scene::axes::kY},
+                nodes::ScrollContainer<page_holder_t>(page_holder(std::move(first))))));
+  }
+  using body_row_t = decltype(body_row(std::declval<context_type*>(), std::declval<page_t>()));
+  struct parts_t { header_t header; body_row_t body; } parts;
+  bool narrow = false, navigation = false, picked = false;
+  float measured_width = 0.0f;
 
   settings_tab_t tab = settings_tab::general{};
   // What each protocol keeps while its pages are made again -- Matrix's: an
   // encryption being confirmed, the level being picked -- in the list's order.
-  typename protocol_lists<protocols>::parts protocol_parts;
   // A tab to be made again, at the next frame: not from inside a press on
   // what it replaces.
   bool rebuild_due = false;
@@ -649,28 +701,47 @@ template <class Actions> struct room_settings : skiff::compose::Stacked {
   room_settings(const ui_needs<Actions>& n, const room_settings_facts& shown) : room_settings(n.colours, n.looks, shown) {}
   room_settings(const palette *colours, const looks_shown *looks,
                 const room_settings_facts &shown)
-      : Stacked(skiff::compose::vbox(0.0f, {.fill = true})), colours_(colours),
-        looks_(looks), facts(shown),
-        parts{.header = page_header<no_back, close_it>(*colours, "Room Settings - " + shown.name, {},
-                                 {}, false, true),
+      : Stacked(skiff::compose::vbox(0.0f, {.fill = true})), context{this, colours, looks, shown}, colours_(context.colours_),
+        looks_(context.looks_), facts(context.facts),
+        parts{.header = room_header(*colours, "Room Settings - " + shown.name, {this}, {this}, false),
               .body =
-                  body_row(this, page_t(std::in_place_index<0>, room_general_page(*colours, shown)))} {
-    parts.body.parts.tabs.show(tab);
+                  body_row(&context, page_t(std::in_place_index<0>, room_general_page(*colours, shown)))} {
+    parts.header.setVisible(!context.presentation.page_header);
+    this->apply({.cornerRadius = std::max(10.0f, colours_->widgets.fCorner), .background = colours_->background, .masking = true});
+    tab = spl::visit([](auto tag) -> settings_tab_t { return initial_manage_tab(state_of<decltype(tag)>{}); }, facts.speaks);
+    this->rebuild();
   }
 
-  [[nodiscard]] page_holder& holder() { return std::get<0>(parts.body.parts.content.fChildren); }
-  // What a protocol keeps here: by its state type.
-  template <class State>
-  [[nodiscard]] auto& part() {
-    return std::get<index_in<proto::id<State>>(protocols{})>(protocol_parts);
+  [[nodiscard]] auto& tabs() { return std::get<0>(parts.body.fParts); }
+  [[nodiscard]] auto& pane() { return std::get<1>(parts.body.fParts); }
+  [[nodiscard]] auto& content() { return std::get<1>(pane().fParts); }
+  [[nodiscard]] auto& pane_header() { return std::get<0>(pane().fParts); }
+  [[nodiscard]] page_holder_t& holder() { return std::get<0>(content().fChildren); }
+  [[nodiscard]] page_t& page() { return std::get<0>(holder().fParts); }
+  void show_navigation() {
+    navigation = true;
+    this->arrange_navigation();
+    this->markDamaged();
   }
-  template <class Tag, class... Tags>
-  static constexpr std::size_t index_in(protocol_list<Tags...>) {
-    constexpr std::array<bool, sizeof...(Tags)> is{std::derived_from<Tag, Tags>...};
-    return static_cast<std::size_t>(std::ranges::find(is, true) - is.begin());
+  void arrange_navigation() {
+    const bool menu = !narrow || navigation;
+    tabs().setVisible(menu);
+    tabs().apply({.width = narrow ? measured_width : context.presentation.navigation_width});
+    std::get<2>(std::get<0>(tabs().fParts).fParts).setVisible(narrow && navigation);
+    pane().setVisible(!narrow || !navigation);
+    content().setVisible(!narrow || !navigation);
+    std::get<0>(parts.header.fParts).setVisible(narrow && !navigation);
+    using manage_defaults::manage_editor_header;
+    const bool editor_header = spl::visit([&](auto tab) {
+      return std::apply([&](const auto&... part) { return (manage_editor_header(tab, part) || ...); }, context.protocol_parts);
+    }, tab);
+    std::get<0>(pane_header().fParts).setVisible(editor_header || (narrow && !navigation));
+    std::get<1>(pane_header().fParts).apply({.disabled = !editor_header});
+    this->invalidateLayout();
   }
-  // A tab shown, made from the facts as they now are -- at the next frame.
+  // A tab shown from current facts at the next frame.
   void show_tab(const settings_tab_t& to) {
+    spl::visit([](auto& page) { preserve_manage_input(page); }, page());
     tab = to;
     rebuild_due = true;
     this->markDamaged();
@@ -679,24 +750,45 @@ template <class Actions> struct room_settings : skiff::compose::Stacked {
   void show_again() { this->show_tab(tab); }
   [[nodiscard]] bool settling() const { return rebuild_due; }
   void update(double) {
+    const auto width = parts.body.fState.contentBox().width();
+    if (width > 0.0f && width != measured_width) {
+      measured_width = width;
+      const bool phone = width < 560.0f;
+      if (phone && !narrow && !picked) navigation = true;
+      narrow = phone;
+      this->arrange_navigation();
+    }
     if (std::exchange(rebuild_due, false))
       this->rebuild();
   }
   void rebuild() {
     const settings_tab_t to = tab;
-    auto& page = holder().parts.page;
+    auto& page = this->page();
     spl::visit(spl::overloaded{
-                      [&](settings_tab::general) { page.template emplace<room_general_page_t>(room_general_page(*colours_, facts)); },
+                      [&](settings_tab::general) { page.template emplace<room_general_page_t>(room_general_page(*colours_, facts, context.presentation.page_header)); },
                       [&](settings_tab::notifications) { page.template emplace<notifications_page>(this, facts); },
                       [&](settings_tab::looks) { page.template emplace<looks_page>(this, facts); },
-                      // A protocol's tab: the page its page_type() gives.
-                      [&](auto theirs) { page.template emplace<page_of_t<decltype(theirs)>>(this, facts); }},
+                      // Protocol pages may be made with combinators or an existing node.
+                      [&](auto theirs) {
+                        if constexpr (requires { make_manage_page(theirs, &context, facts); })
+                          page.template emplace<page_of_t<decltype(theirs)>>(make_manage_page(theirs, &context, facts));
+                        else page.template emplace<page_of_t<decltype(theirs)>>(&context, facts);
+                      }},
                   to);
-    parts.body.parts.tabs.show(tab);
+    std::get<1>(pane_header().fParts).setText(spl::visit(spl::overloaded{[&](settings_tab::general) { return spl::visit([](auto tag) { return std::string(preferences_title(state_of<decltype(tag)>{})); }, facts.speaks); }, [](auto one) { return std::string(tab_title(one)); }}, tab));
+    std::get<1>(pane_header().fParts).setFontSize(20.0f);
+    std::ranges::for_each(tab_rows(tabs()), [&](auto* row) {
+      const bool selected = !navigation && row->fMake.tab.index() == tab.index();
+      row->apply({.selected = selected});
+      std::get<1>(row->fParts).setBold(selected);
+    });
+    this->arrange_navigation();
     if (std::exchange(to_top, false))
-      parts.body.parts.content.scrollTo(0.0f);
+      content().scrollTo(0.0f);
     this->invalidateLayout();
   }
 };
+
+template <class Actions> void room_settings_context<Actions>::show_again() { owner->show_again(); }
 
 }  // namespace mux::ui

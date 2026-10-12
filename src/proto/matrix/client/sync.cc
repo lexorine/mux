@@ -23,6 +23,7 @@ import loom.cs.redaction;
 import loom.cs.room_send;
 import loom.cs.rooms;
 import loom.cs.sync;
+import loom.cs.filter;
 import loom.cs.typing;
 import loom.cs.wellknown;
 import mux.config;
@@ -98,7 +99,7 @@ auto account<Sink>::homeserver() -> std::optional<http::url> {
 // /sync's reads it as it is. A plain function from the one type to the
 // other. Receipts, typing and account data of rooms the answer does not
 // carry are left out: a room comes in with them once it is in the window.
-inline loom::cs::sync::response legacy_of(const loom::cs::sliding_sync::response& got, std::string_view user) {
+inline loom::cs::sync::response legacy_of(loom::cs::sliding_sync::response&& got, std::string_view user) {
   using response = loom::cs::sync::response;
   using joined_t = response::rooms_t::joined_room_t;
   using invited_t = response::rooms_t::invited_room_t;
@@ -131,24 +132,24 @@ inline loom::cs::sync::response legacy_of(const loom::cs::sliding_sync::response
     return out_of_it;
   };
   if (got.rooms)
-    for (const auto& [id, room] : *got.rooms) {
+    for (auto& [id, room] : *got.rooms) {
       if (gone(room)) {
         leave.emplace(id, left_t{});
         continue;
       }
       if (room.invite_state) {
         invited_t one;
-        one.invite_state = invited_t::invite_state_t{.events = *room.invite_state};
+        one.invite_state = invited_t::invite_state_t{.events = std::move(*room.invite_state)};
         invite.emplace(id, std::move(one));
         continue;
       }
       joined_t one;
       if (room.required_state)
-        one.state = joined_t::state_t{.events = *room.required_state};
+        one.state = joined_t::state_t{.events = std::move(*room.required_state)};
       if (room.timeline || room.limited || room.prev_batch)
         one.timeline = joined_t::timeline_t{.limited = room.limited,
                                             .prev_batch = room.prev_batch,
-                                            .events = room.timeline.value_or(std::vector<loom::ev::timeline_event>{})};
+                                            .events = std::move(room.timeline).value_or(std::vector<loom::ev::timeline_event>{})};
       if (room.heroes || room.joined_count || room.invited_count)
         one.summary = joined_t::room_summary_t{
             .m_heroes = room.heroes ? std::optional(std::ranges::to<std::vector>(std::views::transform(*room.heroes, [](const auto& hero) { return hero.user_id; })))
@@ -161,25 +162,25 @@ inline loom::cs::sync::response legacy_of(const loom::cs::sliding_sync::response
       join.emplace(id, std::move(one));
     }
   if (got.extensions) {
-    const auto& extensions = *got.extensions;
+    auto& extensions = *got.extensions;
     if (extensions.account_data) {
       if (extensions.account_data->global)
-        out.account_data = response::account_data_t{.events = *extensions.account_data->global};
+        out.account_data = response::account_data_t{.events = std::move(*extensions.account_data->global)};
       if (extensions.account_data->rooms)
-        for (const auto& [id, events] : *extensions.account_data->rooms)
+        for (auto& [id, events] : *extensions.account_data->rooms)
           if (const auto in = join.find(id); in != join.end())
-            in->second.account_data = joined_t::account_data_t{.events = events};
+            in->second.account_data = joined_t::account_data_t{.events = std::move(events)};
     }
-    const auto ephemeral = [&](const auto& part) {
+    const auto ephemeral = [&](auto& part) {
       if (part && part->rooms)
-        for (const auto& [id, event] : *part->rooms)
+        for (auto& [id, event] : *part->rooms)
           if (const auto in = join.find(id); in != join.end()) {
             auto& kept = in->second.ephemeral;
             if (!kept)
               kept.emplace();
             if (!kept->events)
               kept->events.emplace();
-            kept->events->push_back(event);
+            kept->events->push_back(std::move(event));
           }
     };
     ephemeral(extensions.receipts);
@@ -565,6 +566,22 @@ void account<Sink>::run() {
 
   std::chrono::seconds backoff(1);
   while (!stopping_) {
+    // MSC4186 has no presence extension. A room-free classic sync supplies
+    // a presence snapshot. Never advance its cursor: /sync also carries
+    // to-device messages, and acknowledging them here could discard keys
+    // before the sliding sync's encryption extension receives them.
+    if (sliding_ && api_) {
+      using filter = loom::cs::define_filter::filter_t;
+      static const auto presence_filter = knot::to_json_string(filter{
+          .presence = filter::event_filter_t{.types = std::vector<std::string>{"m.presence"}},
+          .account_data = filter::event_filter_2_t{.types = std::vector<std::string>{}},
+          .room = filter::room_filter_t{.rooms = std::vector<std::string>{}}});
+      auto presences = perform(*api_, loom::cs::sync{
+          .filter = presence_filter, .set_presence = chosen_presence_, .timeout = 0}, std::chrono::seconds(15));
+      if (presences) tell_presence(*presences);
+      if (stopping_) return;
+    }
+
     // Lighter than the server's whole state: a room's last messages (the
     // rest is paged back to) and only the members who speak in them. The
     // first sync still gathers every room, and on a large account the
@@ -592,6 +609,7 @@ void account<Sink>::run() {
         return perform(syncing,
                        loom::cs::sync{.filter = std::string(kFilter),
                                       .since = state_.since,
+                                      .set_presence = chosen_presence_,
                                       .timeout = first ? 0 : how_.sync_timeout.count()},
                        first ? std::chrono::seconds(600)
                              : std::chrono::duration_cast<std::chrono::seconds>(how_.sync_timeout) +
@@ -599,7 +617,7 @@ void account<Sink>::run() {
       loom::cs::sliding_sync ask{.pos = sliding_pos_, .timeout = sliding_first ? 0 : how_.sync_timeout.count()};
       ask.body.lists.emplace("all", loom::cs::sliding_sync::body_t::list_t{.ranges = {{0, sliding_range_ - 1}},
                                                                              .required_state = kRequiredState,
-                                                                             .timeline_limit = 20});
+                                                                             .timeline_limit = 1});
       // The room being read: more of its newest, wherever it is in the list.
       if (followed_room_)
         ask.body.room_subscriptions = std::map<std::string, loom::cs::sliding_sync::body_t::subscription_t>{
@@ -626,7 +644,7 @@ void account<Sink>::run() {
         if (const auto all = slid->lists->find("all"); all != slid->lists->end() && all->second.count &&
                                                        *all->second.count > sliding_range_)
           sliding_range_ = std::min(*all->second.count, sliding_range_ + 200);
-      return legacy_of(*slid, id_.address);
+      return legacy_of(std::move(*slid), id_.address);
     }();
     if (!got) {
       const failure& why = got.error();
@@ -726,9 +744,11 @@ bool account<Sink>::save_kept() const {
     return false;
   using response = loom::cs::sync::response;
   using joined_t = response::rooms_t::joined_room_t;
-  response out;
-  out.next_batch = *state_.since;
-  std::map<std::string, joined_t> join;
+  // Serialize one room at a time instead of duplicating every typed event
+  // in the account while the complete JSON checkpoint is also being built.
+  std::string checkpoint = "{\"next_batch\":" + knot::to_json_string(*state_.since) +
+                           ",\"rooms\":{\"join\":{";
+  bool comma = false;
   for (const auto& [room, kept] : state_.joined) {
     joined_t one;
     std::vector<loom::ev::timeline_event> state_events;
@@ -745,17 +765,22 @@ bool account<Sink>::save_kept() const {
     for (const auto& [type, event] : kept.account_data)
       data.push_back(event);
     one.account_data = joined_t::account_data_t{.events = std::move(data)};
-    join.emplace(room, std::move(one));
+    if (std::exchange(comma, true))
+      checkpoint += ',';
+    checkpoint += knot::to_json_string(room);
+    checkpoint += ':';
+    checkpoint += knot::to_json_string(one);
   }
-  out.rooms = response::rooms_t{.join = std::move(join)};
+  checkpoint += "}},\"account_data\":";
   std::vector<loom::client::other_event> data;
   for (const auto& [type, event] : state_.account_data)
     data.push_back(event);
-  out.account_data = response::account_data_t{.events = std::move(data)};
+  checkpoint += knot::to_json_string(response::account_data_t{.events = std::move(data)});
+  checkpoint += '}';
   // Through the vault: the rooms' events and state, sealed where local data
   // is encrypted.
   const std::filesystem::path where = this->kept_file();
-  if (!how_.vault->write_file(where, knot::to_json_string(out))) {
+  if (!how_.vault->write_file(where, checkpoint)) {
     log(id_, "the sync could not be kept in {}", where.string());
     return false;
   }
@@ -888,10 +913,7 @@ void account<Sink>::receive_notifications(const loom::ev::account_data_event& ev
 }
 
 template <class Sink>
-void account<Sink>::tell(const loom::cs::sync::response& got) {
-  if (got.account_data && got.account_data->events)
-    for (const auto& event : *got.account_data->events) receive_notifications(event);
-  flush_notifications();
+void account<Sink>::tell_presence(const loom::cs::sync::response& got) {
   // Presence: each m.presence is sent by the user it is about.
   if (got.presence && got.presence->events)
     for (const auto& event : *got.presence->events)
@@ -901,6 +923,14 @@ void account<Sink>::tell(const loom::cs::sync::response& got) {
                               },
                               [](const auto&) {}},
                    event.content.data());
+}
+
+template <class Sink>
+void account<Sink>::tell(const loom::cs::sync::response& got) {
+  if (got.account_data && got.account_data->events)
+    for (const auto& event : *got.account_data->events) receive_notifications(event);
+  flush_notifications();
+  tell_presence(got);
   const auto affects_packs = [](const auto& event) {
     return spl::visit(spl::overloaded{
         [](const loom::ev::im_ponies_user_emotes_content_t&) { return true; },
@@ -910,6 +940,8 @@ void account<Sink>::tell(const loom::cs::sync::response& got) {
         [](const loom::ev::m_room_image_pack_content_t&) { return true; },
         [](const loom::ev::m_space_parent_content_t&) { return true; },
         [](const loom::ev::m_space_child_content_t&) { return true; },
+        // A redaction can remove the contents of a retained pack event.
+        [](const loom::ev::m_room_redaction_content_t&) { return true; },
         [](const auto&) { return false; }}, event.content.data());
   };
   const bool account_packs = got.account_data && got.account_data->events && std::ranges::any_of(*got.account_data->events, affects_packs);
@@ -922,6 +954,10 @@ void account<Sink>::tell(const loom::cs::sync::response& got) {
   });
   // A space pack or an account subscription changes other rooms too, even
   // when those rooms have no events in this sync response.
+  // Existing lists stay alive in the model and mailbox while replacements
+  // are prepared; discard cached expansions whenever their sources change.
+  if (account_packs || room_packs || (got.rooms && got.rooms->leave && !got.rooms->leave->empty()))
+    emote_lists_.clear();
   const bool account_metadata = got.account_data && got.account_data->events &&
       std::ranges::any_of(*got.account_data->events, [](const auto& event) { return event.type == "m.direct"; });
   const bool all_metadata = account_metadata || account_packs || room_packs;
@@ -1192,56 +1228,66 @@ void account<Sink>::conversation(const conversation_id& in, const loom::client::
 // the user's own, the room's, and those taken everywhere -- as emoji, or
 // asked for stickers, as those.
 template <class Sink>
-auto account<Sink>::emotes_of(const loom::client::joined_room& kept, bool stickers) const -> std::vector<mux::emote> {
-  const loom::client::image_use_t use = stickers ? loom::client::image_use_t{loom::client::image_use::sticker{}}
-                                                 : loom::client::image_use_t{loom::client::image_use::emoticon{}};
-  const auto read = [&](const auto& content, std::optional<std::string> room, const std::string& key) {
-    std::vector<loom::client::pack_image> images;
-    loom::client::detail::add_packs_of(content, use, images);
-    return std::ranges::to<std::vector>(std::views::transform(images, [&](auto& one) {
-      return mux::emote{.shortcode = std::move(one.shortcode), .url = std::move(one.url),
-                        .body = std::move(one.body), .w = one.w, .h = one.h, .size = one.size,
-                        .mimetype = std::move(one.mimetype), .pack = std::move(one.pack),
-                        .pack_avatar = std::move(one.pack_avatar), .pack_room = room, .pack_key = key};
-    }));
-  };
-  std::vector<mux::emote> out;
-  const auto append = [&](auto images) {
-    // The same source may be inherited and subscribed; keep it once.
-    std::ranges::for_each(images, [&](auto& one) {
-      if (!std::ranges::any_of(out, [&](const auto& old) {
-        return std::tie(old.pack_room, old.pack_key, old.shortcode) == std::tie(one.pack_room, one.pack_key, one.shortcode);
-      }))
-        out.push_back(std::move(one));
-    });
+auto account<Sink>::emotes_of(const loom::client::joined_room& kept, bool stickers) const -> mux::emote_list {
+  // Preserve source order for shortcode precedence, but expand identical
+  // source sets only once across rooms and across metadata-only syncs.
+  pack_sources sources;
+  std::set<pack_source> seen_sources;
+  const auto add_source = [&](const auto& event, std::optional<std::string> room, const std::string& key) {
+    if (event.type != "im.ponies.user_emotes" && event.type != "im.ponies.room_emotes" &&
+        event.type != "m.room.image_pack")
+      return;
+    pack_source source{std::move(room), event.type, key};
+    if (seen_sources.insert(source).second)
+      sources.push_back(std::move(source));
   };
   if (const auto own = state_.account_data.find("im.ponies.user_emotes"); own != state_.account_data.end())
-    append(read(own->second.content.data(), std::nullopt, ""));
-  std::ranges::for_each(pack_rooms(state_, kept), [&](const std::string& room) {
-    std::ranges::for_each(state_.joined.at(room).state.events, [&](const auto& event) {
-      append(read(event.second.content.data(), room, event.first.second));
-    });
-  });
+    add_source(own->second, std::nullopt, "");
+  for (const std::string& room : pack_rooms(state_, kept))
+    for (const auto& [key, event] : state_.joined.at(room).state.events)
+      add_source(event, room, key.second);
   const auto subscribed = [&](const auto& rooms) {
-    std::ranges::for_each(rooms, [&](const auto& subscription) {
-      if (const auto joined = state_.joined.find(subscription.first); joined != state_.joined.end())
-        std::ranges::for_each(joined->second.state.events, [&](const auto& event) {
-          if (subscription.second.contains(event.first.second))
-            append(read(event.second.content.data(), subscription.first, event.first.second));
-        });
-    });
+    for (const auto& [room, keys] : rooms)
+      if (const auto joined = state_.joined.find(room); joined != state_.joined.end())
+        for (const auto& [key, event] : joined->second.state.events)
+          if (keys.contains(key.second))
+            add_source(event, room, key.second);
   };
-  std::ranges::for_each(state_.account_data, [&](const auto& event) {
+  for (const auto& [type, event] : state_.account_data)
     spl::visit(spl::overloaded{
         [&](const loom::ev::im_ponies_emote_rooms_content_t& content) { subscribed(content.rooms); },
         [&](const loom::ev::m_image_pack_rooms_content_t& content) { subscribed(content.rooms); },
-        [](const auto&) {}}, event.second.content.data());
-  });
-  return out;
+        [](const auto&) {}}, event.content.data());
+  const auto cache_key = std::pair{stickers, std::move(sources)};
+  if (const auto found = emote_lists_.find(cache_key); found != emote_lists_.end())
+    return found->second;
+
+  const loom::client::image_use_t use = stickers ? loom::client::image_use_t{loom::client::image_use::sticker{}}
+                                                 : loom::client::image_use_t{loom::client::image_use::emoticon{}};
+  std::vector<mux::emote> out;
+  std::set<std::tuple<std::optional<std::string>, std::string, std::string>> seen_images;
+  const auto append = [&](const auto& content, const std::optional<std::string>& room, const std::string& key) {
+    std::vector<loom::client::pack_image> images;
+    loom::client::detail::add_packs_of(content, use, images);
+    out.reserve(out.size() + images.size());
+    for (auto& one : images)
+      if (seen_images.emplace(room, key, one.shortcode).second)
+        out.push_back(mux::emote{.shortcode = std::move(one.shortcode), .url = std::move(one.url),
+                                 .body = std::move(one.body), .w = one.w, .h = one.h, .size = one.size,
+                                 .mimetype = std::move(one.mimetype), .pack = std::move(one.pack),
+                                 .pack_avatar = std::move(one.pack_avatar), .pack_room = room, .pack_key = key});
+  };
+  for (const auto& [room, type, key] : cache_key.second) {
+    if (!room)
+      append(state_.account_data.at(type).content.data(), room, key);
+    else
+      append(state_.joined.at(*room).state.events.at(std::pair{type, key}).content.data(), room, key);
+  }
+  return emote_lists_.emplace(cache_key, mux::emote_list{std::move(out)}).first->second;
 }
 
 template <class Sink>
-auto account<Sink>::emotes_in(const std::string& room) const -> std::vector<mux::emote> {
+auto account<Sink>::emotes_in(const std::string& room) const -> mux::emote_list {
   if (const auto kept = state_.joined.find(room); kept != state_.joined.end())
     return emotes_of(kept->second);
   return {};
